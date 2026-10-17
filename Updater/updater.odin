@@ -1,15 +1,14 @@
 package updater
 
 // SaberUpdater: pulls the latest GitHub release of Saber into the folder it lives in (APP/).
-// The release must carry a manifest.ini asset:
-//     version=1.4.0
-//     Saber.exe=<sha256 hex>
-//     SaberFlasher.exe=<sha256 hex>
-// Only the exes in UPDATABLE are ever replaced; any other manifest entry is ignored.
+// The release needs one asset named SaberLauncher-*.zip (built by make_release_zip.bat);
+// the release tag is the version. GitHub supplies the zip's sha256 through its API.
+// Only the exes in UPDATABLE are ever taken from the zip; nothing else is touched.
 
 import "core:crypto/hash"
 import "core:encoding/hex"
 import "core:encoding/ini"
+import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
@@ -20,6 +19,15 @@ import win "core:sys/windows"
 DEFAULT_REPO :: "StudioSyndiCatCaius/SaberLauncher" // override with repo= in SaberUpdater.ini
 SELF_NAME :: "SaberUpdater.exe"
 UPDATABLE :: [?]string{"Saber.exe", "SaberFlasher.exe", SELF_NAME}
+
+Release :: struct {
+	tag_name: string,
+	assets:   []struct {
+		name:                 string,
+		browser_download_url: string,
+		digest:               string, // "sha256:<hex>"
+	},
+}
 
 main :: proc() {
 	ok := run()
@@ -48,20 +56,25 @@ run :: proc() -> bool {
 		if s, has := v["version"]; has do local_version = s
 	}
 
-	base := fmt.aprintf("/%s/releases/latest/download/", repo)
 	fmt.printfln("Checking github.com/%s ...", repo)
-	manifest_data, mok := http_get("github.com", strings.concatenate({base, "manifest.ini"}))
-	if !mok {
-		fmt.eprintln("Could not download manifest.ini (no release yet, or offline?)")
+	release_json, rok := http_get("api.github.com", fmt.tprintf("/repos/%s/releases/latest", repo))
+	release: Release
+	if !rok || json.unmarshal(release_json, &release) != nil {
+		fmt.eprintln("Could not read the latest release (no release yet, or offline?)")
 		return false
 	}
-	manifest := parse_kv(string(manifest_data))
-	remote_version, has_version := manifest["version"]
-	if !has_version {
-		fmt.eprintln("manifest.ini has no version=")
+	url, digest: string
+	for a in release.assets {
+		if strings.has_prefix(a.name, "SaberLauncher") && strings.has_suffix(a.name, ".zip") {
+			url, digest = a.browser_download_url, a.digest
+			break
+		}
+	}
+	if url == "" {
+		fmt.eprintln("Latest release has no SaberLauncher-*.zip asset")
 		return false
 	}
-	delete_key(&manifest, "version")
+	remote_version := strings.trim_prefix(release.tag_name, "v")
 
 	fmt.printfln("Installed: %s   Latest: %s", local_version, remote_version)
 	if compare_versions(remote_version, local_version) <= 0 && !has_arg("--force") {
@@ -72,16 +85,7 @@ run :: proc() -> bool {
 		return true
 	}
 
-	// Validate names and check nothing we replace is running, before touching anything.
-	names := make([dynamic]string)
-	for name in manifest {
-		if name != filepath.base(name) || strings.contains_any(name, "/\\:") || name == "manifest.ini" {
-			fmt.eprintln("Refusing suspicious file name in manifest:", name)
-			return false
-		}
-		append(&names, name)
-	}
-	for name in names {
+	for name in UPDATABLE {
 		if name == SELF_NAME do continue // a running exe can still be renamed
 		if is_locked(join(dir, name)) {
 			fmt.eprintfln("%s is running. Close it and try again.", name)
@@ -89,26 +93,45 @@ run :: proc() -> bool {
 		}
 	}
 
-	// Download everything to *.new first; nothing is replaced unless all of it verifies.
-	for name in names {
-		fmt.printfln("Downloading %s ...", name)
-		data, ok := http_get("github.com", strings.concatenate({base, name}))
-		if !ok {
-			fmt.eprintln("Download failed:", name)
-			remove_news(dir, names[:])
+	fmt.println("Downloading", url, "...")
+	host, path := split_url(url)
+	zip_data, zok := http_get(host, path)
+	if !zok {
+		fmt.eprintln("Download failed")
+		return false
+	}
+	if strings.has_prefix(digest, "sha256:") {
+		expected := digest[len("sha256:"):]
+		if !strings.equal_fold(string(hex.encode(hash.hash_bytes(.SHA256, zip_data))), expected) {
+			fmt.eprintln("Checksum mismatch, download is corrupt")
 			return false
 		}
-		digest := hex.encode(hash.hash_bytes(.SHA256, data))
-		if !strings.equal_fold(string(digest), strings.trim_space(manifest[name])) {
-			fmt.eprintln("Checksum mismatch:", name)
-			remove_news(dir, names[:])
-			return false
-		}
+	} else {
+		fmt.println("(GitHub gave no checksum; relying on the zip's CRCs)")
+	}
+
+	// Extract to *.new first; nothing is replaced unless every exe unpacks cleanly.
+	updatable := UPDATABLE
+	files, zerr := zip_extract(zip_data, updatable[:])
+	if zerr != "" {
+		fmt.eprintln("Bad zip:", zerr)
+		return false
+	}
+	names := make([dynamic]string)
+	for name in UPDATABLE {
+		data, has := files[name]
+		if !has do continue
 		if err := os.write_entire_file(join(dir, strings.concatenate({name, ".new"})), data); err != nil {
 			fmt.eprintln("Cannot write", name, err)
 			remove_news(dir, names[:])
+			_ = os.remove(join(dir, strings.concatenate({name, ".new"})))
 			return false
 		}
+		append(&names, name)
+	}
+	if len(names) == 0 {
+		fmt.eprintln("Zip contains none of Saber.exe, SaberFlasher.exe, SaberUpdater.exe")
+		return false
 	}
 
 	// Swap: name -> name.old, name.new -> name. Roll back on any failure.
@@ -212,4 +235,12 @@ confirm :: proc(prompt: string) -> bool {
 join :: proc(a, b: string) -> string {
 	p, _ := filepath.join({a, b})
 	return p
+}
+
+// "https://host/path" -> host, "/path"
+split_url :: proc(url: string) -> (host, path: string) {
+	rest := strings.trim_prefix(url, "https://")
+	i := strings.index_byte(rest, '/')
+	if i < 0 do return rest, "/"
+	return rest[:i], rest[i:]
 }

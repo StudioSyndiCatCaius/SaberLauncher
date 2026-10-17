@@ -1,7 +1,8 @@
 @echo off
-rem Builds everything, writes dist\ (exes + manifest.ini) and, with "publish", uploads a GitHub release.
-rem   release.bat            build + stage only
-rem   release.bat publish    also run: gh release create v<VERSION>
+rem Builds everything and stamps APP\version.ini from VERSION.
+rem   release.bat            build only (make_release_zip.bat calls this, then packs dist\*.zip)
+rem   release.bat publish    also upload dist\SaberLauncher-v<VERSION>.zip as release <VERSION>
+rem SaberUpdater only needs that zip on the release; the tag is the version.
 setlocal
 cd /d "%~dp0"
 set REPO=StudioSyndiCatCaius/SaberLauncher
@@ -13,18 +14,8 @@ call Flasher\build.bat || exit /b 1
 call Updater\build.bat || exit /b 1
 > APP\version.ini echo version=%VERSION%
 
-if exist dist rmdir /s /q dist
-mkdir dist
-> dist\manifest.ini echo version=%VERSION%
-for %%F in (Saber.exe SaberFlasher.exe SaberUpdater.exe) do (
-	copy /Y APP\%%F dist\%%F >nul
-	for /f %%H in ('powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 'dist\%%F').Hash"') do >> dist\manifest.ini echo %%F=%%H
-)
-type dist\manifest.ini
-
-if /i not "%1"=="publish" (
-	echo Staged dist\ for v%VERSION%. Run "release.bat publish" to upload.
-	exit /b 0
-)
-gh release create v%VERSION% dist\Saber.exe dist\SaberFlasher.exe dist\SaberUpdater.exe dist\manifest.ini --repo %REPO% --title "Saber %VERSION%" --generate-notes || exit /b 1
-echo Published v%VERSION%
+if /i not "%1"=="publish" exit /b 0
+set ZIP=dist\SaberLauncher-v%VERSION%.zip
+if not exist %ZIP% echo %ZIP% missing, run make_release_zip.bat first & exit /b 1
+gh release create %VERSION% %ZIP% --repo %REPO% --title "Saber %VERSION%" --generate-notes || exit /b 1
+echo Published %VERSION%

@@ -12,3 +12,6 @@ AGENTS.md
 # Odin/MSVC debug output
 *.pdb
 *.ilk
+
+# local release packaging
+/make_release_zip.bat
