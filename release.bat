@@ -4,7 +4,7 @@ rem   release.bat            build + stage only
 rem   release.bat publish    also run: gh release create v<VERSION>
 setlocal
 cd /d "%~dp0"
-set REPO=OWNER/SaberLauncher
+set REPO=StudioSyndiCatCaius/SaberLauncher
 set /p VERSION=<VERSION
 if "%VERSION%"=="" echo VERSION file missing & exit /b 1
 

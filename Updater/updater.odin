@@ -5,7 +5,7 @@ package updater
 //     version=1.4.0
 //     Saber.exe=<sha256 hex>
 //     SaberFlasher.exe=<sha256 hex>
-// Every `<file>=<hash>` line is an asset downloaded from the same release.
+// Only the exes in UPDATABLE are ever replaced; any other manifest entry is ignored.
 
 import "core:crypto/hash"
 import "core:encoding/hex"
@@ -17,8 +17,9 @@ import "core:strconv"
 import "core:strings"
 import win "core:sys/windows"
 
-DEFAULT_REPO :: "OWNER/SaberLauncher" // override with repo= in SaberUpdater.ini
+DEFAULT_REPO :: "StudioSyndiCatCaius/SaberLauncher" // override with repo= in SaberUpdater.ini
 SELF_NAME :: "SaberUpdater.exe"
+UPDATABLE :: [?]string{"Saber.exe", "SaberFlasher.exe", SELF_NAME}
 
 main :: proc() {
 	ok := run()
