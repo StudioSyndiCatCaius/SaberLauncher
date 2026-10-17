@@ -1,0 +1,14 @@
+AGENTS.md
+
+/APP
+
+# release staging (release.bat)
+/dist/
+
+# Lua static lib build (rebuilt by Flasher/build.bat)
+/Flasher/lua/obj/
+/Flasher/lua/lua54_static.lib
+
+# Odin/MSVC debug output
+*.pdb
+*.ilk
