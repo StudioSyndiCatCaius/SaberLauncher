@@ -18,7 +18,11 @@ GOG_GUESSES :: []string {
 	`D:\GOG Galaxy\Games`,
 }
 
-saved_gog: string // last value written to disk, to save on change
+saved_gog: string // snapshot of the settings last written to disk, to save on change
+
+settings_snapshot :: proc() -> string {
+	return fmt.tprintf("%s|%s|%s", field_str(&fields[F_GOG]), field_str(&fields[F_SIMPRETRO]), field_str(&fields[F_BIOS]))
+}
 
 Gog_Install :: struct {
 	name, path: string, // temp-allocated
@@ -180,6 +184,9 @@ draw_settings_page :: proc() {
 		pill(ix, sy, "Folder not found", COL_DANGER, IC_WARN)
 	}
 
-	// persist whenever it changes
-	if gog != saved_gog && focused != &fields[F_GOG] do save_settings()
+	draw_emulator_settings(r.y + r.height + 20)
+
+	// persist whenever something changes (not mid-typing)
+	editing := focused == &fields[F_GOG] || focused == &fields[F_SIMPRETRO] || focused == &fields[F_BIOS]
+	if settings_snapshot() != saved_gog && !editing do save_settings()
 }

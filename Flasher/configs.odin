@@ -44,27 +44,32 @@ load_settings :: proc() {
 	if err != nil {
 		append(&sources, strings.clone(DEFAULT_SOURCE))
 		if g, ok := detect_gog(); ok do field_set(&fields[F_GOG], g)
+		if sp, ok := detect_simpretro(); ok do field_set(&fields[F_SIMPRETRO], sp)
 		return
 	}
 	for line in strings.split_lines(string(data), context.temp_allocator) {
 		k, _, v := strings.partition(line, "=")
 		k, v = strings.trim_space(k), strings.trim_space(v)
 		if k == "source" && v != "" do append(&sources, strings.clone(v))
-		if k == "gog_dir" {
-			field_set(&fields[F_GOG], v)
-			saved_gog = strings.clone(v)
-		}
+		if k == "gog_dir" do field_set(&fields[F_GOG], v)
+		if k == "simpretro_dir" do field_set(&fields[F_SIMPRETRO], v)
+		if k == "bios_dir" do field_set(&fields[F_BIOS], v)
 	}
+	if field_str(&fields[F_SIMPRETRO]) == "" {
+		if sp, ok := detect_simpretro(); ok do field_set(&fields[F_SIMPRETRO], sp)
+	}
+	saved_gog = strings.clone(settings_snapshot())
 }
 
 save_settings :: proc() {
 	sb := strings.builder_make(context.temp_allocator)
 	strings.write_string(&sb, "[flasher]\n")
 	for s in sources do fmt.sbprintf(&sb, "source=%s\n", s)
-	gog := field_str(&fields[F_GOG])
-	fmt.sbprintf(&sb, "gog_dir=%s\n", gog)
+	fmt.sbprintf(&sb, "gog_dir=%s\n", field_str(&fields[F_GOG]))
+	fmt.sbprintf(&sb, "simpretro_dir=%s\n", field_str(&fields[F_SIMPRETRO]))
+	fmt.sbprintf(&sb, "bios_dir=%s\n", field_str(&fields[F_BIOS]))
 	delete(saved_gog)
-	saved_gog = strings.clone(gog)
+	saved_gog = strings.clone(settings_snapshot())
 	_ = os.write_entire_file(settings_path(), transmute([]u8)strings.to_string(sb))
 }
 

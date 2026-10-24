@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../../Github/SaberLauncherPreconfigs"
+		}
+	],
+	"settings": {
+		"ols.server.path": "C:\\Lang\\OLS\\ols-x86_64-pc-windows-msvc.exe",
+		"ols.prompt.AskCreateOLS": false
+	}
+}

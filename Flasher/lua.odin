@@ -25,6 +25,8 @@ foreign liblua {
 	luaL_openlibs :: proc(L: ^lua_State) ---
 	lua_close :: proc(L: ^lua_State) ---
 	luaL_loadfilex :: proc(L: ^lua_State, filename: cstring, mode: cstring) -> c.int ---
+	luaL_loadbufferx :: proc(L: ^lua_State, buf: [^]u8, size: c.size_t, name: cstring, mode: cstring) -> c.int ---
+	lua_rawgeti :: proc(L: ^lua_State, idx: c.int, n: i64) -> c.int ---
 	lua_pcallk :: proc(L: ^lua_State, nargs, nresults, errfunc: c.int, ctx: c.intptr_t, k: rawptr) -> c.int ---
 	lua_callk :: proc(L: ^lua_State, nargs, nresults: c.int, ctx: c.intptr_t, k: rawptr) ---
 	lua_gettop :: proc(L: ^lua_State) -> c.int ---

@@ -96,8 +96,9 @@ IC_ERASE :: rune(0xE75C)
 IC_SEARCH :: rune(0xE721)
 IC_DOWNLOAD :: rune(0xE896)
 IC_SETTINGS :: rune(0xE713)
+IC_DISC :: rune(0xE958)
 
-ICON_CODEPOINTS := [?]rune{IC_GAME, IC_PICTURE, IC_DRIVE, IC_USB, IC_FOLDER, IC_GLOBE, IC_CHECK, IC_WARN, IC_REFRESH, IC_CLOSE, IC_FLASH, IC_BACK, IC_NEXT, IC_OPEN, IC_ERASE, IC_SEARCH, IC_DOWNLOAD, IC_SETTINGS}
+ICON_CODEPOINTS := [?]rune{IC_GAME, IC_PICTURE, IC_DRIVE, IC_USB, IC_FOLDER, IC_GLOBE, IC_CHECK, IC_WARN, IC_REFRESH, IC_CLOSE, IC_FLASH, IC_BACK, IC_NEXT, IC_OPEN, IC_ERASE, IC_SEARCH, IC_DOWNLOAD, IC_SETTINGS, IC_DISC}
 
 FONT_REGULAR :: `C:\Windows\Fonts\segoeui.ttf`
 FONT_BOLD :: `C:\Windows\Fonts\seguisb.ttf`
@@ -484,8 +485,10 @@ F_URL :: 8
 F_SEARCH :: 9
 F_CONFIRM :: 10
 F_GOG :: 11
+F_SIMPRETRO :: 12
+F_BIOS :: 13
 
-fields: [12]Field
+fields: [14]Field
 
 Drive :: struct {
 	letter:    u8,
@@ -680,6 +683,9 @@ Job :: struct {
 	shared:                                         string, // <source>\shared, for Shared(name)
 	temp:                                           string, // per-job scratch folder (downloads, extraction)
 	gog:                                            string, // GOG games folder from Settings
+	simpretro, bios:                                string, // emulator + BIOS folders (disc dumps)
+	dump:                                           Disc_Info, // disc to dump on flash (letter 0 = none)
+	dump_discs:                                     int,
 	files_total, files_done:                        int,
 	running, finished, failed, cancel:              bool,
 	current:                                        string,
@@ -760,6 +766,14 @@ job_run :: proc(t: ^thread.Thread) {
 		}, nil)
 		if cancelled() || job.failed {
 			job_fail(cancelled() ? CANCELLED_MSG : job.message)
+			return
+		}
+	}
+
+	// 1b. dump a disc straight into the destination (+ SimpRetro, core, BIOS)
+	if job.dump.letter != 0 {
+		if err := run_dump(); err != "" {
+			job_fail(err)
 			return
 		}
 	}
@@ -848,6 +862,7 @@ Page :: enum {
 	Install,
 	Configs,
 	Settings,
+	Dump,
 }
 
 page: Page
@@ -945,6 +960,12 @@ start_flash :: proc() {
 	job.dest = strings.clone(dest)
 	job.preconfig = strings.clone(preconfig_dir)
 	job.gog = strings.clone(field_str(&fields[F_GOG]))
+	job.simpretro = strings.clone(field_str(&fields[F_SIMPRETRO]))
+	job.bios = strings.clone(field_str(&fields[F_BIOS]))
+	if dump_active {
+		job.dump = dump_disc
+		job.dump_discs = dump_discs
+	}
 	if preconfig_dir != "" {
 		game_dir := filepath.dir(preconfig_dir)
 		if lua := fmt.tprintf("%s\\config.lua", game_dir); os.exists(lua) do job.script = strings.clone(lua)
@@ -978,7 +999,7 @@ clean_job :: proc() {
 	delete(job.name); delete(job.tags); delete(job.source); delete(job.exe)
 	delete(job.args); delete(job.box); delete(job.logo); delete(job.dest)
 	delete(job.message); delete(job.current); delete(job.preconfig)
-	delete(job.script); delete(job.shared); delete(job.temp); delete(job.gog)
+	delete(job.script); delete(job.shared); delete(job.temp); delete(job.gog); delete(job.simpretro); delete(job.bios)
 	for st in job.steps {
 		delete(st.name); delete(st.detail)
 	}
@@ -1076,7 +1097,7 @@ step_done :: proc(p: Page) -> bool {
 	case .Game:    return field_str(&fields[F_NAME]) != ""
 	case .Artwork: return field_str(&fields[F_BOX]) != "" || field_str(&fields[F_LOGO]) != ""
 	case .Install: _, ok := dest_path(); return ok
-	case .Configs, .Settings: return false
+	case .Configs, .Settings, .Dump: return false
 	}
 	return false
 }
@@ -1098,8 +1119,9 @@ draw_sidebar :: proc() {
 		y += 54
 	}
 	draw_text("MORE", 28, y + 18, 12, COL_FAINT, true)
-	nav_item({12, y + 40, SIDEBAR_W - 24, 48}, .Configs, "Configs", 0)
-	nav_item({12, y + 94, SIDEBAR_W - 24, 48}, .Settings, "Settings", 0, IC_SETTINGS)
+	nav_item({12, y + 40, SIDEBAR_W - 24, 48}, .Dump, "Dump disc", 0, IC_DISC)
+	nav_item({12, y + 94, SIDEBAR_W - 24, 48}, .Configs, "Configs", 0)
+	nav_item({12, y + 148, SIDEBAR_W - 24, 48}, .Settings, "Settings", 0, IC_SETTINGS)
 
 	saber := fmt.tprintf("%s\\Saber.exe", filepath.dir(os.args[0]))
 	has_saber := os.exists(saber)
@@ -1139,6 +1161,13 @@ nav_item :: proc(r: rl.Rectangle, p: Page, label: string, num: int, ic := IC_GLO
 draw_game_page :: proc() {
 	page_header("Game details", "Name the game and tell Saber how to start it.")
 	x, w := content_x(), content_w()
+	if dump_active {
+		dd := dump_disc
+		label := fmt.tprintf("Disc %c: · %s · %s", dd.letter, PLATFORM_NAME[dd.platform], disc_serial(&dd))
+		pw := text_w(label, 13, true) + 38
+		pill(x + w - pw - 40, 46, label, COL_OK, IC_DISC)
+		if button({x + w - 34, 40, 34, 34}, "", .Ghost, IC_CLOSE) do dump_active = false
+	}
 	if preconfig_dir != "" {
 		label := fmt.tprintf("Preconfig: %s", filepath.base(filepath.dir(preconfig_dir)))
 		pw := text_w(label, 13, true) + 38
@@ -1401,6 +1430,10 @@ draw_install_page :: proc() {
 	}
 	src := field_str(&fields[F_SOURCE])
 	what := src != "" ? fmt.tprintf("Copies the game folder from %s", src) : "Config only · no game files are copied"
+	if dump_active {
+		dd := dump_disc
+		what = fmt.tprintf("Dumps %s disc %s from %c:%s + SimpRetro", PLATFORM_NAME[dd.platform], disc_serial(&dd), dd.letter, dump_discs > 1 ? fmt.tprintf(" (%d discs)", dump_discs) : "")
+	}
 	draw_text_fit(what, sx, s.y + 70, 14, COL_MUTED, s.width - 48 - right_w)
 	if has_drive {
 		if d, ok := dest_path(); ok && os.exists(fmt.tprintf("%s\\_Saber", d)) {
@@ -1452,7 +1485,7 @@ draw_footer :: proc() {
 		}
 		bx -= 120 + 12
 		if button({bx, by, 120, 46}, "Back", .Ghost, IC_BACK) do page = .Artwork
-	case .Configs, .Settings:
+	case .Configs, .Settings, .Dump:
 	}
 	if status != "" do draw_text_fit(status, content_x(), y + (FOOTER_H - 15) / 2 - 1, 15, status_col, bx - content_x() - 20)
 }
@@ -1558,6 +1591,7 @@ main :: proc() {
 		case .Install: draw_install_page()
 		case .Configs: draw_configs_page()
 		case .Settings: draw_settings_page()
+		case .Dump:     draw_dump_page()
 		}
 		draw_footer()
 		draw_sidebar()
