@@ -299,7 +299,7 @@ power_blocking :: proc() -> bool {
 }
 
 input_locked :: proc() -> bool {
-	return power_blocking() || app.swipe_t < 1
+	return power_blocking() || app.swipe_t < 1 || input.mouse_eaten
 }
 
 open_power_dialog :: proc() {
@@ -313,6 +313,7 @@ handle_app_input :: proc() {
 	if plugin_dialog_open() {
 		handle_plugin_dialog_input()
 		eat_input()
+		input.mouse_eaten = true // also on the frame it closes, so the click can't reach a card
 		return
 	}
 	if power_blocking() {

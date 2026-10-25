@@ -39,6 +39,7 @@ Plugin_Dialog :: struct {
 	shown:     f32, // eased bar
 	t:         f32,
 	opened:    bool, // first frame drawn: ignore the press that opened it
+	clicked:   bool, // a button was clicked while drawing; acted on by the next input pass
 }
 
 plugin_dialogs: [dynamic]Plugin_Dialog
@@ -122,15 +123,15 @@ handle_plugin_dialog_input :: proc() {
 			d.sel = (d.sel + 1) % n
 			sfx_click()
 		}
-		if input.confirm {
-			sfx_click()
+		if input.confirm || d.clicked {
+			if !d.clicked do sfx_click() // ui_button already clicked
 			dialog_finish(d.sel + 1, false)
 		} else if input.cancel || input.power {
 			sfx_back()
 			dialog_finish(0, false)
 		}
 	case .Process:
-		if input.cancel || input.power {
+		if input.cancel || input.power || d.clicked {
 			sfx_back()
 			dialog_finish(0, true)
 			return
@@ -206,7 +207,7 @@ draw_info_dialog :: proc(d: ^Plugin_Dialog, labels: []string, w, h: f32) {
 		br := rl.Rectangle{r.x + 24, y + f32(i) * (bh + gap), r.width - 48, bh}
 		if ui_button(fmt.tprintf("pdlg-%d", i), br, label, i == d.sel, true) && d.opened {
 			d.sel = i
-			input.confirm = true // handled next frame like a pad press
+			d.clicked = true
 		}
 	}
 }
@@ -227,7 +228,7 @@ draw_process_dialog :: proc(d: ^Plugin_Dialog, w, h: f32) {
 		rl.DrawRectangleRounded({bar.x, bar.y, max(bar.height, bar.width * d.shown), bar.height}, 1, 8, COL_ACCENT)
 	}
 	if ui_button("pdlg-cancel", {r.x + 24, r.y + 146, r.width - 48, 54}, "Cancel", true, true) && d.opened {
-		input.cancel = true
+		d.clicked = true
 	}
 }
 

@@ -26,6 +26,7 @@ Input :: struct {
 	power:                 bool, // Select / Back
 	extra:                 bool, // Y
 	using_pad:             bool,
+	mouse_eaten:           bool, // a modal took this frame's mouse: screens below ignore hover/clicks
 	repeat_dir:            Nav_Dir,
 	repeat_at:             f64,
 }
@@ -40,6 +41,7 @@ eat_input :: proc() {
 
 input_poll :: proc() {
 	eat_input()
+	input.mouse_eaten = false
 
 	if rl.GetMouseDelta() != {} || rl.IsMouseButtonPressed(.LEFT) {
 		input.using_pad = false
