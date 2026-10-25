@@ -2,7 +2,7 @@
 
 Same zip layout as make_release_zip.bat (SaberUpdater only needs the three exes in it):
   SaberLauncher/  Saber.exe SaberFlasher.exe SaberUpdater.exe version.ini assets/ plugins/ apps/ games/ movies/
-plugins/ is packed without settings, logs or downloaded covers. Optional: libretro/cores/ (never BIOS or saves).
+plugins/ comes from the repo's root plugins/ folder, without settings, logs or downloads. Optional: libretro/cores/ (never BIOS or saves).
 Publishing uses the GitHub CLI (`gh auth login` once). The tag is the version, as SaberUpdater expects.
 """
 
@@ -24,7 +24,7 @@ REPO = "StudioSyndiCatCaius/SaberLauncher"  # same as release.bat / DEFAULT_REPO
 EXES = ["Saber.exe", "SaberFlasher.exe", "SaberUpdater.exe"]
 SKIP_ASSETS = {"Ps Vita theme.mp3"}  # personal bgm, as in make_release_zip.bat
 SKIP_PLUGIN_EXT = {".ini", ".log"}
-SKIP_PLUGIN_DIRS = {"covers"}
+SKIP_PLUGIN_DIRS = {"covers", "tmp"}
 
 
 def read_version():
@@ -201,11 +201,11 @@ class App:
                 if f.name not in SKIP_ASSETS:
                     z.write(f, base + f.relative_to(APP).as_posix())
                     count += 1
-            for f in self.walk(APP / "plugins"):
-                rel = f.relative_to(APP / "plugins")
+            for f in self.walk(ROOT / "plugins"):
+                rel = f.relative_to(ROOT / "plugins")
                 if f.suffix.lower() in SKIP_PLUGIN_EXT or SKIP_PLUGIN_DIRS & set(rel.parts[:-1]):
                     continue
-                z.write(f, base + f.relative_to(APP).as_posix())
+                z.write(f, base + "plugins/" + rel.as_posix())
                 count += 1
             if cfg["cores"]:
                 for f in self.walk(APP / "libretro" / "cores"):

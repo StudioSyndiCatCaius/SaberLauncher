@@ -306,3 +306,40 @@ lua_list_dir :: proc "c" (L: ^lua_State) -> c.int {
 	}
 	return 1
 }
+
+// Unzip(zip, dest_dir) -> true | nil, error. Extracts every file into dest_dir, keeping folders
+// (relative paths = plugin folder). Runs on the main thread: meant for a few MB at a time.
+lua_unzip :: proc "c" (L: ^lua_State) -> c.int {
+	context = runtime.default_context()
+	paths: [2]string
+	for &p, i in paths {
+		p = lua_string(L, c.int(i + 1))
+		if p != "" && !filepath.is_abs(p) {
+			lua_getglobal(L, "PLUGIN_DIR")
+			p = path_join({lua_string(L, -1), p})
+			lua_pop(L, 1)
+		}
+	}
+	fail :: proc(L: ^lua_State, msg: string) -> c.int {
+		lua_pushnil(L)
+		lua_pushstring(L, strings.clone_to_cstring(msg, context.temp_allocator))
+		return 2
+	}
+	if paths[0] == "" || paths[1] == "" do return fail(L, "Unzip: missing zip or destination")
+	// stored entries alias `data`, inflated ones are fresh buffers: all on the frame arena
+	context.allocator = context.temp_allocator
+	data, err := os.read_entire_file(paths[0], context.allocator)
+	if err != nil do return fail(L, fmt.tprintf("can't read %s", paths[0]))
+	files, zerr := zip_extract(data, nil)
+	if zerr != "" do return fail(L, zerr)
+	os.make_directory_all(paths[1])
+	for name, content in files {
+		out := path_join({paths[1], name})
+		os.make_directory_all(filepath.dir(out))
+		if os.write_entire_file(out, content) != nil {
+			return fail(L, fmt.tprintf("can't write %s (in use?)", name))
+		}
+	}
+	lua_pushboolean(L, 1)
+	return 1
+}

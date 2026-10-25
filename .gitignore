@@ -15,3 +15,9 @@ AGENTS.md
 
 # local release packaging
 /make_release_zip.bat
+
+# plugin user data (settings, downloads, logs)
+/plugins/*/settings.ini
+/plugins/*/covers/
+/plugins/*/tmp/
+/plugins/*.log

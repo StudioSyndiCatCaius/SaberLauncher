@@ -39,6 +39,7 @@ Settings :: struct {
 	font:        string,
 	volume:      f32,
 	online_mode: bool, // plugins may use the internet; off = killswitch
+	plugin_dirs: string, // extra plugin folders, ';'-separated, relative to the exe; APP/plugins always loads
 }
 
 WINLOGON_SUBKEY :: "Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon"
@@ -79,6 +80,9 @@ settings_load :: proc(path: string) -> Settings {
 		if v, found := ini_get(text, "font"); found && v != "" {
 			s.font = strings.clone(v)
 		}
+		if v, found := ini_get(text, "plugin_dirs"); found {
+			s.plugin_dirs = strings.clone(v)
+		}
 		if v, found := ini_get(text, "online"); found {
 			s.online_mode = v == "1" || strings.equal_fold(v, "true")
 		}
@@ -95,7 +99,7 @@ settings_load :: proc(path: string) -> Settings {
 
 settings_save :: proc(path: string, s: Settings) {
 	text := fmt.tprintf(
-		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\nonline=%d\n",
+		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\nonline=%d\nplugin_dirs=%s\n",
 		LAUNCH_MODE_KEYS[s.launch_mode],
 		s.ui_theme,
 		s.bkg,
@@ -103,6 +107,7 @@ settings_save :: proc(path: string, s: Settings) {
 		s.font,
 		s.volume,
 		int(s.online_mode),
+		s.plugin_dirs,
 	)
 	_ = os.write_entire_file(path, text)
 }

@@ -21,6 +21,7 @@ import "base:runtime"
 import "core:c"
 import "core:fmt"
 import "core:os"
+import "core:path/filepath"
 import "core:slice"
 import "core:strings"
 import rl "vendor:raylib"
@@ -61,21 +62,42 @@ Meta_Line :: struct {
 plugins: [dynamic]Plugin
 plugin_log: ^os.File
 
+// Loads APP/plugins, then every folder in Saber.ini `plugin_dirs=` (';'-separated, relative
+// to the exe). A plugin whose folder name was already loaded from an earlier directory is skipped.
 plugins_init :: proc() {
 	dir := path_join({app.exe_dir, "plugins"})
-	fis, err := os.read_all_directory_by_path(dir, context.allocator)
-	if err != nil do return
-	defer os.file_info_slice_delete(fis, context.allocator)
-	slice.sort_by(fis, proc(a, b: os.File_Info) -> bool { return strings.to_lower(a.name, context.temp_allocator) < strings.to_lower(b.name, context.temp_allocator) })
-
+	os.make_directory_all(dir)
 	if f, ferr := os.open(path_join({dir, "plugins.log"}), {.Write, .Create, .Trunc}); ferr == nil {
 		plugin_log = f
 	}
-	for fi in fis {
-		if fi.type != .Directory do continue
-		main := path_join({fi.fullpath, "plugin.lua"})
-		if !os.exists(main) do continue
-		plugin_load(main, fi.name, fi.fullpath)
+	dirs := make([dynamic]string, context.temp_allocator)
+	append(&dirs, dir)
+	for d in strings.split(app.settings.plugin_dirs, ";", context.temp_allocator) {
+		d := strings.trim(strings.trim_space(d), `"`)
+		if d == "" do continue
+		append(&dirs, filepath.is_abs(d) ? d : path_join({app.exe_dir, d}))
+	}
+	loaded := make(map[string]bool, allocator = context.temp_allocator)
+	for d in dirs {
+		fis, err := os.read_all_directory_by_path(d, context.allocator)
+		if err != nil {
+			plugin_logf("plugin_dirs: can't read %s", d)
+			continue
+		}
+		defer os.file_info_slice_delete(fis, context.allocator)
+		slice.sort_by(fis, proc(a, b: os.File_Info) -> bool { return strings.to_lower(a.name, context.temp_allocator) < strings.to_lower(b.name, context.temp_allocator) })
+		for fi in fis {
+			if fi.type != .Directory do continue
+			main := path_join({fi.fullpath, "plugin.lua"})
+			if !os.exists(main) do continue
+			key := strings.to_lower(fi.name, context.temp_allocator)
+			if loaded[key] {
+				plugin_logf("%s: skipped, a plugin named %s is already loaded", fi.fullpath, fi.name)
+				continue
+			}
+			loaded[key] = true
+			plugin_load(main, fi.name, fi.fullpath)
+		}
 	}
 	plugin_logf("%d plugin(s) loaded", len(plugins))
 }
@@ -111,11 +133,14 @@ plugin_load :: proc(path, file, dir: string) {
 	lua_register(L, "Dialog_Process", lua_dialog_process)
 	lua_pushstring(L, strings.clone_to_cstring(dir, context.temp_allocator))
 	lua_setglobal(L, "PLUGIN_DIR")
+	lua_pushstring(L, strings.clone_to_cstring(app.exe_dir, context.temp_allocator))
+	lua_setglobal(L, "SABER_DIR")
 	lua_register(L, "Setting", lua_setting)
 	lua_register(L, "Plugins_GetSetting", lua_plugins_get_setting)
 	lua_register(L, "Set_Art", lua_set_art)
 	lua_register(L, "Disc_Games", lua_disc_games)
 	lua_register(L, "List_Dir", lua_list_dir)
+	lua_register(L, "Unzip", lua_unzip)
 	lua_register(L, "Online", lua_online)
 	lua_register(L, "Http_Get", lua_http_get)
 	lua_register(L, "Http_Download", lua_http_download)
