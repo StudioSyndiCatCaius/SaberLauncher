@@ -29,6 +29,12 @@ Game :: struct {
 	logo:             rl.Texture2D,
 	has_box:          bool,
 	has_logo:         bool,
+	platform:         Retro_Platform, // != .None: a console disc played by the built-in libretro host
+	disc_letter:      u8,
+	disc_serial:      string,         // discs: from SYSTEM.CNF; _Saber games: optional serial= in saber.ini
+	meta_platform:    Retro_Platform, // platform for plugins (covers / info); = platform for discs, platform= for _Saber games
+	info:             [dynamic]Meta_Line, // filled by PlatformInfo plugins
+	mod_name:         string,         // != "": a burned (recordable) disc; its saves are kept apart from the original's
 }
 
 game_from_folder :: proc(root: string, drive_label: string, from_drive: bool) -> (Game, bool) {
@@ -71,6 +77,13 @@ game_from_folder :: proc(root: string, drive_label: string, from_drive: bool) ->
 		if v, found := ini_get(text, "args"); found {
 			g.launch_args = strings.clone(v)
 		}
+		// optional: lets plugins identify the game (covers, info), e.g. a dumped PS1 disc
+		if v, found := ini_get(text, "serial"); found && v != "" {
+			g.disc_serial = strings.to_upper(v)
+		}
+		if v, found := ini_get(text, "platform"); found {
+			for p in Retro_Platform do if p != .None && strings.equal_fold(RETRO_PLATFORM_DIR[p], v) do g.meta_platform = p
+		}
 		g.logo_file = path_join({saber, logo_name})
 		g.box_file = path_join({saber, box_name})
 	}
@@ -90,6 +103,7 @@ game_from_folder :: proc(root: string, drive_label: string, from_drive: bool) ->
 	}
 
 	game_load_art(&g)
+	if g.disc_serial != "" && g.meta_platform != .None do plugins_apply(&g, from_ini = true)
 	return g, true
 }
 
@@ -129,6 +143,9 @@ resolve_launch_exe :: proc(g: ^Game) -> (path: string, ok: bool) {
 }
 
 game_launch :: proc(g: ^Game) -> (ok: bool, err: string) {
+	if g.platform != .None {
+		return retro_play(g)
+	}
 	cmd: string
 	wait_name: string
 	fail_msg := "Failed to start game"

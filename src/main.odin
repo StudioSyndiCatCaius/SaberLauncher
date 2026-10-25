@@ -1,6 +1,7 @@
 package saber
 
 import "core:fmt"
+import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import "core:time"
@@ -12,6 +13,7 @@ Screen :: enum {
 	Library,
 	Movies,
 	Apps,
+	Plugins,
 	Settings,
 }
 
@@ -34,6 +36,9 @@ App :: struct {
 	selected_lib:    int,
 	selected_app:    int,
 	selected_movie:  int,
+	plugin_sel:      int,
+	plugin_action:   int,
+	plugin_focus:    int, // 0 = plugin list, 1 = actions
 	scroll:          [Screen]f32,
 	status_buf:      [256]u8,
 	status:          string, // view into status_buf; survives the per-frame temp reset
@@ -44,6 +49,7 @@ App :: struct {
 	drive_mask:      u32,
 	drive_rescan_at: f64,
 	fit_check_at:    f64,
+	media_sig:       u64,
 	settings_focus:  int,
 	dropdown_open:   bool,
 	dropdown_sel:    int,
@@ -70,6 +76,11 @@ TARGET_FPS :: 60
 STATUS_SECONDS :: 6.0
 
 main :: proc() {
+	// One Saber per session: a hidden second copy would keep reacting to the pad.
+	CreateMutexW(nil, true, win.L("Local\\SaberLauncher"))
+	if win.GetLastError() == win.ERROR_ALREADY_EXISTS {
+		return
+	}
 	app.exe_dir = exe_directory()
 	if app.exe_dir != "" {
 		win.SetCurrentDirectoryW(win.utf8_to_wstring(app.exe_dir))
@@ -99,7 +110,10 @@ main :: proc() {
 	font_init()
 	xinput_init()
 
+	plugins_init()
+	media_watch_start()
 	rescan_all()
+	play_disc_from_args()
 
 	for !app.quit {
 		if rl.WindowShouldClose() && !app.in_shell {
@@ -112,6 +126,8 @@ main :: proc() {
 			rl.ToggleBorderlessWindowed()
 		}
 		input_poll()
+		online_update()
+		update_poll()
 		handle_app_input()
 
 		w := f32(rl.GetScreenWidth())
@@ -124,6 +140,7 @@ main :: proc() {
 		draw_header(w)
 		draw_footer(w, h)
 		draw_power_dialog(w, h)
+		draw_plugin_dialog(w, h)
 		rl.EndDrawing()
 
 		free_all(context.temp_allocator)
@@ -132,10 +149,31 @@ main :: proc() {
 	unload_all_games()
 	unload_all_apps()
 	unload_all_movies()
+	online_shutdown()
+	plugins_shutdown()
 	font_shutdown()
 	theme_shutdown()
 	rl.CloseAudioDevice()
 	rl.CloseWindow()
+}
+
+// `Saber.exe --play-disc F` boots the console disc in F: right away.
+play_disc_from_args :: proc() {
+	args := os.args
+	for i in 1 ..< len(args) - 1 {
+		if args[i] != "--play-disc" || args[i + 1] == "" {
+			continue
+		}
+		letter := args[i + 1][0] &~ 0x20
+		for &g, gi in app.drive_games {
+			if g.platform != .None && g.disc_letter == letter {
+				app.selected_drive = gi
+				activate_item(.Main, gi)
+				return
+			}
+		}
+		set_status("No playable disc in %c:", letter)
+	}
 }
 
 exe_directory :: proc() -> string {
@@ -161,6 +199,13 @@ poll_drive_changes :: proc() {
 		app.drive_rescan_at = now + DRIVE_SETTLE_SEC
 		set_status("Drive change detected…")
 	}
+	{
+		if sig := optical_media_signature(); sig != app.media_sig {
+			app.media_sig = sig
+			app.drive_rescan_at = now + DRIVE_SETTLE_SEC
+			set_status("Disc change detected…")
+		}
+	}
 	if app.drive_rescan_at != 0 && now >= app.drive_rescan_at {
 		app.drive_rescan_at = 0
 		rescan_drives()
@@ -176,6 +221,7 @@ rescan_drives :: proc() {
 	scan_portable_drives(&app.drive_games)
 	app.selected_drive = clamp(app.selected_drive, 0, max(0, len(app.drive_games) - 1))
 	update_scan_message()
+	plugins_discs_changed()
 }
 
 rescan_all :: proc() {
@@ -195,8 +241,10 @@ rescan_all :: proc() {
 	app.selected_app = clamp(app.selected_app, 0, max(0, len(app.shell_apps) - 1))
 	app.selected_movie = clamp(app.selected_movie, 0, max(0, len(app.movies) - 1))
 	app.drive_mask = current_drive_mask()
+	app.media_sig = optical_media_signature()
 	app.drive_rescan_at = 0
 	update_scan_message()
+	plugins_discs_changed()
 }
 
 update_scan_message :: proc() {
@@ -235,6 +283,11 @@ open_power_dialog :: proc() {
 }
 
 handle_app_input :: proc() {
+	if plugin_dialog_open() {
+		handle_plugin_dialog_input()
+		eat_input()
+		return
+	}
 	if power_blocking() {
 		handle_power_input()
 		eat_input()
@@ -255,6 +308,12 @@ handle_app_input :: proc() {
 	}
 	if input.menu_l || input.menu_r {
 		cycle_screen(input.menu_l ? -1 : 1)
+		eat_input()
+		return
+	}
+	if input.cancel && app.screen == .Plugins && app.plugin_focus == 1 {
+		app.plugin_focus = 0
+		sfx_back()
 		eat_input()
 		return
 	}
@@ -292,6 +351,8 @@ handle_app_input :: proc() {
 		if input.confirm {
 			activate_item(app.screen, sel^)
 		}
+	case .Plugins:
+		handle_plugins_input()
 	case .Settings:
 		handle_settings_input()
 	}
@@ -303,7 +364,9 @@ Settings_Row :: enum {
 	Music,
 	Volume,
 	Font,
+	Online_Mode,
 	Launch_Mode,
+	Updates,
 	Desktop,
 }
 
@@ -339,9 +402,16 @@ handle_settings_input :: proc() {
 	case .Font:
 		if step != 0 { cycle_font(step) }
 		if input.confirm { cycle_font(1) }
+	case .Online_Mode:
+		if step != 0 || input.confirm { set_online_mode(!app.settings.online_mode) }
 	case .Launch_Mode:
 		if input.confirm {
 			open_dropdown()
+		}
+	case .Updates:
+		if input.confirm {
+			update_check_start()
+			sfx_click()
 		}
 	case .Desktop:
 		if input.confirm {

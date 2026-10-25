@@ -14,6 +14,7 @@ movie_com_ready: bool
 // {bcc18b79-ba16-442f-80c4-8a59c30c463b}
 IID_IShellItemImageFactory := &win.GUID{0xbcc18b79, 0xba16, 0x442f, {0x80, 0xc4, 0x8a, 0x59, 0xc3, 0x0c, 0x46, 0x3b}}
 
+SIIGBF_RESIZETOFIT    :: 0x00
 SIIGBF_BIGGERSIZEOK   :: 0x01
 SIIGBF_THUMBNAILONLY  :: 0x08
 SIIGBF_WIDETHUMBNAILS :: 0x40
@@ -169,7 +170,8 @@ extract_thumb_shell :: proc(video_path, dest_png: string) -> bool {
 
 // Decodes anything Explorer can thumbnail (video frames, and JPG/WebP images that
 // this raylib build can't load) into an RGBA image no larger than ~w x h.
-shell_image :: proc(path: string, w, h: i32) -> (rl.Image, bool) {
+// still = a picture file: keep its exact aspect (no wide thumbnail frame).
+shell_image :: proc(path: string, w, h: i32, still := false) -> (rl.Image, bool) {
 	ensure_movie_com()
 	item_ptr: rawptr
 	hr := win.SHCreateItemFromParsingName(win.utf8_to_wstring(path), nil, win.IID_IShellItem, &item_ptr)
@@ -189,7 +191,8 @@ shell_image :: proc(path: string, w, h: i32) -> (rl.Image, bool) {
 
 	hbm: win.HBITMAP
 	sz := win.SIZE{cx = w, cy = h}
-	hr = fac.GetImage(fac, sz, win.DWORD(SIIGBF_BIGGERSIZEOK | SIIGBF_WIDETHUMBNAILS | SIIGBF_SCALEUP), &hbm)
+	flags := still ? win.DWORD(SIIGBF_RESIZETOFIT) : win.DWORD(SIIGBF_BIGGERSIZEOK | SIIGBF_WIDETHUMBNAILS | SIIGBF_SCALEUP)
+	hr = fac.GetImage(fac, sz, flags, &hbm)
 	if !win.SUCCEEDED(int(hr)) || hbm == nil {
 		hr = fac.GetImage(fac, sz, win.DWORD(SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK), &hbm)
 	}

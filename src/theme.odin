@@ -129,8 +129,9 @@ load_texture_smooth :: proc(path: string, max_px: i32 = 1024) -> (rl.Texture2D, 
 		tex = rl.LoadTexture(strings.clone_to_cstring(path, context.temp_allocator))
 	}
 	if tex.id == 0 {
-		// this raylib build has no JPG/WebP decoder; let Windows decode it
-		img, ok := shell_image(path, max_px, max_px)
+		// this raylib build has no JPG/WebP decoder; let Windows decode it (needs backslashes)
+		win_path, _ := strings.replace_all(path, "/", "\\", context.temp_allocator)
+		img, ok := shell_image(win_path, max_px, max_px, still = true)
 		if !ok {
 			return {}, false
 		}

@@ -15,6 +15,7 @@ foreign import kernel32 "system:Kernel32.lib"
 @(default_calling_convention = "stdcall")
 foreign kernel32 {
 	GetLogicalDrives :: proc() -> u32 ---
+	CreateMutexW :: proc(lpMutexAttributes: rawptr, bInitialOwner: win.BOOL, lpName: win.LPCWSTR) -> win.HANDLE ---
 	GetDriveTypeW :: proc(lpRootPathName: win.LPCWSTR) -> u32 ---
 	GetVolumeInformationW :: proc(
 		lpRootPathName: win.LPCWSTR,
@@ -80,7 +81,13 @@ scan_portable_drives :: proc(out: ^[dynamic]Game) {
 			}
 			append(out, g)
 		}
+		before := len(out)
 		scan_children(out, root_str, label, true)
+		if len(out) == before && GetDriveTypeW(win.LPCWSTR(raw_data(root_w[:]))) == DRIVE_CDROM {
+			if g, ok := disc_game(letter, label); ok {
+				append(out, g)
+			}
+		}
 	}
 }
 

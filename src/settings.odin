@@ -38,6 +38,7 @@ Settings :: struct {
 	bgm:         string,
 	font:        string,
 	volume:      f32,
+	online_mode: bool, // plugins may use the internet; off = killswitch
 }
 
 WINLOGON_SUBKEY :: "Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon"
@@ -78,6 +79,9 @@ settings_load :: proc(path: string) -> Settings {
 		if v, found := ini_get(text, "font"); found && v != "" {
 			s.font = strings.clone(v)
 		}
+		if v, found := ini_get(text, "online"); found {
+			s.online_mode = v == "1" || strings.equal_fold(v, "true")
+		}
 		if v, found := ini_get(text, "volume"); found {
 			if n, ok := strconv.parse_f32(v); ok {
 				s.volume = clamp(n, 0, 1)
@@ -91,13 +95,14 @@ settings_load :: proc(path: string) -> Settings {
 
 settings_save :: proc(path: string, s: Settings) {
 	text := fmt.tprintf(
-		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\n",
+		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\nonline=%d\n",
 		LAUNCH_MODE_KEYS[s.launch_mode],
 		s.ui_theme,
 		s.bkg,
 		s.bgm,
 		s.font,
 		s.volume,
+		int(s.online_mode),
 	)
 	_ = os.write_entire_file(path, text)
 }

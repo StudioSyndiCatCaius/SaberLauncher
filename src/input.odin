@@ -145,7 +145,7 @@ nav_grid :: proc(sel: ^int, count, cols: int) -> bool {
 	return false
 }
 
-SCREEN_ORDER :: [SCREEN_COUNT]Screen{.Main, .Library, .Movies, .Apps, .Settings}
+SCREEN_ORDER :: [SCREEN_COUNT]Screen{.Main, .Library, .Movies, .Apps, .Plugins, .Settings}
 
 go_screen :: proc(next: Screen) {
 	if next == app.screen {
@@ -181,6 +181,8 @@ draw_screen_body :: proc(s: Screen, w, h: f32) {
 		draw_movies(w, h)
 	case .Apps:
 		draw_apps(w, h)
+	case .Plugins:
+		draw_plugins(w, h)
 	case .Settings:
 		draw_settings(w, h)
 	}

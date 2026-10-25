@@ -812,6 +812,10 @@ job_run :: proc(t: ^thread.Thread) {
 	if has_logo do strings.write_string(&sb, "logo=logo.png\n")
 	if has_box do strings.write_string(&sb, "box=box.png\n")
 	fmt.sbprintf(&sb, "exe=%s\nargs=%s\n", job.exe, job.args)
+	if job.dump.letter != 0 && job.dump.platform != .Unknown {
+		// lets Saber's plugins find covers / info for the dumped game
+		fmt.sbprintf(&sb, "serial=%s\nplatform=%s\n", disc_serial(&job.dump), PLATFORM_TAG[job.dump.platform])
+	}
 	strings.write_string(&sb, extra_ini)
 	if err := os.write_entire_file(fmt.tprintf("%s\\saber.ini", saber), transmute([]u8)strings.to_string(sb)); err != nil {
 		job_fail("Failed to write saber.ini")

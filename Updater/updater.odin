@@ -29,8 +29,21 @@ Release :: struct {
 	},
 }
 
+// Set by run() in --check mode.
+update_available: bool
+
+// Flags used by Saber's "Check for updates":
+//   --check    only compare versions; exit 0 = up to date, 10 = update available, 1 = error
+//   --wait     wait (up to 30 s) for Saber.exe to exit before replacing it
+//   --restart  start Saber.exe again when done (whether or not the update worked)
 main :: proc() {
 	ok := run()
+	if has_arg("--check") {
+		os.exit(10 if ok && update_available else (0 if ok else 1))
+	}
+	if has_arg("--restart") {
+		restart_saber()
+	}
 	if !has_arg("-y") {
 		fmt.println("\nPress Enter to close.")
 		buf: [16]byte
@@ -81,10 +94,20 @@ run :: proc() -> bool {
 		fmt.println("Saber is up to date.")
 		return true
 	}
+	if has_arg("--check") {
+		update_available = true
+		return true
+	}
 	if !has_arg("-y") && !confirm(fmt.tprintf("Update to %s? [Y/n] ", remote_version)) {
 		return true
 	}
 
+	if has_arg("--wait") {
+		for _ in 0 ..< 60 {
+			if !is_locked(join(dir, "Saber.exe")) do break
+			win.Sleep(500)
+		}
+	}
 	for name in UPDATABLE {
 		if name == SELF_NAME do continue // a running exe can still be renamed
 		if is_locked(join(dir, name)) {
@@ -161,6 +184,13 @@ run :: proc() -> bool {
 	cleanup_old(dir) // SaberUpdater.exe.old stays until next run if we replaced ourselves
 	fmt.printfln("Updated to %s.", remote_version)
 	return true
+}
+
+restart_saber :: proc() {
+	dir, err := os.get_executable_directory(context.allocator)
+	if err != nil do return
+	fmt.println("Starting Saber ...")
+	win.ShellExecuteW(nil, win.L("open"), win.utf8_to_wstring(join(dir, "Saber.exe")), nil, win.utf8_to_wstring(dir), win.SW_SHOWNORMAL)
 }
 
 rollback :: proc(dir: string, swapped: []string) {

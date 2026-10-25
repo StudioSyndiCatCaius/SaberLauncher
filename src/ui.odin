@@ -107,6 +107,22 @@ draw_texture_cover :: proc(tex: rl.Texture2D, dest: rl.Rectangle, tint := rl.WHI
 	rl.DrawTexturePro(tex, {(tw - sw) * 0.5, (th - sh) * 0.5, sw, sh}, dest, {}, 0, tint)
 }
 
+// Whole image inside `dest`, centred, aspect kept: no cropping, no stretching.
+// Covers from different consoles (PS1 jewel case vs PS2 DVD case vs 3D renders)
+// all keep their real shape; the leftover space shows the card behind them.
+draw_texture_contain :: proc(tex: rl.Texture2D, dest: rl.Rectangle, tint := rl.WHITE) -> rl.Rectangle {
+	tw := f32(tex.width)
+	th := f32(tex.height)
+	if tw <= 0 || th <= 0 || dest.width <= 0 || dest.height <= 0 {
+		return {}
+	}
+	s := min(dest.width / tw, dest.height / th)
+	w, h := tw * s, th * s
+	r := rl.Rectangle{dest.x + (dest.width - w) * 0.5, dest.y + (dest.height - h) * 0.5, w, h}
+	rl.DrawTexturePro(tex, {0, 0, tw, th}, r, {}, 0, tint)
+	return r
+}
+
 draw_texture_fit :: proc(tex: rl.Texture2D, x, y, max_w, max_h: f32) -> f32 {
 	tw := f32(tex.width)
 	th := f32(tex.height)
@@ -190,6 +206,7 @@ TAB_LABELS := [Screen]string {
 	.Library  = "GAMES",
 	.Movies   = "MOVIES",
 	.Apps     = "APPS",
+	.Plugins  = "PLUGINS",
 	.Settings = "SETTINGS",
 }
 
@@ -253,10 +270,19 @@ draw_footer :: proc(w, h: f32) {
 	}
 
 	switch {
+	case plugin_dialog_open():
+		// the dialog draws its own hints
 	case app.power_open:
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Back"}})
 	case app.dropdown_open:
 		draw_hints(w, h, []Hint{{"A", "Choose"}, {"B", "Close"}})
+	case app.screen == .Plugins:
+		if app.plugin_focus == 1 {
+			on_setting := len(plugins) > 0 && app.plugin_action >= len(plugins[clamp(app.plugin_sel, 0, len(plugins) - 1)].actions)
+			draw_hints(w, h, []Hint{{"A", on_setting ? "Change" : "Run"}, {"B", "Plugins"}, {"LB / RB", "Menus"}})
+		} else {
+			draw_hints(w, h, []Hint{{"A", "Actions"}, {"B", "Home"}, {"LB / RB", "Menus"}})
+		}
 	case app.screen == .Settings:
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Home"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
 	case app.screen == .Main:
@@ -281,22 +307,24 @@ Card :: struct {
 	has_tex:     bool,
 	title:       string,
 	placeholder: string,
+	contain:     bool, // show the whole image (covers, icons) instead of filling and cropping
+	badge:       string, // small bubble in the art's top-right corner
 }
 
 card_for :: proc(s: Screen, i: int) -> Card {
 	#partial switch s {
 	case .Main:
 		g := &app.drive_games[i]
-		return {g.box, g.has_box, g.title, "NO ART"}
+		return {g.box, g.has_box, g.title, "NO ART", true, g.mod_name != "" ? fmt.tprintf("Modded : %s", g.mod_name) : ""}
 	case .Library:
 		g := &app.library_games[i]
-		return {g.box, g.has_box, g.title, "NO ART"}
+		return {g.box, g.has_box, g.title, "NO ART", true, ""}
 	case .Movies:
 		m := &app.movies[i]
-		return {m.thumb, m.has_thumb, m.title, "VIDEO"}
+		return {m.thumb, m.has_thumb, m.title, "VIDEO", false, ""}
 	case .Apps:
 		a := &app.shell_apps[i]
-		return {a.icon, a.has_icon, a.title, "APP"}
+		return {a.icon, a.has_icon, a.title, "APP", true, ""}
 	}
 	return {}
 }
@@ -308,11 +336,21 @@ draw_card :: proc(c: Card, r: rl.Rectangle, hi: bool, title_size: f32 = 17) {
 	}
 	draw_panel(box, hi)
 	art := rl.Rectangle{box.x + 8, box.y + 8, box.width - 16, box.height - 16 - TITLE_STRIP}
-	if c.has_tex {
+	if c.has_tex && c.contain {
+		rl.DrawRectangleRounded(art, roundness(art, RADIUS - 4), 6, with_alpha(COL_SHADE, 70))
+		draw_texture_contain(c.tex, art)
+	} else if c.has_tex {
 		draw_texture_cover(c.tex, art)
 	} else {
 		rl.DrawRectangleRounded(art, roundness(art, RADIUS - 4), 6, with_alpha(COL_TINT, 8))
 		draw_t_center(c.placeholder, art.x + art.width * 0.5, art.y + art.height * 0.5 - 8, 15, COL_MUTED)
+	}
+	if c.badge != "" {
+		size: f32 = 12
+		tw := min(measure_t(c.badge, size), art.width - 28)
+		pill := rl.Rectangle{art.x + art.width - tw - 22, art.y + 6, tw + 16, 22}
+		rl.DrawRectangleRounded(pill, 1, 8, with_alpha(COL_ACCENT, 230))
+		draw_t_fit(c.badge, pill.x + 8, pill.y + 5, tw, size, rl.Color{16, 18, 24, 255}, false)
 	}
 	draw_t_fit(c.title, box.x + 14, box.y + box.height - TITLE_STRIP + 8, box.width - 28, title_size, hi ? COL_TEXT : COL_MUTED, hi)
 	if hi {
@@ -408,6 +446,14 @@ draw_main :: proc(w, h: f32) {
 		meta = fmt.tprintf("%s  ·  %s", g.tags, meta)
 	}
 	draw_t_center(meta, w * 0.5, iy + 42, 16, COL_MUTED)
+	if len(g.info) > 0 {
+		parts := make([dynamic]string, context.temp_allocator)
+		for line in g.info {
+			if line.label == "Serial" || line.label == "System" || line.label == "Released" do continue
+			append(&parts, line.value)
+		}
+		draw_t_center(strings.join(parts[:], "  ·  ", context.temp_allocator), w * 0.5, iy + 68, 16, COL_MUTED)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +573,7 @@ draw_detail :: proc(s: Screen, i: int, r: rl.Rectangle) {
 		kv("Last", g.date_last, x, &y, iw)
 		kv("First", g.date_first, x, &y, iw)
 		kv("Source", g.from_drive ? g.drive_label : "Library", x, &y, iw)
+		for line in g.info do kv(line.label, line.value, x, &y, iw)
 	case .Movies:
 		m := &app.movies[i]
 		if m.has_thumb {
@@ -573,7 +620,9 @@ SETTINGS_LABELS := [Settings_Row]string {
 	.Music       = "Theme music",
 	.Volume      = "Music volume",
 	.Font        = "Font",
+	.Online_Mode = "Online Mode",
 	.Launch_Mode = "Launch mode",
+	.Updates     = "Check for updates",
 	.Desktop     = "Desktop",
 }
 
@@ -583,7 +632,9 @@ SETTINGS_HELP := [Settings_Row]string {
 	.Music       = "Tracks from APP/assets/bgm.",
 	.Volume      = "Background music level.",
 	.Font        = "Bundled fonts from APP/assets/fonts, then Windows fonts.",
+	.Online_Mode = "Lets plugins use the internet (e.g. cover downloads). Turning it off stops all online activity at once.",
 	.Launch_Mode = "",
+	.Updates     = "Downloads the latest release with SaberUpdater, then restarts Saber. Needs Online Mode.",
 	.Desktop     = "Starts Explorer without closing Saber.",
 }
 
@@ -634,11 +685,22 @@ draw_settings :: proc(w, h: f32) {
 			}
 		case .Volume:
 			draw_volume_slider(val, focused)
+		case .Online_Mode:
+			if d := draw_stepper(val, app.settings.online_mode ? "On" : "Off", app.settings.online_mode ? 1 : 0, 2, focused); d != 0 {
+				set_online_mode(!app.settings.online_mode)
+			}
 		case .Launch_Mode:
 			launch_row = r
 			draw_select_box(val, LAUNCH_MODE_NAMES[app.settings.launch_mode], focused)
 			if !app.dropdown_open && mouse_over(val) && rl.IsMouseButtonPressed(.LEFT) {
 				open_dropdown()
+			}
+		case .Updates:
+			draw_t_right(UPDATE_STATUS[update_get_state()], val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
+			draw_glyph("A", val.x + val.width - 26, val.y + val.height * 0.5)
+			if mouse_over(r) && rl.IsMouseButtonPressed(.LEFT) {
+				update_check_start()
+				sfx_click()
 			}
 		case .Desktop:
 			draw_t_right("Open Explorer", val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
