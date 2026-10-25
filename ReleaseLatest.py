@@ -1,8 +1,8 @@
 """Saber release tool: build, zip APP/ and publish it as the latest public GitHub release.
 
 Same zip layout as make_release_zip.bat (SaberUpdater only needs the three exes in it):
-  SaberLauncher/  Saber.exe SaberFlasher.exe SaberUpdater.exe version.ini assets/ apps/ games/ movies/
-Optional: plugins/ (no settings, logs or downloaded covers) and libretro/cores/ (never BIOS or saves).
+  SaberLauncher/  Saber.exe SaberFlasher.exe SaberUpdater.exe version.ini assets/ plugins/ apps/ games/ movies/
+plugins/ is packed without settings, logs or downloaded covers. Optional: libretro/cores/ (never BIOS or saves).
 Publishing uses the GitHub CLI (`gh auth login` once). The tag is the version, as SaberUpdater expects.
 """
 
@@ -61,12 +61,10 @@ class App:
         opts = ttk.Frame(frm)
         opts.pack(fill="x", pady=8)
         self.do_build = tk.BooleanVar(value=True)
-        self.inc_plugins = tk.BooleanVar(value=False)
         self.inc_cores = tk.BooleanVar(value=False)
         self.replace = tk.BooleanVar(value=False)
         ttk.Checkbutton(opts, text="Build first (release.bat)", variable=self.do_build).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(opts, text="Include plugins", variable=self.inc_plugins).grid(row=0, column=1, sticky="w", padx=12)
-        ttk.Checkbutton(opts, text="Include libretro cores", variable=self.inc_cores).grid(row=0, column=2, sticky="w")
+        ttk.Checkbutton(opts, text="Include libretro cores", variable=self.inc_cores).grid(row=0, column=1, sticky="w", padx=12)
         ttk.Checkbutton(opts, text="Replace release if the tag already exists", variable=self.replace).grid(
             row=1, column=0, columnspan=3, sticky="w")
 
@@ -142,7 +140,6 @@ class App:
             version=version,
             repo=self.repo.get().strip(),
             build=self.do_build.get(),
-            plugins=self.inc_plugins.get(),
             cores=self.inc_cores.get(),
             replace=self.replace.get(),
             notes=self.notes.get("1.0", "end").strip(),
@@ -204,13 +201,12 @@ class App:
                 if f.name not in SKIP_ASSETS:
                     z.write(f, base + f.relative_to(APP).as_posix())
                     count += 1
-            if cfg["plugins"]:
-                for f in self.walk(APP / "plugins"):
-                    rel = f.relative_to(APP / "plugins")
-                    if f.suffix.lower() in SKIP_PLUGIN_EXT or SKIP_PLUGIN_DIRS & set(rel.parts[:-1]):
-                        continue
-                    z.write(f, base + f.relative_to(APP).as_posix())
-                    count += 1
+            for f in self.walk(APP / "plugins"):
+                rel = f.relative_to(APP / "plugins")
+                if f.suffix.lower() in SKIP_PLUGIN_EXT or SKIP_PLUGIN_DIRS & set(rel.parts[:-1]):
+                    continue
+                z.write(f, base + f.relative_to(APP).as_posix())
+                count += 1
             if cfg["cores"]:
                 for f in self.walk(APP / "libretro" / "cores"):
                     z.write(f, base + f.relative_to(APP).as_posix())

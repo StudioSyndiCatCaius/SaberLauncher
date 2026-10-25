@@ -99,19 +99,27 @@ main :: proc() {
 		time.sleep(800 * time.Millisecond)
 	}
 	rl.SetTraceLogLevel(.WARNING)
-	rl.SetConfigFlags({.VSYNC_HINT, .WINDOW_ALWAYS_RUN, .MSAA_4X_HINT})
+	// hidden until the splash is drawn, otherwise Windows shows a blank white window while loading
+	rl.SetConfigFlags({.VSYNC_HINT, .WINDOW_ALWAYS_RUN, .MSAA_4X_HINT, .WINDOW_HIDDEN})
 	rl.InitWindow(1280, 720, WINDOW_TITLE)
 	rl.SetExitKey(.KEY_NULL)
 	rl.SetTargetFPS(TARGET_FPS)
 	rl.ToggleBorderlessWindowed()
-	restore_after_child()
-	rl.InitAudioDevice()
-	theme_init()
+	apply_ui_theme(app.settings.ui_theme)
 	font_init()
+	draw_splash("Starting")
+	rl.ClearWindowState({.WINDOW_HIDDEN})
+	restore_after_child()
+	draw_splash("Starting")
+	rl.InitAudioDevice()
+	draw_splash("Loading theme")
+	theme_init()
 	xinput_init()
 
+	draw_splash("Loading plugins")
 	plugins_init()
 	media_watch_start()
+	draw_splash("Scanning drives and library")
 	rescan_all()
 	play_disc_from_args()
 
@@ -211,6 +219,25 @@ poll_drive_changes :: proc() {
 		rescan_drives()
 		set_status("Drives updated  ·  %d inserted", len(app.drive_games))
 	}
+}
+
+// One startup frame between blocking load steps: title, accent bar, current step.
+draw_splash :: proc(step: string) {
+	w := f32(rl.GetScreenWidth())
+	h := f32(rl.GetScreenHeight())
+	cy := h * 0.5
+	title_size: f32 = 96
+	tw := measure_t("SABER", title_size)
+	x := (w - tw) * 0.5
+
+	rl.BeginDrawing()
+	rl.ClearBackground(COL_BG)
+	rl.DrawRectangleGradientV(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, 0), with_alpha(COL_SHADE, 120))
+	rl.DrawRectangleRounded({x - 30, cy - 52, 8, 84}, 1, 4, COL_ACCENT)
+	draw_t("SABER", x, cy - 58, title_size, COL_TEXT)
+	draw_t_center(step, w * 0.5, cy + 60, 22, COL_MUTED)
+	rl.EndDrawing()
+	free_all(context.temp_allocator)
 }
 
 rescan_drives :: proc() {
