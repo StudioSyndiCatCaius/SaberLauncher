@@ -387,15 +387,12 @@ find_retro_core :: proc(p: Retro_Platform) -> (string, bool) {
 
 // Plays a disc game in Saber's window. Blocks until the player quits.
 retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
-	if g.platform == .PS2 {
-		return false, "PlayStation 2 discs need hardware rendering, which Saber doesn't support yet"
-	}
 	core_path, has_core := find_retro_core(g.platform)
 	if !has_core {
 		return false, fmt.tprintf("No %s core: put %s in APP\\libretro\\cores", RETRO_PLATFORM_NAME[g.platform], RETRO_CORES[g.platform][0])
 	}
-	// CD-based systems get raw sectors behind a generated .cue; DVD-based ones a plain .iso
-	retro_iso := g.platform == .PSP
+	// PS1 gets raw sectors behind a generated .cue; PSP and PS2 (DVD and CD alike) a plain .iso
+	retro_iso := g.platform == .PSP || g.platform == .PS2
 	cue, disc_ok := retro_open_disc(g.disc_letter, retro_iso)
 	if !disc_ok do return false, fmt.tprintf("Couldn't read the disc in %c:", g.disc_letter)
 
@@ -443,7 +440,8 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	if !retro.core.load_game(&info) {
 		retro.core.deinit()
 		cd_close()
-		return false, "The emulator couldn't boot this disc (missing BIOS in APP\\libretro\\system?)"
+		bios_dir := g.platform == .PS2 ? "system\\pcsx2\\bios" : "system"
+		return false, fmt.tprintf("The emulator couldn't boot this disc (missing BIOS in APP\\libretro\\%s?)", bios_dir)
 	}
 	retro.core.get_system_av_info(&retro.av)
 	if !retro_hw_start(i32(retro.av.geometry.max_width), i32(retro.av.geometry.max_height)) {
