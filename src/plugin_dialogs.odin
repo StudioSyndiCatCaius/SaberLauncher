@@ -12,6 +12,12 @@ package saber
 //                  Do one small step of work per call. Reaching 1.0 closes the dialog.
 //       on_end:    function(cancelled) -- cancelled = true when the user pressed Cancel / B
 //
+//   Dialog_Menu(text, items, on_cancel)
+//       items:     list of { name = "Label", description = "optional", Do = function() end };
+//                  picking one calls its Do (a returned string becomes the status message).
+//                  A Cancel row is added at the end; long lists scroll.
+//       on_cancel: optional function() -- Cancel picked or dismissed with B
+//
 // Dialogs queue up: a Dialog_Info opened from on_end shows after the process closes.
 
 import "base:runtime"
@@ -23,6 +29,7 @@ import rl "vendor:raylib"
 Plugin_Dialog_Kind :: enum {
 	Info,
 	Process,
+	Menu,
 }
 
 Plugin_Dialog :: struct {
@@ -35,6 +42,10 @@ Plugin_Dialog :: struct {
 	on_select: c.int, // registry refs (LUA_NOREF when absent)
 	progress:  c.int,
 	on_end:    c.int,
+	items:     c.int,          // Menu: the items table
+	item_idx:  [dynamic]int,   // Menu: options[i] is items[item_idx[i]] (the last option is Cancel)
+	descs:     [dynamic]string, // Menu: description per option
+	scroll:    f32,            // Menu: first visible row, eased
 	value:     f32,
 	shown:     f32, // eased bar
 	t:         f32,
@@ -60,11 +71,14 @@ dialog_ref_arg :: proc(L: ^lua_State, idx: c.int) -> c.int {
 }
 
 dialog_free :: proc(d: ^Plugin_Dialog) {
-	for ref in ([]c.int{d.on_select, d.progress, d.on_end}) {
+	for ref in ([]c.int{d.on_select, d.progress, d.on_end, d.items}) {
 		if ref != LUA_NOREF do luaL_unref(d.L, LUA_REGISTRYINDEX, ref)
 	}
 	for o in d.options do delete(o)
 	delete(d.options)
+	for s in d.descs do delete(s)
+	delete(d.descs)
+	delete(d.item_idx)
 	delete(d.text)
 	delete(d.title)
 }
@@ -104,8 +118,31 @@ dialog_finish :: proc(index: int, cancelled: bool) {
 		dialog_call(&d, d.on_end, proc(L: ^lua_State, d: ^Plugin_Dialog) {
 			lua_pushboolean(L, cancel ? 1 : 0)
 		})
+	case .Menu:
+		if index >= 1 && index <= len(d.item_idx) {
+			menu_run_item(&d, d.item_idx[index - 1])
+		} else if d.on_select != LUA_NOREF {
+			dialog_call(&d, d.on_select, proc(L: ^lua_State, d: ^Plugin_Dialog) { lua_pushnil(L) })
+		}
 	}
 	dialog_free(&d)
+}
+
+// Calls items[i].Do(); a returned string becomes the status message.
+menu_run_item :: proc(d: ^Plugin_Dialog, i: int) {
+	L := d.L
+	top := lua_gettop(L)
+	defer lua_settop(L, top)
+	lua_rawgeti(L, LUA_REGISTRYINDEX, i64(d.items))
+	lua_rawgeti(L, -1, i64(i))
+	if lua_getfield(L, -1, "Do") != LUA_TFUNCTION do return
+	if lua_pcall(L, 0, 1, 0) != LUA_OK {
+		msg := lua_string(L, -1)
+		plugin_logf("%s: menu item %d: %s", d.title, i, msg)
+		set_status("%s: %s", d.title, msg)
+		return
+	}
+	if lua_type(L, -1) == LUA_TSTRING do set_status("%s", lua_string(L, -1))
 }
 
 // Input + progress polling for the front dialog. Called from handle_app_input.
@@ -113,7 +150,7 @@ handle_plugin_dialog_input :: proc() {
 	d := &plugin_dialogs[0]
 	if !d.opened do return
 	switch d.kind {
-	case .Info:
+	case .Info, .Menu:
 		n := len(d.options)
 		if input.up || input.left {
 			d.sel = (d.sel - 1 + n) % n
@@ -178,8 +215,67 @@ draw_plugin_dialog :: proc(w, h: f32) {
 	case .Process:
 		draw_process_dialog(d, w, h)
 		draw_hints(w, h, []Hint{{"B", "Cancel"}})
+	case .Menu:
+		draw_menu_dialog(d, w, h)
+		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Cancel"}})
 	}
 	d.opened = true
+}
+
+// Like the Info dialog, but rows past the screen scroll and the selected row's description shows.
+draw_menu_dialog :: proc(d: ^Plugin_Dialog, w, h: f32) {
+	rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(150 * d.t)))
+	lines := wrap_text(d.text, DIALOG_TEXT, DIALOG_W - 56)
+	desc := wrap_text(d.descs[d.sel], 15, DIALOG_W - 56)
+	bh: f32 = 54
+	gap: f32 = 10
+	head := 76 + f32(len(lines)) * DIALOG_LINE + 12 + 2 * 20 + 14
+	n := len(d.options)
+	rows := clamp(int((h * 0.86 - head - 14) / (bh + gap)), 1, n)
+	ph := head + f32(rows) * (bh + gap) + 14
+	// keep the selection on screen
+	first := clamp(int(d.scroll + 0.5), 0, n - rows)
+	if d.sel < first do first = d.sel
+	if d.sel >= first + rows do first = d.sel - rows + 1
+	d.scroll = smooth_to(d.scroll, f32(first), 16)
+
+	s := 0.94 + 0.06 * d.t
+	r := rl.Rectangle{(w - DIALOG_W * s) * 0.5, (h - ph * s) * 0.5, DIALOG_W * s, ph * s}
+	draw_panel(r, false, with_alpha(COL_PANEL_SOLID, u8(244 * d.t)))
+	if d.t < 0.5 do return
+	draw_t_fit(d.title, r.x + 28, r.y + 26, r.width - 56, 22, COL_ACCENT, false)
+	y := r.y + 70
+	for line in lines {
+		draw_t(line, r.x + 28, y, DIALOG_TEXT, COL_TEXT)
+		y += DIALOG_LINE
+	}
+	y += 12
+	for line, i in desc {
+		if i >= 2 do break
+		draw_t(line, r.x + 28, y + f32(i) * 20, 15, COL_MUTED)
+	}
+	y += 2 * 20 + 14
+
+	list := rl.Rectangle{r.x, y, r.width, f32(rows) * (bh + gap) - gap}
+	rl.BeginScissorMode(i32(list.x), i32(list.y), i32(list.width), i32(list.height))
+	for label, i in d.options {
+		by := y + (f32(i) - d.scroll) * (bh + gap)
+		if by + bh < list.y || by > list.y + list.height do continue
+		br := rl.Rectangle{r.x + 24, by, r.width - 48, bh}
+		if ui_button(fmt.tprintf("pmenu-%d", i), br, label, i == d.sel, true) && d.opened && by >= list.y && by + bh <= list.y + list.height + 1 {
+			d.sel = i
+			d.clicked = true
+		}
+	}
+	rl.EndScissorMode()
+	if n > rows {
+		// scroll bar
+		track := rl.Rectangle{r.x + r.width - 14, list.y, 4, list.height}
+		rl.DrawRectangleRounded(track, 1, 4, COL_FAINT)
+		th := track.height * f32(rows) / f32(n)
+		ty := track.y + (track.height - th) * d.scroll / f32(n - rows)
+		rl.DrawRectangleRounded({track.x, ty, track.width, th}, 1, 4, COL_ACCENT)
+	}
 }
 
 DIALOG_W :: 520
@@ -257,7 +353,7 @@ wrap_text :: proc(text: string, size, max_w: f32) -> []string {
 // Lua globals
 
 dialog_new :: proc(L: ^lua_State, kind: Plugin_Dialog_Kind) -> Plugin_Dialog {
-	d := Plugin_Dialog{kind = kind, L = L, on_select = LUA_NOREF, progress = LUA_NOREF, on_end = LUA_NOREF}
+	d := Plugin_Dialog{kind = kind, L = L, on_select = LUA_NOREF, progress = LUA_NOREF, on_end = LUA_NOREF, items = LUA_NOREF}
 	p := plugin_for_state(L)
 	d.title = strings.clone(p != nil ? p.name : "Plugin")
 	d.text = strings.clone(lua_string(L, 1))
@@ -292,5 +388,37 @@ lua_dialog_process :: proc "c" (L: ^lua_State) -> c.int {
 	d.progress = dialog_ref_arg(L, 2)
 	d.on_end = dialog_ref_arg(L, 3)
 	append(&plugin_dialogs, d)
+	return 0
+}
+
+// Dialog_Menu(text, items, on_cancel)
+lua_dialog_menu :: proc "c" (L: ^lua_State) -> c.int {
+	context = runtime.default_context()
+	if lua_type(L, 2) != LUA_TTABLE {
+		p := plugin_for_state(L)
+		plugin_logf("%s: Dialog_Menu: items must be a table", p != nil ? p.name : "Plugin")
+		return 0
+	}
+	d := dialog_new(L, .Menu)
+	n := int(lua_rawlen(L, 2))
+	for i in 1 ..= n {
+		lua_rawgeti(L, 2, i64(i))
+		if lua_type(L, -1) == LUA_TTABLE {
+			name := lua_field_string(L, -1, "name")
+			if name != "" {
+				append(&d.options, strings.clone(name))
+				append(&d.descs, strings.clone(lua_field_string(L, -1, "description")))
+				append(&d.item_idx, i)
+			}
+		}
+		lua_pop(L, 1)
+	}
+	append(&d.options, strings.clone("Cancel"))
+	append(&d.descs, strings.clone(""))
+	lua_pushvalue(L, 2)
+	d.items = luaL_ref(L, LUA_REGISTRYINDEX)
+	d.on_select = dialog_ref_arg(L, 3)
+	append(&plugin_dialogs, d)
+	sfx_click()
 	return 0
 }

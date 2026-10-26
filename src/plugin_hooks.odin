@@ -183,7 +183,16 @@ push_game_table :: proc(L: ^lua_State, g: ^Game) {
 	push_field(L, "label", g.drive_label)
 	push_field(L, "letter", g.disc_letter != 0 ? fmt.tprintf("%c", g.disc_letter) : "")
 	push_field(L, "root", g.root)
-	push_field(L, "kind", g.platform != .None ? "disc" : "folder") // folder = a _Saber game on a drive
+	// folder = a _Saber game on a drive, rom = a ROM file on a drive
+	push_field(L, "kind", g.rom_path != "" ? "rom" : g.platform != .None ? "disc" : "folder")
+	push_rom_fields(L, g)
+}
+
+// ROMs: file = file name without extension, crc = CRC32 hex ("" when not hashed)
+push_rom_fields :: proc(L: ^lua_State, g: ^Game) {
+	if g.rom_path == "" do return
+	push_field(L, "file", g.rom_name)
+	push_field(L, "crc", g.rom_crc)
 }
 
 seen_discs: [dynamic]string // "F:SLUS-00892" of the discs present at the last scan

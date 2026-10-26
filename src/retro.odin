@@ -30,17 +30,80 @@ Retro_Platform :: enum {
 	PS1,
 	PS2,
 	PSP,
+	DC, // burned self-boot CD-Rs (retro_dreamcast.odin)
+	// cartridge systems: one ROM file on a drive (roms.odin)
+	GB,
+	GBC,
+	GBA,
+	NES,
+	SNES,
+	N64,
+	MD,
+	SMS,
+	GG,
+	NDS,
+	PCE,
+	A2600,
 }
 
-RETRO_PLATFORM_NAME := [Retro_Platform]string{.None = "", .PS1 = "PlayStation", .PS2 = "PlayStation 2", .PSP = "PlayStation Portable"}
-RETRO_PLATFORM_DIR := [Retro_Platform]string{.None = "", .PS1 = "ps1", .PS2 = "ps2", .PSP = "psp"}
+RETRO_PLATFORM_NAME := [Retro_Platform]string {
+	.None  = "",
+	.PS1   = "PlayStation",
+	.PS2   = "PlayStation 2",
+	.PSP   = "PlayStation Portable",
+	.DC    = "Dreamcast",
+	.GB    = "Game Boy",
+	.GBC   = "Game Boy Color",
+	.GBA   = "Game Boy Advance",
+	.NES   = "NES",
+	.SNES  = "Super Nintendo",
+	.N64   = "Nintendo 64",
+	.MD    = "Mega Drive / Genesis",
+	.SMS   = "Master System",
+	.GG    = "Game Gear",
+	.NDS   = "Nintendo DS",
+	.PCE   = "PC Engine / TurboGrafx-16",
+	.A2600 = "Atari 2600",
+}
+RETRO_PLATFORM_DIR := [Retro_Platform]string {
+	.None  = "",
+	.PS1   = "ps1",
+	.PS2   = "ps2",
+	.PSP   = "psp",
+	.DC    = "dc",
+	.GB    = "gb",
+	.GBC   = "gbc",
+	.GBA   = "gba",
+	.NES   = "nes",
+	.SNES  = "snes",
+	.N64   = "n64",
+	.MD    = "md",
+	.SMS   = "sms",
+	.GG    = "gg",
+	.NDS   = "nds",
+	.PCE   = "pce",
+	.A2600 = "a2600",
+}
 
 // First core found wins.
 RETRO_CORES := [Retro_Platform][]string {
-	.None = {},
-	.PS1  = {"swanstation_libretro.dll", "mednafen_psx_hw_libretro.dll", "mednafen_psx_libretro.dll", "pcsx_rearmed_libretro.dll"},
-	.PS2  = {"pcsx2_libretro.dll"},
-	.PSP  = {"ppsspp_libretro.dll"},
+	.None  = {},
+	.PS1   = {"swanstation_libretro.dll", "mednafen_psx_hw_libretro.dll", "mednafen_psx_libretro.dll", "pcsx_rearmed_libretro.dll"},
+	.PS2   = {"pcsx2_libretro.dll"},
+	.PSP   = {"ppsspp_libretro.dll"},
+	.DC    = {"flycast_libretro.dll"},
+	.GB    = {"gambatte_libretro.dll", "sameboy_libretro.dll", "mgba_libretro.dll"},
+	.GBC   = {"gambatte_libretro.dll", "sameboy_libretro.dll", "mgba_libretro.dll"},
+	.GBA   = {"mgba_libretro.dll", "vbam_libretro.dll", "vba_next_libretro.dll"},
+	.NES   = {"mesen_libretro.dll", "nestopia_libretro.dll", "fceumm_libretro.dll", "quicknes_libretro.dll"},
+	.SNES  = {"snes9x_libretro.dll", "bsnes_libretro.dll", "snes9x2010_libretro.dll"},
+	.N64   = {"mupen64plus_next_libretro.dll", "parallel_n64_libretro.dll"},
+	.MD    = {"genesis_plus_gx_libretro.dll", "picodrive_libretro.dll"},
+	.SMS   = {"genesis_plus_gx_libretro.dll", "picodrive_libretro.dll"},
+	.GG    = {"genesis_plus_gx_libretro.dll"},
+	.NDS   = {"melondsds_libretro.dll", "melonds_libretro.dll", "desmume_libretro.dll"},
+	.PCE   = {"mednafen_pce_fast_libretro.dll", "mednafen_pce_libretro.dll"},
+	.A2600 = {"stella_libretro.dll", "stella2014_libretro.dll"},
 }
 
 // Saber only presents software frames, so make cores pick their software renderer.
@@ -50,6 +113,7 @@ RETRO_OPTION_DEFAULTS := [?][2]string {
 
 Retro_Option :: struct {
 	key:     cstring,
+	desc:    string, // shown in the emulation menu
 	values:  [dynamic]cstring,
 	current: int,
 }
@@ -80,6 +144,7 @@ Retro :: struct {
 	disc_path_c:     cstring,
 	disc_iso:        bool, // the disc is served as .iso (cd_open_iso), not .cue/.bin
 	disc_check_at:   f64,
+	rom_data:        []byte, // ROM games whose core wants the file in memory (need_fullpath = false)
 
 	frame_time_cb:   Frame_Time_Callback,
 	last_run:        time.Tick,
@@ -117,7 +182,6 @@ retro: Retro
 // Audio: the core's samples go into a lock-free ring that raylib's audio thread drains.
 
 RING_FRAMES :: 1 << 15 // power of two
-AUDIO_TARGET_SEC :: 0.05
 
 Retro_Audio :: struct {
 	stream:    rl.AudioStream,
@@ -155,7 +219,7 @@ retro_audio_open :: proc(rate: f64) {
 	raudio.stream = rl.LoadAudioStream(c.uint(raudio.rate + 0.5), 16, 2)
 	if !rl.IsAudioStreamValid(raudio.stream) do return
 	rl.SetAudioStreamCallback(raudio.stream, retro_audio_callback)
-	rl.SetAudioStreamVolume(raudio.stream, app.settings.volume)
+	rl.SetAudioStreamVolume(raudio.stream, emu_volume())
 	rl.PlayAudioStream(raudio.stream)
 	raudio.ok = true
 }
@@ -176,6 +240,7 @@ retro_audio_buffered :: proc() -> u64 {
 
 retro_audio_push :: proc(data: [^]i16, frames: int) {
 	if !raudio.ok || frames <= 0 do return
+	if emu.speed != EMU_SPEED_DEFAULT do return // slow motion / fast forward: silent, paced by the clock
 	raudio.produced = true
 	w := sync.atomic_load_explicit(&raudio.write_pos, .Relaxed)
 	r := sync.atomic_load_explicit(&raudio.read_pos, .Acquire)
@@ -202,7 +267,7 @@ disc_game :: proc(letter: rune, label: string) -> (Game, bool) {
 		// burned discs whose mounted UDF side hides the game; its volume label is bogus too
 		ok: bool
 		data, ok = iso_read_root_file(u8(letter), "SYSTEM.CNF", allocator = context.temp_allocator)
-		if !ok do return {}, false
+		if !ok do return dc_disc_game(letter, label)
 		label = ""
 	}
 	serial := ""
@@ -375,32 +440,53 @@ retro_dir :: proc(parts: ..string) -> string {
 	return path_join(all[:])
 }
 
+// The core picked in the emulation menu wins; otherwise the first installed candidate.
 find_retro_core :: proc(p: Retro_Platform) -> (string, bool) {
+	emu_init()
+	if pref, ok := emu.cores[RETRO_PLATFORM_DIR[p]]; ok {
+		if path, found := emu_core_installed(pref); found do return path, true
+	}
 	for name in RETRO_CORES[p] {
-		for dir in ([]string{retro_dir("cores"), retro_dir()}) {
-			path := path_join({dir, name})
-			if os.exists(path) do return path, true
-		}
+		if path, found := emu_core_installed(name); found do return path, true
 	}
 	return "", false
 }
 
 // Plays a disc game in Saber's window. Blocks until the player quits.
 retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
+	if g.gdrom {
+		_, _, why := dc_prepare(g) // only explains why it can't play
+		return false, why
+	}
 	core_path, has_core := find_retro_core(g.platform)
 	if !has_core {
 		return false, fmt.tprintf("No %s core: put %s in APP\\libretro\\cores", RETRO_PLATFORM_NAME[g.platform], RETRO_CORES[g.platform][0])
 	}
+	is_rom := g.rom_path != ""
 	// PS1 gets raw sectors behind a generated .cue; PSP and PS2 (DVD and CD alike) a plain .iso
 	retro_iso := g.platform == .PSP || g.platform == .PS2
-	cue, disc_ok := retro_open_disc(g.disc_letter, retro_iso)
-	if !disc_ok do return false, fmt.tprintf("Couldn't read the disc in %c:", g.disc_letter)
+	cue: string
+	if is_rom {
+		if !os.exists(g.rom_path) do return false, fmt.tprintf("Couldn't find %s", g.rom_path)
+		cue = strings.clone(g.rom_path)
+	} else if g.platform == .DC {
+		// Flycast can't use the live VFS disc: boot a copy on disk (made on first play)
+		dc_ok: bool
+		dc_err: string
+		if cue, dc_ok, dc_err = dc_prepare(g); !dc_ok do return false, dc_err
+	} else {
+		disc_ok: bool
+		cue, disc_ok = retro_open_disc(g.disc_letter, retro_iso)
+		if !disc_ok do return false, fmt.tprintf("Couldn't read the disc in %c:", g.disc_letter)
+	}
 
+	emu_init()
 	retro = {}
 	retro.ctx = context
-	retro.disc_letter = g.disc_letter
+	emu_filter_tex = 0
+	retro.disc_letter = g.platform == .DC ? 0 : g.disc_letter // no live disc swaps for a copied disc
 	retro.disc_iso = retro_iso
-	retro.disc_serial, retro.disc_present = volume_serial(g.disc_letter)
+	if !is_rom && g.platform != .DC do retro.disc_serial, retro.disc_present = volume_serial(g.disc_letter)
 	plat := RETRO_PLATFORM_DIR[g.platform]
 	saves := retro_dir("saves", plat)
 	os.make_directory(retro_dir())
@@ -415,6 +501,12 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	save_key := g.disc_serial
 	if g.mod_name != "" do save_key = fmt.tprintf("%s-%s", g.disc_serial, safe_file_name(g.mod_name))
 	retro.sram_path = path_join({saves, g.mod_name != "" ? fmt.tprintf("Memory Card-%s.srm", save_key) : "Memory Card.srm"})
+	if is_rom {
+		// cartridges keep their save with the game, named after the ROM file
+		save_key = safe_file_name(g.rom_name)
+		delete(retro.sram_path)
+		retro.sram_path = path_join({saves, fmt.tprintf("%s.srm", save_key)})
+	}
 	retro.state_path = path_join({saves, fmt.tprintf("%s.state", save_key)})
 	retro_log_open()
 	retro_load_overrides()
@@ -426,20 +518,36 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	}
 	defer dynlib.unload_library(retro.core.__handle)
 
+	// RetroArch's order: environment, init, then the other callbacks. Some cores (Mesen)
+	// only create the objects those setters write to in retro_init.
 	retro.core.set_environment(retro_environment)
+	retro.core.init()
 	retro.core.set_video_refresh(retro_video_refresh)
 	retro.core.set_audio_sample(retro_audio_sample)
 	retro.core.set_audio_sample_batch(retro_audio_sample_batch)
 	retro.core.set_input_poll(retro_input_poll)
 	retro.core.set_input_state(retro_input_state)
-	retro.core.init()
 
 	retro.game_path_c = strings.clone_to_cstring(cue)
 	delete(cue)
 	info := Game_Info{path = retro.game_path_c}
+	if is_rom {
+		sys: System_Info
+		retro.core.get_system_info(&sys)
+		if !sys.need_fullpath {
+			data, err := os.read_entire_file(g.rom_path, context.allocator)
+			if err != nil {
+				retro.core.deinit()
+				return false, fmt.tprintf("Couldn't read %s", g.rom_path)
+			}
+			retro.rom_data = data
+			info.data, info.size = raw_data(data), c.size_t(len(data))
+		}
+	}
 	if !retro.core.load_game(&info) {
 		retro.core.deinit()
 		cd_close()
+		if is_rom do return false, "The emulator couldn't load this game (missing BIOS in APP\\libretro\\system?)"
 		bios_dir := g.platform == .PS2 ? "system\\pcsx2\\bios" : "system"
 		return false, fmt.tprintf("The emulator couldn't boot this disc (missing BIOS in APP\\libretro\\%s?)", bios_dir)
 	}
@@ -488,6 +596,7 @@ retro_free :: proc() {
 	if retro.has_tex do rl.UnloadTexture(retro.tex)
 	for &o in retro.options {
 		delete(o.key)
+		delete(o.desc)
 		for v in o.values do delete(v)
 		delete(o.values)
 	}
@@ -506,6 +615,7 @@ retro_free :: proc() {
 	delete(retro.core_path_c)
 	delete(retro.game_path_c)
 	delete(retro.disc_path_c)
+	delete(retro.rom_data)
 	delete(retro.sram_path)
 	delete(retro.state_path)
 	if retro.log_file != nil do os.close(retro.log_file)
@@ -528,7 +638,7 @@ retro_run_loop :: proc(g: ^Game) {
 			if retro.quit do break
 		}
 
-		retro_watch_disc()
+		if retro.disc_letter != 0 do retro_watch_disc()
 		retro_update_input()
 		retro_run_frame()
 		retro_upload_frame()
@@ -566,7 +676,7 @@ retro_run_frame :: proc() {
 retro_pace :: proc(next_frame: ^time.Tick) {
 	if raudio.ok && raudio.produced {
 		// Audio-driven: wait until the device has drained down to the target latency.
-		target := u64(raudio.rate * AUDIO_TARGET_SEC)
+		target := u64(raudio.rate * emu_audio_target_sec())
 		start := time.tick_now()
 		for retro_audio_buffered() > target && time.tick_since(start) < 100 * time.Millisecond {
 			win.Sleep(1)
@@ -575,6 +685,7 @@ retro_pace :: proc(next_frame: ^time.Tick) {
 		return
 	}
 	fps := retro.av.timing.fps > 0 ? retro.av.timing.fps : 60
+	fps *= emu_speed()
 	next_frame^ = time.tick_add(next_frame^, time.Duration(f64(time.Second) / fps))
 	ahead := time.tick_diff(time.tick_now(), next_frame^)
 	if ahead < -100 * time.Millisecond || ahead > 100 * time.Millisecond {
@@ -690,10 +801,20 @@ retro_upload_frame :: proc() {
 		img := rl.Image{data = raw_data(retro.frame), width = retro.frame_w, height = retro.frame_h, mipmaps = 1, format = .UNCOMPRESSED_R8G8B8A8}
 		retro.tex = rl.LoadTextureFromImage(img)
 		retro.has_tex = retro.tex.id != 0
-		rl.SetTextureFilter(retro.tex, .POINT)
+		emu_filter_tex = 0
+		emu_apply_filter(retro.tex)
 		return
 	}
 	rl.UpdateTexture(retro.tex, raw_data(retro.frame))
+}
+
+emu_filter_tex: u32 // texture the current smoothing mode was applied to
+emu_filter_smooth: bool
+
+emu_apply_filter :: proc(tex: rl.Texture2D) {
+	if emu_filter_tex == tex.id && emu_filter_smooth == emu.smooth do return
+	rl.SetTextureFilter(tex, emu.smooth ? .BILINEAR : .POINT)
+	emu_filter_tex, emu_filter_smooth = tex.id, emu.smooth
 }
 
 retro_draw_frame :: proc(w, h: f32, tint: rl.Color) {
@@ -703,16 +824,41 @@ retro_draw_frame :: proc(w, h: f32, tint: rl.Color) {
 	} else if !retro.has_tex {
 		return
 	}
+	emu_apply_filter(tex)
 	aspect := retro.av.geometry.aspect_ratio
 	if aspect <= 0 do aspect = f32(retro.frame_w) / f32(retro.frame_h)
+	switch emu.aspect {
+	case .Four_Three: aspect = 4.0 / 3
+	case .Sixteen_Nine: aspect = 16.0 / 9
+	case .Stretch: aspect = w / h
+	case .Core:
+	}
 	dh := h
 	dw := dh * aspect
 	if dw > w {
 		dw = w
 		dh = dw / aspect
 	}
+	if emu.integer_scale && emu.aspect != .Stretch {
+		// largest whole multiple of the source height that still fits
+		if sh := abs(src.height); sh > 0 {
+			if k := f32(int(min(dh / sh, dw / (sh * aspect)))); k >= 1 {
+				dh = sh * k
+				dw = dh * aspect
+			}
+		}
+	}
 	dst := rl.Rectangle{(w - dw) / 2, (h - dh) / 2, dw, dh}
 	rl.DrawTexturePro(tex, src, dst, {}, 0, tint)
+	if emu.scanlines > 0 {
+		lines := int(abs(src.height))
+		if pitch := dst.height / f32(max(lines, 1)); pitch >= 2 {
+			col := rl.Color{0, 0, 0, emu.scanlines == 1 ? 55 : 120}
+			for i in 0 ..< lines {
+				rl.DrawRectangleRec({dst.x, dst.y + f32(i) * pitch + pitch * 0.5, dst.width, pitch * 0.5}, col)
+			}
+		}
+	}
 }
 
 retro_osd :: proc(format: string, args: ..any) {
@@ -721,6 +867,12 @@ retro_osd :: proc(format: string, args: ..any) {
 }
 
 retro_draw_osd :: proc(w, h: f32) {
+	if emu.show_fps {
+		label := fmt.tprintf("%d FPS", rl.GetFPS())
+		tw := measure_t(label, 18)
+		rl.DrawRectangleRounded({w - tw - 40, 16, tw + 24, 34}, 0.4, 8, {0, 0, 0, 170})
+		draw_t(label, w - tw - 28, 24, 18, rl.WHITE)
+	}
 	if retro.osd == "" || rl.GetTime() > retro.osd_until do return
 	size: f32 = 22
 	tw := measure_t(retro.osd, size)
@@ -732,7 +884,7 @@ retro_draw_osd :: proc(w, h: f32) {
 // ---------------------------------------------------------------------------
 // In-game overlay (Home / Esc)
 
-RETRO_PAUSE_LABELS := [?]string{"Resume", "Save State", "Load State", "Quit Game"}
+RETRO_PAUSE_LABELS := [?]string{"Resume", "Save State", "Load State", "Emulation Settings", "Quit Game"}
 
 retro_pause_pressed :: proc() -> bool {
 	if guide_pressed(false) do return true
@@ -780,6 +932,10 @@ retro_pause_menu :: proc(g: ^Game) {
 			sfx_back()
 			return
 		}
+		if !first && input.extra {
+			app.pause_sel = 3 // Y: straight to Emulation Settings
+			input.confirm = true
+		}
 		if input.confirm {
 			switch app.pause_sel {
 			case 0:
@@ -793,9 +949,14 @@ retro_pause_menu :: proc(g: ^Game) {
 					retro_osd("State loaded")
 					return
 				}
-				sub = fmt.bprintf(sub_buf[:], "No save state for %s yet", g.disc_serial)
+				sub = fmt.bprintf(sub_buf[:], "No save state for %s yet", g.rom_path != "" ? g.title : g.disc_serial)
 				sfx_back()
 			case 3:
+				emu_menu_run_in_game()
+				if retro.quit do return
+				app.pause_t = 1
+				first = true
+			case 4:
 				sfx_back()
 				retro.quit = true
 				return
@@ -813,7 +974,7 @@ retro_pause_menu :: proc(g: ^Game) {
 			app.pause_sel = clicked
 			input.confirm = true
 		}
-		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Resume"}})
+		draw_hints(w, h, []Hint{{"A", "Select"}, {"Y", "Settings"}, {"B", "Resume"}})
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 		first = false
@@ -871,10 +1032,8 @@ RETRO_KEY_BINDS := [?]Retro_Key_Bind {
 	{.BACKSPACE, RETRO_DEVICE_ID_JOYPAD_SELECT},
 }
 
-STICK_DEADZONE :: 0.15
-
 stick_axis :: proc(v: f32) -> i16 {
-	if abs(v) < STICK_DEADZONE do return 0
+	if abs(v) < f32(emu.deadzone) / 100 do return 0
 	return i16(clamp(v, -1, 1) * 32767)
 }
 
@@ -889,10 +1048,10 @@ retro_update_input :: proc() {
 
 	if retro.block_input {
 		any_down := rl.GetKeyPressed() != .KEY_NULL
-		for k in RETRO_KEY_BINDS do if rl.IsKeyDown(k.key) do any_down = true
+		for keys in emu.keys do for k in keys do if k != .KEY_NULL && rl.IsKeyDown(k) do any_down = true
 		for p in 0 ..< i32(MAX_PADS) {
 			if !rl.IsGamepadAvailable(p) do continue
-			for b in RETRO_PAD_BINDS do if rl.IsGamepadButtonDown(p, b.button) do any_down = true
+			for b in emu.pad do if b != .UNKNOWN && rl.IsGamepadButtonDown(p, b) do any_down = true
 		}
 		if any_down do return
 		retro.block_input = false
@@ -903,13 +1062,13 @@ retro_update_input :: proc() {
 	for p in 0 ..< i32(MAX_PADS) {
 		if !rl.IsGamepadAvailable(p) do continue
 		bits: u16
-		for b in RETRO_PAD_BINDS {
-			if rl.IsGamepadButtonDown(p, b.button) do bits |= 1 << b.id
+		for button, id in emu.pad {
+			if button != .UNKNOWN && rl.IsGamepadButtonDown(p, button) do bits |= 1 << emu_joy_id(u8(id))
 		}
 		lt := trigger_axis(rl.GetGamepadAxisMovement(p, .LEFT_TRIGGER))
 		rt := trigger_axis(rl.GetGamepadAxisMovement(p, .RIGHT_TRIGGER))
-		if lt > 4000 || rl.IsGamepadButtonDown(p, .LEFT_TRIGGER_2) do bits |= 1 << RETRO_DEVICE_ID_JOYPAD_L2
-		if rt > 4000 || rl.IsGamepadButtonDown(p, .RIGHT_TRIGGER_2) do bits |= 1 << RETRO_DEVICE_ID_JOYPAD_R2
+		if lt > 4000 do bits |= 1 << RETRO_DEVICE_ID_JOYPAD_L2
+		if rt > 4000 do bits |= 1 << RETRO_DEVICE_ID_JOYPAD_R2
 		retro.joy[port] = bits
 		retro.trigger[port] = {lt, rt}
 		retro.analog[port] = {
@@ -919,8 +1078,8 @@ retro_update_input :: proc() {
 		port += 1
 		if port >= 4 do break
 	}
-	for k in RETRO_KEY_BINDS {
-		if rl.IsKeyDown(k.key) do retro.joy[0] |= 1 << k.id
+	for keys, id in emu.keys {
+		for k in keys do if k != .KEY_NULL && rl.IsKeyDown(k) do retro.joy[0] |= 1 << emu_joy_id(u8(id))
 	}
 }
 
@@ -1036,22 +1195,45 @@ retro_sram_autosave :: proc() {
 // ---------------------------------------------------------------------------
 // Core options
 
+retro_set_override :: proc(k, v: string) {
+	if old_k, old_v := delete_key(&retro.overrides, k); old_k != "" {
+		delete(old_k)
+		delete(old_v)
+	}
+	retro.overrides[strings.clone(k)] = strings.clone(v)
+}
+
+retro_clear_overrides :: proc() {
+	for k, v in retro.overrides {
+		delete(k)
+		delete(v)
+	}
+	clear(&retro.overrides)
+}
+
+// Defaults, then options.ini, then whatever was chosen in the emulation menu.
 retro_load_overrides :: proc() {
-	for d in RETRO_OPTION_DEFAULTS do retro.overrides[strings.clone(d[0])] = strings.clone(d[1])
-	data, err := os.read_entire_file(retro_dir("options.ini"), context.temp_allocator)
-	if err != nil do return
-	it := string(data)
-	for line in strings.split_lines_iterator(&it) {
-		l := strings.trim_space(line)
-		if l == "" || l[0] == ';' || l[0] == '#' || l[0] == '[' do continue
-		k, _, v := strings.partition(l, "=")
-		k = strings.trim_space(k)
-		if k == "" do continue
-		if old_k, old_v := delete_key(&retro.overrides, k); old_k != "" {
-			delete(old_k)
-			delete(old_v)
+	emu_init()
+	for d in RETRO_OPTION_DEFAULTS do retro_set_override(d[0], d[1])
+	if data, err := os.read_entire_file(retro_dir("options.ini"), context.temp_allocator); err == nil {
+		it := string(data)
+		for line in strings.split_lines_iterator(&it) {
+			l := strings.trim_space(line)
+			if l == "" || l[0] == ';' || l[0] == '#' || l[0] == '[' do continue
+			k, _, v := strings.partition(l, "=")
+			k = strings.trim_space(k)
+			if k == "" do continue
+			retro_set_override(k, strings.trim(strings.trim_space(v), "\""))
 		}
-		retro.overrides[strings.clone(k)] = strings.clone(strings.trim(strings.trim_space(v), "\""))
+	}
+	for k, v in emu.core_opts do retro_set_override(k, v)
+}
+
+// Selects the value an override asks for, else the core's default (the first one).
+retro_pick_override :: proc(opt: ^Retro_Option) {
+	opt.current = 0
+	if want, ok := retro.overrides[string(opt.key)]; ok {
+		for v, idx in opt.values do if string(v) == want do opt.current = idx
 	}
 }
 
@@ -1060,13 +1242,14 @@ retro_set_variables :: proc(vars: [^]Retro_Variable) {
 	for i := 0; vars[i].key != nil; i += 1 {
 		key := string(vars[i].key)
 		spec := string(vars[i].value)
-		if semi := strings.index(spec, "; "); semi >= 0 do spec = spec[semi + 2:]
 		opt := Retro_Option{key = strings.clone_to_cstring(key)}
+		if semi := strings.index(spec, "; "); semi >= 0 {
+			opt.desc = strings.clone(spec[:semi])
+			spec = spec[semi + 2:]
+		}
 		for v in strings.split_iterator(&spec, "|") do append(&opt.values, strings.clone_to_cstring(v))
 		if len(opt.values) == 0 do append(&opt.values, strings.clone_to_cstring(""))
-		if want, ok := retro.overrides[key]; ok {
-			for v, idx in opt.values do if string(v) == want do opt.current = idx
-		}
+		retro_pick_override(&opt)
 		append(&retro.options, opt)
 	}
 }

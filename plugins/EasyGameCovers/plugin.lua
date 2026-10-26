@@ -1,18 +1,49 @@
 -- EasyGameCovers: box art for PlayStation / PlayStation 2 / PSP discs, by serial, from
 --   https://github.com/xlenore/psx-covers   https://github.com/xlenore/ps2-covers
 --   PSP: libretro's serial list names the game, its box art comes from thumbnails.libretro.com
+--   ROMs (GB, GBA, NES, SNES...): the ROM's CRC32 is looked up in libretro's No-Intro list,
+--   falling back to the file name; box art from thumbnails.libretro.com
 -- Covers are downloaded on demand (never bundled) into this plugin's covers/ folder.
 -- Needs Online Mode (Settings) to download; covers already on disk are always shown.
+
+local LIBRETRO_THUMBS = "https://thumbnails.libretro.com/"
+local LIBRETRO_DB = "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/"
+
+-- Saber platform -> libretro system name, for ROM games
+local ROM_SYSTEMS = {
+    gb = "Nintendo - Game Boy",
+    gbc = "Nintendo - Game Boy Color",
+    gba = "Nintendo - Game Boy Advance",
+    nes = "Nintendo - Nintendo Entertainment System",
+    snes = "Nintendo - Super Nintendo Entertainment System",
+    n64 = "Nintendo - Nintendo 64",
+    md = "Sega - Mega Drive - Genesis",
+    sms = "Sega - Master System - Mark III",
+    gg = "Sega - Game Gear",
+    nds = "Nintendo - Nintendo DS",
+    pce = "NEC - PC Engine - TurboGrafx 16",
+    a2600 = "Atari - 2600",
+}
+
+local function url_encode(s)
+    return (s:gsub("[^%w%-%._~]", function(ch) return string.format("%%%02X", ch:byte()) end))
+end
 
 local SOURCES = {
     ps1 = "https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/",
     ps2 = "https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/",
-    psp = "https://thumbnails.libretro.com/Sony%20-%20PlayStation%20Portable/Named_Boxarts/",
+    psp = LIBRETRO_THUMBS .. "Sony%20-%20PlayStation%20Portable/Named_Boxarts/",
+    dc = LIBRETRO_THUMBS .. "Sega%20-%20Dreamcast/Named_Boxarts/",
 }
--- serial -> No-Intro name, for sources that name covers by title
+-- serial (or ROM CRC) -> No-Intro / redump name, for sources that name covers by title
 local NAME_LISTS = {
-    psp = "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/serial/Sony%20-%20PlayStation%20Portable.dat",
+    psp = LIBRETRO_DB .. "serial/Sony%20-%20PlayStation%20Portable.dat",
+    dc = LIBRETRO_DB .. "redump/Sega%20-%20Dreamcast.dat",
 }
+for plat, sys in pairs(ROM_SYSTEMS) do
+    SOURCES[plat] = LIBRETRO_THUMBS .. url_encode(sys) .. "/Named_Boxarts/"
+    NAME_LISTS[plat] = LIBRETRO_DB .. "no-intro/" .. url_encode(sys) .. ".dat"
+end
 local STYLES = { "default", "3d" } -- folder names in the repos, per Cover Style option
 
 local function style()
@@ -29,10 +60,11 @@ local function ext(game, st)
     return st == "3d" and ".png" or ".jpg"
 end
 
--- relative to the plugin folder
+-- relative to the plugin folder; ROM serials can be file names, so keep them file-name safe
 local function cover_rel(game, st)
     st = style_for(game, st)
-    return "covers/" .. game.platform .. "/" .. st .. "/" .. game.serial .. ext(game, st)
+    local key = game.serial:gsub('[<>:"/\\|%?%*]', "_")
+    return "covers/" .. game.platform .. "/" .. st .. "/" .. key .. ext(game, st)
 end
 
 local function abs(rel)
@@ -46,6 +78,7 @@ local function exists(rel)
 end
 
 -- names[platform] = { [serial] = "Legend of Heroes, The - Trails in the Sky (USA)" }, loaded on demand
+-- (ROM systems: keyed by CRC32)
 local names = {}
 local names_loading = {}
 
@@ -54,19 +87,46 @@ local function load_names(plat)
     if not f then return false end
     local text = f:read("a")
     f:close()
-    local map, last = {}, nil
-    for line in text:gmatch("[^\r\n]+") do
-        local c = line:match('^%s*comment%s+"(.*)"')
-        if c then last = c end
-        local s = line:match('serial%s+"([^"]+)"')
-        if s and last then map[s:upper()] = last end
+    local map, fallback, last = {}, {}, nil
+    if ROM_SYSTEMS[plat] then
+        -- No-Intro: game ( name "X" ... rom ( name "X.gba" size N crc 1A2B3C4D ... ) )
+        for line in text:gmatch("[^\r\n]+") do
+            local n = line:match('^%s*name%s+"(.*)"')
+            if n then last = n end
+            local c = line:match('^%s*rom%s*%(.-%scrc%s+(%x+)')
+            if c and last then map[c:upper()] = last end
+        end
+    elseif plat == "dc" then
+        -- redump: game ( name "Crazy Taxi (USA) (En,Ja)" serial "51035" ... ). Discs carry
+        -- "MK-51035" in IP.BIN, and libretro's thumbnails drop the language tag.
+        for line in text:gmatch("[^\r\n]+") do
+            local n = line:match('^%s*name%s+"(.*)"')
+            if n then
+                -- "(En,Ja)" / "(Fr)": two-letter codes only, so "(Europe)" stays
+                last = n:gsub("%s*(%b())", function(g)
+                    if g:match("^%(%u%l[%u%l,]*%)$") and not g:find("%l%l") then return "" end
+                end)
+            end
+            local s = line:match('^%s*serial%s+"([^"]+)"')
+            if s and last then
+                s = s:upper()
+                map[s] = map[s] or last
+                local base = s:gsub("%-%d%d$", "") -- region suffix: "MK-51136-50"
+                if base ~= s then fallback[base] = fallback[base] or last end
+            end
+        end
+        -- suffix-stripped serials only where no disc has that exact serial
+        for k, v in pairs(fallback) do map[k] = map[k] or v end
+    else
+        for line in text:gmatch("[^\r\n]+") do
+            local c = line:match('^%s*comment%s+"(.*)"')
+            if c then last = c end
+            local s = line:match('serial%s+"([^"]+)"')
+            if s and last then map[s:upper()] = last end
+        end
     end
     names[plat] = map
     return true
-end
-
-local function url_encode(s)
-    return (s:gsub("[^%w%-%._~]", function(ch) return string.format("%%%02X", ch:byte()) end))
 end
 
 -- nil while the name list isn't loaded, false when the serial isn't known
@@ -75,6 +135,13 @@ local function cover_url(game, st)
         local map = names[game.platform]
         if not map then return nil end
         local name = map[game.serial]
+        if game.platform == "dc" then
+            -- the dat mostly lists "MK-51035" as "51035"; prefer that over a region-suffix fallback
+            local bare = game.serial:gsub("^MK%-", "")
+            name = (map[bare] ~= nil and bare ~= game.serial and map[bare]) or name
+        end
+        -- ROMs: an unknown (or unhashed) dump may still be No-Intro named
+        if not name and game.kind == "rom" then name = game.file end
         if not name then return false end
         name = name:gsub('[&%*/:`<>%?\\|"]', "_") -- libretro thumbnail naming rule
         return SOURCES[game.platform] .. url_encode(name) .. ".png"
@@ -194,7 +261,7 @@ end
 return {
     name = "EasyGameCovers",
     version = "1.0",
-    description = "Downloads box art for inserted PlayStation and PlayStation 2 discs.",
+    description = "Downloads box art for inserted PlayStation, PS2, PSP and Dreamcast discs, and ROMs on inserted drives.",
 
     settings = {
         style = { name = "Cover Style", description = "Flat box scans or 3D case renders", type = 'enum', options = { 'Flat', '3D' }, default = 1, order = 1 },
@@ -211,7 +278,7 @@ return {
     actions = {
         current = {
             name = "Download Covers for Current Discs & Drives",
-            description = "Every inserted disc, plus drive games with serial= in saber.ini; retries earlier failures",
+            description = "Every inserted disc and ROM, plus drive games with serial= in saber.ini; retries earlier failures",
             online = true,
             Do = function()
                 local games = Disc_Games()

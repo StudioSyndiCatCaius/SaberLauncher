@@ -14,7 +14,7 @@ package saber
 //   }
 //
 // `game` passed to on_game: { serial, platform, label, title }.
-// Lua API: saber.log(msg), saber.version, plus globals PLUGIN_DIR, Dialog_Info / Dialog_Process (plugin_dialogs.odin), Online / Http_Get / Http_Download / Http_Pending (online.odin). Errors go to APP/plugins/plugins.log.
+// Lua API: saber.log(msg), saber.version, plus globals PLUGIN_DIR, Dialog_Info / Dialog_Process / Dialog_Menu (plugin_dialogs.odin), Online / Http_Get / Http_Download / Http_Pending (online.odin). Errors go to APP/plugins/plugins.log.
 // Earlier sources win: games table first, then on_game, plugins in file-name order.
 
 import "base:runtime"
@@ -131,6 +131,7 @@ plugin_load :: proc(path, file, dir: string) {
 	lua_setglobal(L, "saber")
 	lua_register(L, "Dialog_Info", lua_dialog_info)
 	lua_register(L, "Dialog_Process", lua_dialog_process)
+	lua_register(L, "Dialog_Menu", lua_dialog_menu)
 	lua_pushstring(L, strings.clone_to_cstring(dir, context.temp_allocator))
 	lua_setglobal(L, "PLUGIN_DIR")
 	lua_pushstring(L, strings.clone_to_cstring(app.exe_dir, context.temp_allocator))
@@ -341,6 +342,7 @@ plugins_apply :: proc(g: ^Game, from_ini := false) {
 			push_field(L, "platform", plat)
 			push_field(L, "label", g.drive_label)
 			push_field(L, "title", g.title)
+			push_rom_fields(L, g)
 			if lua_pcall(L, 1, 1, 0) != LUA_OK {
 				plugin_logf("%s: on_game: %s", p.name, lua_string(L, -1))
 			} else if lua_type(L, -1) == LUA_TTABLE {
@@ -360,7 +362,7 @@ plugins_apply :: proc(g: ^Game, from_ini := false) {
 		append(&tags, RETRO_PLATFORM_NAME[g.meta_platform])
 		if year := m.fields[2]; year != "" do append(&tags, year)
 		if m.disc != "" && m.discs != "" && m.discs != "1" do append(&tags, fmt.tprintf("Disc %s of %s", m.disc, m.discs))
-		append(&tags, g.disc_serial)
+		if g.rom_path == "" do append(&tags, g.disc_serial)
 		delete(g.tags)
 		g.tags = strings.join(tags[:], "  ·  ")
 	}
@@ -370,7 +372,12 @@ plugins_apply :: proc(g: ^Game, from_ini := false) {
 		if m.fields[i] != "" do append(&g.info, Meta_Line{f.label, strings.clone(m.fields[i])})
 	}
 	if m.system != "" do append(&g.info, Meta_Line{"System", strings.clone(m.system)})
-	append(&g.info, Meta_Line{"Serial", strings.clone(g.disc_serial)})
+	if g.rom_path == "" {
+		append(&g.info, Meta_Line{"Serial", strings.clone(g.disc_serial)})
+	} else {
+		append(&g.info, Meta_Line{"File", strings.clone(filepath.base(g.rom_path))})
+		if g.rom_crc != "" do append(&g.info, Meta_Line{"CRC32", strings.clone(g.rom_crc)})
+	}
 }
 
 push_field :: proc(L: ^lua_State, key: cstring, value: string) {

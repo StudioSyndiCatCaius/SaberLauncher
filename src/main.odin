@@ -149,6 +149,7 @@ main :: proc() {
 		draw_footer(w, h)
 		draw_power_dialog(w, h)
 		draw_plugin_dialog(w, h)
+		emu_menu_draw(w, h)
 		rl.EndDrawing()
 
 		free_all(context.temp_allocator)
@@ -165,10 +166,22 @@ main :: proc() {
 	rl.CloseWindow()
 }
 
-// `Saber.exe --play-disc F` boots the console disc in F: right away.
+// `Saber.exe --play-disc F` boots the console disc in F: right away;
+// `Saber.exe --play-rom F:\game.nes` the ROM game at that path.
 play_disc_from_args :: proc() {
 	args := os.args
 	for i in 1 ..< len(args) - 1 {
+		if args[i] == "--play-rom" && args[i + 1] != "" {
+			for &g, gi in app.drive_games {
+				if g.rom_path != "" && strings.equal_fold(g.rom_path, args[i + 1]) {
+					app.selected_drive = gi
+					activate_item(.Main, gi)
+					return
+				}
+			}
+			set_status("No ROM game at %s", args[i + 1])
+			continue
+		}
 		if args[i] != "--play-disc" || args[i + 1] == "" {
 			continue
 		}
@@ -310,6 +323,12 @@ open_power_dialog :: proc() {
 }
 
 handle_app_input :: proc() {
+	if emu_menu.open {
+		emu_menu_input()
+		eat_input()
+		input.mouse_eaten = true
+		return
+	}
 	if plugin_dialog_open() {
 		handle_plugin_dialog_input()
 		eat_input()
@@ -393,6 +412,7 @@ Settings_Row :: enum {
 	Volume,
 	Font,
 	Online_Mode,
+	Emulation,
 	Launch_Mode,
 	Updates,
 	Desktop,
@@ -432,6 +452,10 @@ handle_settings_input :: proc() {
 		if input.confirm { cycle_font(1) }
 	case .Online_Mode:
 		if step != 0 || input.confirm { set_online_mode(!app.settings.online_mode) }
+	case .Emulation:
+		if input.confirm {
+			emu_open(false)
+		}
 	case .Launch_Mode:
 		if input.confirm {
 			open_dropdown()

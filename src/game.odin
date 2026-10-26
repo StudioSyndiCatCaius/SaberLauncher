@@ -35,6 +35,10 @@ Game :: struct {
 	meta_platform:    Retro_Platform, // platform for plugins (covers / info); = platform for discs, platform= for _Saber games
 	info:             [dynamic]Meta_Line, // filled by PlatformInfo plugins
 	mod_name:         string,         // != "": a burned (recordable) disc; its saves are kept apart from the original's
+	rom_path:         string,         // != "": a ROM file on a drive (roms.odin), played by the libretro host
+	rom_name:         string,         // its file name without extension, e.g. "Super Mario World (USA)"
+	rom_crc:          string,         // CRC32 of the ROM as hex ("" when too big to hash on scan)
+	gdrom:            bool,           // a pressed Dreamcast GD-ROM: listed, but unplayable from a PC drive
 }
 
 game_from_folder :: proc(root: string, drive_label: string, from_drive: bool) -> (Game, bool) {

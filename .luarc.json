@@ -2,7 +2,7 @@
     "runtime.version": "Lua 5.4",
     "diagnostics.globals": [
         "saber", "PLUGIN", "PLUGIN_DIR",
-        "Dialog_Info", "Dialog_Process",
+        "Dialog_Info", "Dialog_Process", "Dialog_Menu",
         "Online", "Http_Get", "Http_Download", "Http_Pending",
         "Setting", "Plugins_GetSetting", "Set_Art", "Disc_Games", "List_Dir",
         "SABER_DIR", "Unzip"

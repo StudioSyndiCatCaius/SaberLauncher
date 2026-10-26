@@ -88,6 +88,7 @@ scan_portable_drives :: proc(out: ^[dynamic]Game) {
 				append(out, g)
 			}
 		}
+		scan_roms(out, root_str, label)
 	}
 }
 

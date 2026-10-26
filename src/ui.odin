@@ -621,6 +621,7 @@ SETTINGS_LABELS := [Settings_Row]string {
 	.Volume      = "Music volume",
 	.Font        = "Font",
 	.Online_Mode = "Online Mode",
+	.Emulation   = "Emulation",
 	.Launch_Mode = "Launch mode",
 	.Updates     = "Check for updates",
 	.Desktop     = "Desktop",
@@ -633,8 +634,9 @@ SETTINGS_HELP := [Settings_Row]string {
 	.Volume      = "Background music level.",
 	.Font        = "Bundled fonts from APP/assets/fonts, then Windows fonts.",
 	.Online_Mode = "Lets plugins use the internet (e.g. cover downloads). Turning it off stops all online activity at once.",
+	.Emulation   = "Video, audio, controls and emulator cores for console games.",
 	.Launch_Mode = "",
-	.Updates     = "Downloads the latest release with SaberUpdater, then restarts Saber. Needs Online Mode.",
+	.Updates    = "Downloads the latest release with SaberUpdater, then restarts Saber. Needs Online Mode.",
 	.Desktop     = "Starts Explorer without closing Saber.",
 }
 
@@ -688,6 +690,12 @@ draw_settings :: proc(w, h: f32) {
 		case .Online_Mode:
 			if d := draw_stepper(val, app.settings.online_mode ? "On" : "Off", app.settings.online_mode ? 1 : 0, 2, focused); d != 0 {
 				set_online_mode(!app.settings.online_mode)
+			}
+		case .Emulation:
+			draw_t_right("Open settings", val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
+			draw_glyph("A", val.x + val.width - 26, val.y + val.height * 0.5)
+			if mouse_over(r) && rl.IsMouseButtonPressed(.LEFT) {
+				emu_open(false)
 			}
 		case .Launch_Mode:
 			launch_row = r
