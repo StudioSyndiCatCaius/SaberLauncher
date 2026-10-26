@@ -4,19 +4,16 @@ package saber
 // OpenGL context sharing objects with raylib's, so neither side tramples the other's
 // cached GL state; it draws into an FBO whose colour texture raylib then presents.
 // The core's context is current only while it runs (context_reset / retro_run / destroy).
+// The contexts themselves (WGL / GLX) are in hwgl_<os>.odin.
 
 import gl "vendor:OpenGL"
 import rl "vendor:raylib"
-import win "core:sys/windows"
 
 Retro_Hw :: struct {
 	enabled:  bool,
 	cb:       HW_Render_Callback,
 	ready:    bool,
-	hdc:      win.HDC,
-	main_ctx: win.HGLRC, // raylib's
-	core_ctx: win.HGLRC,
-	opengl32: win.HMODULE,
+	ctx:      Hw_Gl,    // raylib's context and the core's
 	fbo:      u32,      // lives in the core's context (FBOs aren't shared)
 	rb:       u32,
 	tex:      u32,      // shared colour texture
@@ -46,52 +43,34 @@ retro_hw_get_framebuffer :: proc "c" () -> uintptr {
 }
 
 retro_hw_get_proc_address :: proc "c" (sym: cstring) -> rawptr {
-	p := win.wglGetProcAddress(sym)
-	switch uintptr(p) {
-	case 0, 1, 2, 3, ~uintptr(0):
-		p = win.GetProcAddress(rhw.opengl32, sym)
-	}
-	return p
+	return hw_gl_proc_address(&rhw.ctx, sym)
 }
 
 // After load_game: creates the core's context + framebuffer and calls context_reset.
 retro_hw_start :: proc(max_w, max_h: i32) -> bool {
 	if !rhw.enabled do return true
-	rhw.hdc = win.wglGetCurrentDC()
-	rhw.main_ctx = win.wglGetCurrentContext()
-	if rhw.hdc == nil || rhw.main_ctx == nil do return false
-	rhw.opengl32 = win.LoadLibraryW(win.L("opengl32.dll"))
-	if win.wglCreateContextAttribsARB == nil {
-		win.wglCreateContextAttribsARB = auto_cast win.wglGetProcAddress("wglCreateContextAttribsARB")
-	}
-	if win.wglCreateContextAttribsARB == nil do return false
+	if !hw_gl_bind_main(&rhw.ctx) do return false
 
 	core := rhw.cb.context_type == .OPENGL_CORE
-	profile: i32 = core ? win.WGL_CONTEXT_CORE_PROFILE_BIT_ARB : win.WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB
 	versions := [?][2]i32{{4, 6}, {4, 5}, {4, 4}, {4, 3}, {4, 2}, {4, 1}, {4, 0}, {3, 3}, {3, 2}}
+	created := false
 	for v in versions {
 		if core && (v[0] < i32(rhw.cb.version_major) || (v[0] == i32(rhw.cb.version_major) && v[1] < i32(rhw.cb.version_minor))) do continue
-		attribs := [?]i32 {
-			win.WGL_CONTEXT_MAJOR_VERSION_ARB, v[0],
-			win.WGL_CONTEXT_MINOR_VERSION_ARB, v[1],
-			win.WGL_CONTEXT_PROFILE_MASK_ARB, profile,
-			0,
-		}
-		rhw.core_ctx = win.wglCreateContextAttribsARB(rhw.hdc, rawptr(rhw.main_ctx), &attribs[0])
-		if rhw.core_ctx != nil {
+		if hw_gl_create(&rhw.ctx, v[0], v[1], core) {
 			retro_log_line("[hw] core GL context %d.%d %s", v[0], v[1], core ? "core" : "compat")
+			created = true
 			break
 		}
 	}
-	if rhw.core_ctx == nil do return false
+	if !created do return false
 
 	// GL entry points of the core's context (the same driver serves raylib's)
-	win.wglMakeCurrent(rhw.hdc, rhw.core_ctx)
-	gl.load_up_to(4, 6, win.gl_set_proc_address)
+	hw_gl_use_core(&rhw.ctx)
+	gl.load_up_to(4, 6, hw_gl_set_proc_address)
 	rhw.ready = true
 	retro_hw_resize(max_w, max_h)
 	if rhw.cb.context_reset != nil do rhw.cb.context_reset()
-	win.wglMakeCurrent(rhw.hdc, rhw.main_ctx)
+	hw_gl_use_main(&rhw.ctx)
 	return true
 }
 
@@ -131,7 +110,7 @@ retro_hw_resize :: proc(max_w, max_h: i32) {
 retro_hw_begin :: proc() {
 	if !rhw.ready do return
 	rhw.depth += 1
-	if rhw.depth == 1 do win.wglMakeCurrent(rhw.hdc, rhw.core_ctx)
+	if rhw.depth == 1 do hw_gl_use_core(&rhw.ctx)
 }
 
 retro_hw_end :: proc() {
@@ -139,7 +118,7 @@ retro_hw_end :: proc() {
 	rhw.depth -= 1
 	if rhw.depth > 0 do return
 	gl.Flush() // the shared texture must be complete before raylib samples it
-	win.wglMakeCurrent(rhw.hdc, rhw.main_ctx)
+	hw_gl_use_main(&rhw.ctx)
 }
 
 // The frame as a raylib texture + the source rect (flipped: GL rows start at the bottom).
@@ -154,15 +133,14 @@ retro_hw_texture :: proc() -> (tex: rl.Texture2D, src: rl.Rectangle, ok: bool) {
 
 retro_hw_stop :: proc() {
 	if rhw.ready {
-		win.wglMakeCurrent(rhw.hdc, rhw.core_ctx)
+		hw_gl_use_core(&rhw.ctx)
 		if rhw.cb.context_destroy != nil do rhw.cb.context_destroy()
 		gl.DeleteFramebuffers(1, &rhw.fbo)
 		gl.DeleteRenderbuffers(1, &rhw.rb)
 		gl.DeleteTextures(1, &rhw.tex)
-		win.wglMakeCurrent(rhw.hdc, rhw.main_ctx)
-		win.wglDeleteContext(rhw.core_ctx)
+		hw_gl_use_main(&rhw.ctx)
 	}
-	if rhw.opengl32 != nil do win.FreeLibrary(rhw.opengl32)
+	hw_gl_destroy(&rhw.ctx)
 	rhw = {}
 }
 

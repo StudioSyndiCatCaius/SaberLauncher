@@ -5,7 +5,6 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import rl "vendor:raylib"
-import win "core:sys/windows"
 
 Shell_App :: struct {
 	title:     string,
@@ -141,11 +140,8 @@ resolve_app_exe :: proc(a: ^Shell_App) -> (string, bool) {
 }
 
 is_steam_exe :: proc(path: string) -> bool {
-	return strings.equal_fold(filepath.base(path), "steam.exe")
-}
-
-open_steam_big_picture :: proc() {
-	win.ShellExecuteW(nil, win.L("open"), win.L("steam://open/bigpicture"), nil, nil, win.SW_SHOWNORMAL)
+	base := filepath.base(path)
+	return strings.equal_fold(base, "steam.exe") || base == "steam"
 }
 
 shell_app_launch :: proc(a: ^Shell_App) -> (ok: bool, detached: bool, err: string) {
@@ -157,8 +153,7 @@ shell_app_launch :: proc(a: ^Shell_App) -> (ok: bool, detached: bool, err: strin
 		return false, false, fmt.tprintf("Missing exe: %s", a.exe)
 	}
 
-	args := strings.trim_space(a.args)
-	cmd := args != "" ? fmt.tprintf("\"%s\" %s", exe_path, args) : fmt.tprintf("\"%s\"", exe_path)
+	cmd := exe_command(exe_path, strings.trim_space(a.args))
 	pi, created := spawn_process(exe_path, cmd, filepath.dir(exe_path))
 	if !created {
 		return false, false, fmt.tprintf("Could not launch %s", a.title)

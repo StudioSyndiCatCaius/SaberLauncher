@@ -336,6 +336,9 @@ draw_card :: proc(c: Card, r: rl.Rectangle, hi: bool, title_size: f32 = 17) {
 	}
 	draw_panel(box, hi)
 	art := rl.Rectangle{box.x + 8, box.y + 8, box.width - 16, box.height - 16 - TITLE_STRIP}
+	if hi {
+		splash_focus_art = art
+	}
 	if c.has_tex && c.contain {
 		rl.DrawRectangleRounded(art, roundness(art, RADIUS - 4), 6, with_alpha(COL_SHADE, 70))
 		draw_texture_contain(c.tex, art)

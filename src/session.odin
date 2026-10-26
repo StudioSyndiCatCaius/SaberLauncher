@@ -2,8 +2,8 @@ package saber
 
 import "core:fmt"
 import "core:strings"
+import "core:os"
 import rl "vendor:raylib"
-import win "core:sys/windows"
 
 // A running game / app / movie that Saber is hidden behind.
 
@@ -18,13 +18,13 @@ MAX_TRACKED :: 64
 Session :: struct {
 	kind:          Launch_Kind,
 	title:         string,
-	handle:        win.HANDLE,
-	pid:           win.DWORD,
+	handle:        Proc_Handle,
+	pid:           u32,
 	exe_name:      string, // also track stray processes with this name (launchers that re-spawn)
-	pids:          [MAX_TRACKED]win.DWORD,
+	pids:          [MAX_TRACKED]u32,
 	pid_count:     int,
 	started:       f64,
-	main_hwnd:     win.HWND,
+	main_hwnd:     Window_Handle,
 	seen_window:   bool,
 	windowless_at: f64,
 	gone_at:       f64,
@@ -40,50 +40,31 @@ APP_WINDOWLESS_SEC :: 4.0
 APP_NEVER_SHOWN_SEC :: 15.0
 FOCUS_WINDOW_SEC :: 10.0
 
-spawn_process :: proc(exe, cmd, work_dir: string) -> (win.PROCESS_INFORMATION, bool) {
-	cmd_w := win.utf8_to_wstring(cmd) // CreateProcessW may write to the command line buffer
-	si := win.STARTUPINFOW{cb = size_of(win.STARTUPINFOW), dwFlags = win.STARTF_USESHOWWINDOW, wShowWindow = u16(win.SW_SHOWNORMAL)}
-	pi: win.PROCESS_INFORMATION
-	ok := win.CreateProcessW(
-		exe != "" ? win.utf8_to_wstring(exe) : nil,
-		cmd_w,
-		nil,
-		nil,
-		false,
-		win.CREATE_UNICODE_ENVIRONMENT,
-		nil,
-		work_dir != "" ? win.utf8_to_wstring(work_dir) : nil,
-		&si,
-		&pi,
-	)
-	return pi, bool(ok)
-}
-
 // Blocks until the launched program (and anything it spawned) is gone, or the
 // user leaves it from the Home-button overlay. Returns seconds spent, and whether
 // it was left running.
-run_session :: proc(pi: win.PROCESS_INFORMATION, kind: Launch_Kind, title, exe_name: string) -> (seconds: int, detached: bool) {
+run_session :: proc(pi: Proc_Info, kind: Launch_Kind, title, exe_name: string) -> (seconds: int, detached: bool) {
 	s := Session{
 		kind     = kind,
 		title    = title,
-		handle   = pi.hProcess,
-		pid      = pi.dwProcessId,
+		handle   = proc_handle(pi),
+		pid      = proc_pid(pi),
 		exe_name = exe_name,
 		started  = rl.GetTime(),
 	}
 	s.pids[0] = s.pid
 	s.pid_count = 1
-	defer {
-		win.CloseHandle(pi.hProcess)
-		win.CloseHandle(pi.hThread)
-	}
+	defer proc_release(pi)
 
-	sfx_start()
-	theme_pause_for_game()
-	if AllowSetForegroundWindow != nil {
-		AllowSetForegroundWindow(ASFW_ANY)
+	defer splash_end()
+	if !splash.active {
+		sfx_start()
+		theme_pause_for_game()
 	}
-	hide_for_child()
+	allow_foreground()
+	if !splash.active {
+		hide_for_child()
+	}
 	guide_reset()
 
 	next_track: f64 = 0
@@ -94,12 +75,22 @@ run_session :: proc(pi: win.PROCESS_INFORMATION, kind: Launch_Kind, title, exe_n
 			if session_tick(&s, now) {
 				break
 			}
+			// keep the splash up until the game has a window to cover the desktop
+			if splash.active && splash_intro_done() && (s.seen_window || now - s.started >= SPLASH_MAX_SEC) {
+				hide_for_child()
+				splash_end()
+			}
 		}
 		if guide_pressed() {
 			if pause_menu(&s) {
 				break
 			}
+			splash_end()
 			next_track = 0
+		}
+		if splash.active {
+			splash_frame() // paced by vsync; pumps messages
+			continue
 		}
 		hide_for_child()
 		msg_wait(s.handle, POLL_MS)
@@ -130,7 +121,7 @@ session_tick :: proc(s: ^Session, now: f64) -> bool {
 		s.windowless_at = 0
 		// Without Explorer nobody hands focus to a new window; exclusive-fullscreen
 		// games render black or flicker if they start in the background.
-		fg := GetForegroundWindow()
+		fg := foreground_window()
 		if now - s.started < FOCUS_WINDOW_SEC && !session_owns_window(s, fg) && s.focus_tries < 20 {
 			s.focus_tries += 1
 			force_foreground(hwnd)
@@ -142,7 +133,7 @@ session_tick :: proc(s: ^Session, now: f64) -> bool {
 			}
 			return now - s.windowless_at >= APP_WINDOWLESS_SEC
 		}
-		root_done := win.WaitForSingleObject(s.handle, 0) != win.WAIT_TIMEOUT
+		root_done := !proc_alive(s.handle)
 		return root_done && now - s.started >= APP_NEVER_SHOWN_SEC
 	}
 	return false
@@ -160,37 +151,16 @@ generic_wait_exe :: proc(name: string) -> bool {
 // Track the root, its live descendants (including orphans whose parent we already
 // knew) and same-named processes, using one snapshot per tick.
 session_refresh_pids :: proc(s: ^Session) {
-	Row :: struct {
-		pid, ppid: win.DWORD,
-		named:     bool,
-	}
-	rows: [1024]Row
-	count := 0
-	snap := win.CreateToolhelp32Snapshot(win.TH32CS_SNAPPROCESS, 0)
-	if snap == nil || snap == win.INVALID_HANDLE_VALUE {
+	rows: [1024]Proc_Row
+	match_name := s.exe_name != "" && !generic_wait_exe(s.exe_name) ? s.exe_name : ""
+	count := snapshot_processes(rows[:], match_name)
+	if count < 0 {
 		return
 	}
-	match_name := s.exe_name != "" && !generic_wait_exe(s.exe_name)
-	pe := win.PROCESSENTRY32W{dwSize = size_of(win.PROCESSENTRY32W)}
-	if win.Process32FirstW(snap, &pe) {
-		for count < len(rows) {
-			named := false
-			if match_name {
-				name, _ := win.wstring_to_utf8(win.wstring(&pe.szExeFile[0]), -1, context.temp_allocator)
-				named = strings.equal_fold(name, s.exe_name)
-			}
-			rows[count] = {pe.th32ProcessID, pe.th32ParentProcessID, named}
-			count += 1
-			if !win.Process32NextW(snap, &pe) {
-				break
-			}
-		}
-	}
-	win.CloseHandle(snap)
 
 	known := s.pids
 	known_n := s.pid_count
-	in_known :: proc(list: []win.DWORD, pid: win.DWORD) -> bool {
+	in_known :: proc(list: []u32, pid: u32) -> bool {
 		for p in list {
 			if p == pid {
 				return true
@@ -198,10 +168,10 @@ session_refresh_pids :: proc(s: ^Session) {
 		}
 		return false
 	}
-	next: [MAX_TRACKED]win.DWORD
+	next: [MAX_TRACKED]u32
 	n := 0
-	self := win.GetCurrentProcessId()
-	root_alive := win.WaitForSingleObject(s.handle, 0) == win.WAIT_TIMEOUT
+	self := u32(os.get_pid())
+	root_alive := proc_alive(s.handle)
 	if root_alive {
 		next[0] = s.pid
 		n = 1
@@ -227,7 +197,7 @@ session_refresh_pids :: proc(s: ^Session) {
 	s.pid_count = n
 }
 
-session_owns_pid :: proc(s: ^Session, pid: win.DWORD) -> bool {
+session_owns_pid :: proc(s: ^Session, pid: u32) -> bool {
 	for p in s.pids[:s.pid_count] {
 		if p == pid {
 			return true
@@ -236,143 +206,21 @@ session_owns_pid :: proc(s: ^Session, pid: win.DWORD) -> bool {
 	return false
 }
 
-session_owns_window :: proc(s: ^Session, hwnd: win.HWND) -> bool {
+session_owns_window :: proc(s: ^Session, hwnd: Window_Handle) -> bool {
 	if hwnd == nil {
 		return false
 	}
-	pid: win.DWORD
-	GetWindowThreadProcessId(hwnd, &pid)
-	return session_owns_pid(s, pid)
-}
-
-Window_Search :: struct {
-	s:     ^Session,
-	best:  win.HWND,
-	area:  i32,
-}
-
-// Largest visible, non-minimized top-level window owned by the session.
-session_find_window :: proc(s: ^Session) -> win.HWND {
-	search := Window_Search{s = s}
-	EnumWindows(proc "system" (hwnd: win.HWND, lp: win.LPARAM) -> win.BOOL {
-		ws := (^Window_Search)(rawptr(uintptr(lp)))
-		if !IsWindowVisible(hwnd) || IsIconic(hwnd) {
-			return true
-		}
-		if u32(GetWindowLongPtrW(hwnd, win.GWL_EXSTYLE)) & win.WS_EX_TOOLWINDOW != 0 {
-			return true
-		}
-		pid: win.DWORD
-		GetWindowThreadProcessId(hwnd, &pid)
-		found := false
-		for p in ws.s.pids[:ws.s.pid_count] {
-			if p == pid {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return true
-		}
-		r: win.RECT
-		GetWindowRect(hwnd, &r)
-		area := (r.right - r.left) * (r.bottom - r.top)
-		if area > 64 * 64 && area > ws.area {
-			ws.area = area
-			ws.best = hwnd
-		}
-		return true
-	}, win.LPARAM(uintptr(&search)))
-	return search.best
-}
-
-session_close :: proc(s: ^Session) {
-	// Ask nicely first: post WM_CLOSE to every window of every tracked process.
-	EnumWindows(proc "system" (hwnd: win.HWND, lp: win.LPARAM) -> win.BOOL {
-		ss := (^Session)(rawptr(uintptr(lp)))
-		pid: win.DWORD
-		GetWindowThreadProcessId(hwnd, &pid)
-		for p in ss.pids[:ss.pid_count] {
-			if p == pid && IsWindowVisible(hwnd) {
-				PostMessageW(hwnd, win.WM_CLOSE, 0, 0)
-				break
-			}
-		}
-		return true
-	}, win.LPARAM(uintptr(s)))
-}
-
-session_kill :: proc(s: ^Session) {
-	for p in s.pids[:s.pid_count] {
-		h := win.OpenProcess(win.PROCESS_TERMINATE, false, p)
-		if h != nil {
-			win.TerminateProcess(h, 1)
-			win.CloseHandle(h)
-		}
-	}
-	win.TerminateProcess(s.handle, 1)
+	return session_owns_pid(s, window_pid(hwnd))
 }
 
 // ---------------------------------------------------------------------------
 // Home / Guide button. The Xbox button is only exposed by the undocumented
 // XInputGetStateEx (ordinal 100); other pads come through raylib's MIDDLE button.
 
-XInput_State :: struct {
-	packet:   u32,
-	buttons:  u16,
-	lt, rt:   u8,
-	lx, ly:   i16,
-	rx, ry:   i16,
-	reserved: u32,
-}
-
-XINPUT_GUIDE :: 0x0400
-
-xinput_get_state_ex: proc "system" (user: u32, state: ^XInput_State) -> u32
-xinput_loaded: bool
-xinput_connected: [4]bool
-xinput_probe_at: f64
 guide_was_down: bool
 
-xinput_init :: proc() {
-	if xinput_loaded {
-		return
-	}
-	xinput_loaded = true
-	for dll in ([]string{"xinput1_4.dll", "xinput1_3.dll"}) {
-		mod := win.LoadLibraryW(win.utf8_to_wstring(dll))
-		if mod == nil {
-			continue
-		}
-		if p := win.GetProcAddress(mod, transmute(cstring)uintptr(100)); p != nil {
-			xinput_get_state_ex = auto_cast p
-			xinput_connected = {true, true, true, true}
-			return
-		}
-	}
-}
-
 guide_down :: proc() -> bool {
-	xinput_init()
-	down := false
-	if xinput_get_state_ex != nil {
-		// Querying empty slots is slow, so only re-probe them every couple of seconds.
-		now := rl.GetTime()
-		probe := now >= xinput_probe_at
-		if probe {
-			xinput_probe_at = now + 2
-		}
-		for i in 0 ..< 4 {
-			if !xinput_connected[i] && !probe {
-				continue
-			}
-			st: XInput_State
-			xinput_connected[i] = xinput_get_state_ex(u32(i), &st) == 0
-			if xinput_connected[i] && st.buttons & XINPUT_GUIDE != 0 {
-				down = true
-			}
-		}
-	}
+	down := xinput_guide_down()
 	for i in 0 ..< MAX_PADS {
 		if rl.IsGamepadAvailable(i32(i)) && rl.IsGamepadButtonDown(i32(i), .MIDDLE) {
 			down = true
@@ -417,11 +265,11 @@ pause_labels :: proc(s: ^Session) -> [3]string {
 
 // Shows Saber on top of the running program. Returns true when the session should end.
 pause_menu :: proc(s: ^Session) -> bool {
-	target := GetForegroundWindow()
+	target := foreground_window()
 	if !session_owns_window(s, target) {
 		target = s.main_hwnd
 	}
-	shot, has_shot := capture_screen(native_hwnd())
+	shot, has_shot := capture_screen()
 	defer if has_shot {
 		rl.UnloadTexture(shot)
 	}
@@ -447,7 +295,7 @@ pause_menu :: proc(s: ^Session) -> bool {
 				done, end_session = true, true
 			}
 		} else {
-			if win.WaitForSingleObject(s.handle, 0) != win.WAIT_TIMEOUT {
+			if !proc_alive(s.handle) {
 				session_refresh_pids(s)
 				if s.pid_count == 0 {
 					done, end_session = true, true
@@ -514,44 +362,4 @@ draw_pause_overlay :: proc(s: ^Session, shot: rl.Texture2D, has_shot: bool, w, h
 		input.confirm = true // handled next frame through the same path as the pad
 	}
 	draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Resume"}})
-}
-
-// Screen grab of the running game used as the overlay backdrop. Downscaled so the
-// bilinear upscale reads as a soft blur.
-capture_screen :: proc(hwnd: win.HWND) -> (rl.Texture2D, bool) {
-	m := monitor_rect(hwnd)
-	w := m.right - m.left
-	h := m.bottom - m.top
-	if w <= 0 || h <= 0 {
-		return {}, false
-	}
-	sdc := GetDC(nil)
-	if sdc == nil {
-		return {}, false
-	}
-	defer ReleaseDC(nil, sdc)
-	mdc := win.CreateCompatibleDC(sdc)
-	if mdc == nil {
-		return {}, false
-	}
-	bmp := win.CreateCompatibleBitmap(sdc, w, h)
-	if bmp == nil {
-		win.DeleteDC(mdc)
-		return {}, false
-	}
-	defer win.DeleteObject(win.HGDIOBJ(bmp))
-	old := win.SelectObject(mdc, win.HGDIOBJ(bmp))
-	win.BitBlt(mdc, 0, 0, w, h, sdc, m.left, m.top, win.SRCCOPY)
-	win.SelectObject(mdc, old)
-	win.DeleteDC(mdc)
-
-	img, ok := hbitmap_to_image(bmp)
-	if !ok {
-		return {}, false
-	}
-	defer rl.UnloadImage(img)
-	rl.ImageResize(&img, max(1, img.width / 6), max(1, img.height / 6))
-	tex := rl.LoadTextureFromImage(img)
-	rl.SetTextureFilter(tex, .BILINEAR)
-	return tex, tex.id != 0
 }

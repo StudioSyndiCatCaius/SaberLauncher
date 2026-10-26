@@ -1,33 +1,16 @@
 package saber
 
-import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
-import win "core:sys/windows"
+
+// Drives are addressed by letter on every platform; drives_<os>.odin maps letters to
+// volumes (on Linux, to mount points) and provides current_drive_mask, drive_type,
+// drive_root, drive_path, volume_label and volume_serial.
 
 DRIVE_REMOVABLE :: 2
 DRIVE_FIXED :: 3
 DRIVE_CDROM :: 5
-
-foreign import kernel32 "system:Kernel32.lib"
-
-@(default_calling_convention = "stdcall")
-foreign kernel32 {
-	GetLogicalDrives :: proc() -> u32 ---
-	CreateMutexW :: proc(lpMutexAttributes: rawptr, bInitialOwner: win.BOOL, lpName: win.LPCWSTR) -> win.HANDLE ---
-	GetDriveTypeW :: proc(lpRootPathName: win.LPCWSTR) -> u32 ---
-	GetVolumeInformationW :: proc(
-		lpRootPathName: win.LPCWSTR,
-		lpVolumeNameBuffer: win.LPWSTR,
-		nVolumeNameSize: u32,
-		lpVolumeSerialNumber: ^u32,
-		lpMaximumComponentLength: ^u32,
-		lpFileSystemFlags: ^u32,
-		lpFileSystemNameBuffer: win.LPWSTR,
-		nFileSystemNameSize: u32,
-	) -> win.BOOL ---
-}
 
 scan_library :: proc(out: ^[dynamic]Game, games_dir: string) {
 	if !os.exists(games_dir) {
@@ -36,26 +19,11 @@ scan_library :: proc(out: ^[dynamic]Game, games_dir: string) {
 	scan_children(out, games_dir, "Library", false)
 }
 
-current_drive_mask :: proc() -> u32 {
-	return GetLogicalDrives()
-}
-
-is_system_drive :: proc(letter: rune) -> bool {
-	sys := os.get_env("SystemDrive", context.temp_allocator)
-	if sys == "" {
-		return letter == 'C'
-	}
-	sys = strings.to_upper(sys)
-	id := fmt.tprintf("%c:", letter)
-	return strings.equal_fold(id, sys)
-}
-
 is_insertable_drive :: proc(letter: rune) -> bool {
 	if is_system_drive(letter) {
 		return false
 	}
-	root_w := [4]u16{u16(letter), ':', '\\', 0}
-	kind := GetDriveTypeW(win.LPCWSTR(raw_data(root_w[:])))
+	kind := drive_type(letter)
 	return kind == DRIVE_REMOVABLE || kind == DRIVE_CDROM || kind == DRIVE_FIXED
 }
 
@@ -70,25 +38,31 @@ scan_portable_drives :: proc(out: ^[dynamic]Game) {
 			continue
 		}
 
-		root_w := [4]u16{u16(letter), ':', '\\', 0}
-		label := volume_label(win.LPCWSTR(raw_data(root_w[:])), letter)
-		root_str := fmt.aprintf("%c:\\", letter)
-		if g, ok := game_from_folder(root_str, label, true); ok {
-			base := filepath.base(strings.trim_right(root_str, "\\/"))
-			if base == "" || base == "." || strings.has_suffix(base, ":") {
-				delete(g.title)
-				g.title = strings.clone(label)
+		label := volume_label(letter)
+		root_str := strings.clone(drive_root(letter))
+		has_files := root_str != "" // "" = an optical drive whose disc isn't mounted (audio / raw data)
+		if has_files {
+			if g, ok := game_from_folder(root_str, label, true); ok {
+				base := filepath.base(strings.trim_right(root_str, "\\/"))
+				if base == "" || base == "." || strings.has_suffix(base, ":") {
+					delete(g.title)
+					g.title = strings.clone(label)
+				}
+				append(out, g)
 			}
-			append(out, g)
 		}
 		before := len(out)
-		scan_children(out, root_str, label, true)
-		if len(out) == before && GetDriveTypeW(win.LPCWSTR(raw_data(root_w[:]))) == DRIVE_CDROM {
+		if has_files {
+			scan_children(out, root_str, label, true)
+		}
+		if len(out) == before && drive_type(letter) == DRIVE_CDROM {
 			if g, ok := disc_game(letter, label); ok {
 				append(out, g)
 			}
 		}
-		scan_roms(out, root_str, label)
+		if has_files {
+			scan_roms(out, root_str, label)
+		}
 	}
 }
 
@@ -111,13 +85,4 @@ scan_children :: proc(out: ^[dynamic]Game, parent, label: string, from_drive: bo
 			append(out, g)
 		}
 	}
-}
-
-volume_label :: proc(root: win.LPCWSTR, letter: rune) -> string {
-	name: [261]u16
-	ok := GetVolumeInformationW(root, raw_data(name[:]), u32(len(name)), nil, nil, nil, nil, 0)
-	if ok && name[0] != 0 {
-		return strings.clone(wide_to_utf8(raw_data(name[:]), -1))
-	}
-	return fmt.aprintf("%c:", letter)
 }

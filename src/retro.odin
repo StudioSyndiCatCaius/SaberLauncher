@@ -23,7 +23,6 @@ import "core:sync"
 import "core:thread"
 import "core:time"
 import rl "vendor:raylib"
-import win "core:sys/windows"
 
 Retro_Platform :: enum {
 	None,
@@ -262,7 +261,7 @@ retro_audio_push :: proc(data: [^]i16, frames: int) {
 disc_game :: proc(letter: rune, label: string) -> (Game, bool) {
 	if g, ok := psp_disc_game(letter, label); ok do return g, true
 	label := label
-	data, err := os.read_entire_file(fmt.tprintf("%c:\\SYSTEM.CNF", letter), context.temp_allocator)
+	data, err := os.read_entire_file(drive_path(letter, "SYSTEM.CNF"), context.temp_allocator)
 	if err != nil {
 		// burned discs whose mounted UDF side hides the game; its volume label is bogus too
 		ok: bool
@@ -291,7 +290,7 @@ disc_game :: proc(letter: rune, label: string) -> (Game, bool) {
 
 new_disc_game :: proc(letter: rune, label: string, platform: Retro_Platform, serial: string, title := "") -> Game {
 	g: Game
-	g.root = fmt.aprintf("%c:\\", letter)
+	g.root = strings.clone(drive_root(letter))
 	g.drive_label = strings.clone(label)
 	g.from_drive = true
 	g.platform = platform
@@ -314,17 +313,17 @@ new_disc_game :: proc(letter: rune, label: string, platform: Retro_Platform, ser
 // PSP: UMD_DATA.BIN starts with "ULUS-10540|..."; PSP_GAME/PARAM.SFO has the title,
 // PSP_GAME/ICON0.PNG is the disc's own icon (shown until a plugin supplies a cover).
 psp_disc_game :: proc(letter: rune, label: string) -> (Game, bool) {
-	umd, err := os.read_entire_file(fmt.tprintf("%c:\\UMD_DATA.BIN", letter), context.temp_allocator)
+	umd, err := os.read_entire_file(drive_path(letter, "UMD_DATA.BIN"), context.temp_allocator)
 	if err != nil do return {}, false
 	serial, _, _ := strings.partition(string(umd), "|")
 	serial = strings.to_upper(strings.trim_space(serial), context.temp_allocator)
 	if len(serial) < 9 do return {}, false
 	title := ""
-	if sfo, e := os.read_entire_file(fmt.tprintf("%c:\\PSP_GAME\\PARAM.SFO", letter), context.temp_allocator); e == nil {
+	if sfo, e := os.read_entire_file(drive_path(letter, "PSP_GAME", "PARAM.SFO"), context.temp_allocator); e == nil {
 		title = sfo_string(sfo, "TITLE")
 	}
 	g := new_disc_game(letter, label, .PSP, serial, title)
-	icon := fmt.tprintf("%c:\\PSP_GAME\\ICON0.PNG", letter)
+	icon := drive_path(letter, "PSP_GAME", "ICON0.PNG")
 	if os.exists(icon) do game_set_box(&g, icon)
 	plugins_apply(&g)
 	return g, true
@@ -368,15 +367,9 @@ serial_from_boot :: proc(v: string) -> string {
 	return strings.to_upper(s, context.temp_allocator)
 }
 
-volume_serial :: proc(letter: u8) -> (serial: u32, present: bool) {
-	root := [4]u16{u16(letter), ':', '\\', 0}
-	ok := GetVolumeInformationW(win.LPCWSTR(raw_data(root[:])), nil, 0, &serial, nil, nil, nil, 0)
-	return serial, bool(ok)
-}
-
 // Optical drives are polled on a background thread: while a freshly inserted disc spins
-// up, GetVolumeInformationW blocks for seconds, which froze the UI (and stuttered games
-// during disc swaps). The main thread only reads the results.
+// up, volume_serial (GetVolumeInformationW) blocks for seconds, which froze the UI (and
+// stuttered games during disc swaps). The main thread only reads the results.
 
 MEDIA_POLL_MS :: 1000
 
@@ -402,8 +395,7 @@ media_watch_loop :: proc() {
 		for i in 0 ..< 26 {
 			slot: u64
 			if mask & (u32(1) << u32(i)) != 0 {
-				root := [4]u16{u16('A' + i), ':', '\\', 0}
-				if GetDriveTypeW(win.LPCWSTR(raw_data(root[:]))) == DRIVE_CDROM {
+				if drive_type(rune('A' + i)) == DRIVE_CDROM {
 					if serial, ok := volume_serial(u8('A' + i)); ok {
 						slot = 1 << 32 | u64(serial)
 						sig = sig * 31 + u64(serial) + u64(i + 1)
@@ -415,7 +407,7 @@ media_watch_loop :: proc() {
 		sync.atomic_store(&media.sig, sig)
 		sync.atomic_store(&media.ready, true)
 		free_all(context.temp_allocator)
-		win.Sleep(MEDIA_POLL_MS)
+		sleep_ms(MEDIA_POLL_MS)
 	}
 }
 
@@ -460,7 +452,7 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	}
 	core_path, has_core := find_retro_core(g.platform)
 	if !has_core {
-		return false, fmt.tprintf("No %s core: put %s in APP\\libretro\\cores", RETRO_PLATFORM_NAME[g.platform], RETRO_CORES[g.platform][0])
+		return false, fmt.tprintf("No %s core: put %s in APP\\libretro\\cores", RETRO_PLATFORM_NAME[g.platform], core_file_name(RETRO_CORES[g.platform][0]))
 	}
 	is_rom := g.rom_path != ""
 	// PS1 gets raw sectors behind a generated .cue; PSP and PS2 (DVD and CD alike) a plain .iso
@@ -563,7 +555,7 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	retro_apply_controller()
 
 	theme_pause_for_game()
-	sfx_start()
+	if !splash.active do sfx_start()
 	retro_audio_open(retro.av.timing.sample_rate)
 	rl.SetTargetFPS(0) // paced by audio + vsync instead
 	guide_reset()
@@ -648,6 +640,7 @@ retro_run_loop :: proc(g: ^Game) {
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
 		retro_draw_frame(w, h, rl.WHITE)
+		splash_draw_over_game(w, h)
 		retro_draw_osd(w, h)
 		rl.EndDrawing()
 
@@ -679,7 +672,7 @@ retro_pace :: proc(next_frame: ^time.Tick) {
 		target := u64(raudio.rate * emu_audio_target_sec())
 		start := time.tick_now()
 		for retro_audio_buffered() > target && time.tick_since(start) < 100 * time.Millisecond {
-			win.Sleep(1)
+			sleep_ms(1)
 		}
 		next_frame^ = time.tick_now()
 		return
@@ -693,7 +686,7 @@ retro_pace :: proc(next_frame: ^time.Tick) {
 		return
 	}
 	for time.tick_diff(time.tick_now(), next_frame^) > 2 * time.Millisecond {
-		win.Sleep(1)
+		sleep_ms(1)
 	}
 }
 
@@ -1412,11 +1405,7 @@ retro_environment :: proc "c" (cmd: c.uint, data: rawptr) -> bool {
 retro_log_open :: proc() {
 	f, err := os.open(retro_dir("retro.log"), {.Write, .Create, .Trunc})
 	if err == nil do retro.log_file = f
-	if nt_snprintf == nil {
-		if nt := win.GetModuleHandleW(win.L("ntdll.dll")); nt != nil {
-			nt_snprintf = auto_cast win.GetProcAddress(nt, "_snprintf")
-		}
-	}
+	if nt_snprintf == nil do nt_snprintf = load_snprintf()
 }
 
 retro_log_line :: proc(format: string, args: ..any) {
@@ -1426,7 +1415,8 @@ retro_log_line :: proc(format: string, args: ..any) {
 	fmt.fprintfln(retro.log_file, format, ..args)
 }
 
-// ntdll's _snprintf, loaded at runtime: linking a CRT printf clashes with static raylib's CRT.
+// The C runtime's snprintf, loaded at runtime by load_snprintf (on Windows ntdll's: linking
+// a CRT printf clashes with static raylib's CRT).
 Snprintf_Proc :: #type proc "c" (buf: [^]u8, n: c.size_t, format: cstring, #c_vararg args: ..any) -> c.int
 nt_snprintf: Snprintf_Proc
 

@@ -6,7 +6,6 @@ import "core:path/filepath"
 import "core:strings"
 import "core:time"
 import rl "vendor:raylib"
-import win "core:sys/windows"
 
 Screen :: enum {
 	Main,
@@ -76,14 +75,12 @@ TARGET_FPS :: 60
 STATUS_SECONDS :: 6.0
 
 main :: proc() {
-	// One Saber per session: a hidden second copy would keep reacting to the pad.
-	CreateMutexW(nil, true, win.L("Local\\SaberLauncher"))
-	if win.GetLastError() == win.ERROR_ALREADY_EXISTS {
+	if !single_instance() {
 		return
 	}
 	app.exe_dir = exe_directory()
 	if app.exe_dir != "" {
-		win.SetCurrentDirectoryW(win.utf8_to_wstring(app.exe_dir))
+		_ = os.set_working_directory(app.exe_dir)
 	}
 	app.games_dir = path_join({app.exe_dir, "games"})
 	app.apps_dir = path_join({app.exe_dir, "apps"})

@@ -20,37 +20,10 @@ import "core:path/filepath"
 import "core:strings"
 import "core:sync"
 import "core:thread"
-import win "core:sys/windows"
 
-HINTERNET :: distinct rawptr
+// The transfer itself is http_fetch, in online_<os>.odin (wininet / libcurl).
 
-InternetOpenW: proc "system" (agent: win.LPCWSTR, access: u32, proxy, bypass: win.LPCWSTR, flags: u32) -> HINTERNET
-InternetOpenUrlW: proc "system" (h: HINTERNET, url, headers: win.LPCWSTR, headers_len: u32, flags: u32, ctx: uintptr) -> HINTERNET
-InternetReadFile: proc "system" (h: HINTERNET, buf: rawptr, to_read: u32, read: ^u32) -> win.BOOL
-InternetCloseHandle: proc "system" (h: HINTERNET) -> win.BOOL
-HttpQueryInfoW: proc "system" (h: HINTERNET, level: u32, buf: rawptr, len: ^u32, index: ^u32) -> win.BOOL
-
-HTTP_QUERY_STATUS_CODE :: 19
-HTTP_QUERY_FLAG_NUMBER :: 0x20000000
-INTERNET_FLAG_RELOAD :: 0x80000000
-INTERNET_FLAG_NO_UI :: 0x00000200
 HTTP_MAX_BYTES :: 256 * 1024 * 1024
-
-wininet_lock: sync.Mutex
-
-load_wininet :: proc() -> bool {
-	sync.mutex_lock(&wininet_lock)
-	defer sync.mutex_unlock(&wininet_lock)
-	if InternetOpenW != nil do return true
-	m := win.LoadLibraryW(win.L("wininet.dll"))
-	if m == nil do return false
-	InternetOpenW = auto_cast win.GetProcAddress(m, "InternetOpenW")
-	InternetOpenUrlW = auto_cast win.GetProcAddress(m, "InternetOpenUrlW")
-	InternetReadFile = auto_cast win.GetProcAddress(m, "InternetReadFile")
-	InternetCloseHandle = auto_cast win.GetProcAddress(m, "InternetCloseHandle")
-	HttpQueryInfoW = auto_cast win.GetProcAddress(m, "HttpQueryInfoW")
-	return InternetOpenW != nil && InternetOpenUrlW != nil && InternetReadFile != nil && InternetCloseHandle != nil && HttpQueryInfoW != nil
-}
 
 // Read by worker threads between chunks; bumped every time Online Mode turns off.
 online_gen: u64
@@ -107,58 +80,23 @@ http_start :: proc(L: ^lua_State, url, path: string, callback: c.int) {
 	r.worker = thread.create_and_start_with_data(r, http_worker)
 }
 
+// Online Mode went off (or was toggled) since the request started.
+http_killed :: proc(r: ^Http_Request) -> bool {
+	return sync.atomic_load(&online_gen) != r.gen
+}
+
 http_worker :: proc(data: rawptr) {
 	r := (^Http_Request)(data)
 	context = runtime.default_context()
 	defer sync.atomic_store(&r.done, true)
 	defer free_all(context.temp_allocator)
 
-	killed :: proc(r: ^Http_Request) -> bool {
-		return sync.atomic_load(&online_gen) != r.gen
-	}
-	if !load_wininet() {
-		r.err = strings.clone("wininet.dll unavailable")
-		return
-	}
-	hnet := InternetOpenW(win.L("Saber/1.0"), 0, nil, nil, 0)
-	if hnet == nil {
-		r.err = strings.clone("Couldn't start an internet session")
-		return
-	}
-	defer InternetCloseHandle(hnet)
-	h := InternetOpenUrlW(hnet, win.utf8_to_wstring(r.url), nil, 0, INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_UI, 0)
-	if h == nil {
-		r.err = fmt.aprintf("Couldn't connect (error %d)", win.GetLastError())
-		return
-	}
-	defer InternetCloseHandle(h)
-	status: u32
-	sz := u32(size_of(status))
-	HttpQueryInfoW(h, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &status, &sz, nil)
-	r.status = int(status)
-
 	body := make([dynamic]u8)
-	buf: [16 * 1024]u8
-	for {
-		if killed(r) {
-			delete(body)
-			r.err = strings.clone("Online Mode was turned off")
-			return
-		}
-		got: u32
-		if !InternetReadFile(h, &buf[0], len(buf), &got) {
-			delete(body)
-			r.err = strings.clone("Connection dropped")
-			return
-		}
-		if got == 0 do break
-		append(&body, ..buf[:got])
-		if len(body) > HTTP_MAX_BYTES {
-			delete(body)
-			r.err = strings.clone("Response too large")
-			return
-		}
+	if !http_fetch(r, &body) { // sets r.err
+		delete(body)
+		return
 	}
+	status := r.status
 	if status != 200 {
 		delete(body)
 		r.err = fmt.aprintf("HTTP %d", status)

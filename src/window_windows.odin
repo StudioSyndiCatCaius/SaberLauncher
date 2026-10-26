@@ -70,8 +70,32 @@ MONITOR_DEFAULTTONEAREST :: 2
 
 ASFW_ANY :: win.DWORD(0xFFFFFFFF)
 
+Window_Handle :: win.HWND
+
 native_hwnd :: proc() -> win.HWND {
 	return win.HWND(rl.GetWindowHandle())
+}
+
+foreground_window :: proc() -> Window_Handle {
+	return GetForegroundWindow()
+}
+
+window_pid :: proc(hwnd: Window_Handle) -> u32 {
+	pid: win.DWORD
+	GetWindowThreadProcessId(hwnd, &pid)
+	return pid
+}
+
+// Lets a launched program take the foreground from us.
+allow_foreground :: proc() {
+	if AllowSetForegroundWindow != nil {
+		AllowSetForegroundWindow(ASFW_ANY)
+	}
+}
+
+wide_to_utf8 :: proc(p: [^]u16, n: int) -> string {
+	s, _ := win.wstring_to_utf8(win.wstring(p), n)
+	return s
 }
 
 // Full rect of the monitor the window is on (tracks resolution changes made by games).

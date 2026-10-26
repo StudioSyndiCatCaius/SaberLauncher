@@ -4,7 +4,7 @@ package saber
 //
 // A CD in drive F: is served to the core through the libretro VFS as
 //   saber-disc://F/disc<gen>.cue   (generated from the drive's TOC)
-//   saber-disc://F/disc<gen>.bin   (raw 2352-byte sectors, read live with IOCTL_CDROM_RAW_READ)
+//   saber-disc://F/disc<gen>.bin   (raw 2352-byte sectors, read live through disc_read_raw)
 // Cores with "local-first" file access (swanstation) only hand URI paths to the
 // frontend VFS, hence the scheme. `gen` bumps on every disc swap so stale handles fail cleanly.
 // Every other path is passed through to the real filesystem.
@@ -17,10 +17,10 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:sync"
-import win "core:sys/windows"
 
-IOCTL_CDROM_READ_TOC :: 0x00024000
-IOCTL_CDROM_RAW_READ :: 0x0002403E
+// The drive itself is behind disc_<os>.odin: disc_open/close, disc_read_toc_raw,
+// disc_read_full_toc_raw, disc_read_user (2048-byte), disc_read_raw (2352-byte), disc_profile.
+
 TRACK_MODE_YELLOW_MODE2 :: 0 // full 2352-byte data sectors on most drives
 TRACK_MODE_XA_FORM2 :: 1 // same, for drives that reject YellowMode2
 TRACK_MODE_CDDA :: 2
@@ -40,12 +40,6 @@ Cd_Toc :: struct {
 	leadout: int, // first LBA after the last track
 }
 
-RAW_READ_INFO :: struct #packed {
-	disk_offset:  i64,
-	sector_count: u32,
-	track_mode:   u32,
-}
-
 CACHE_BLOCK :: 16 // sectors per IOCTL (drives cap raw reads around 64 KB)
 CACHE_SLOTS :: 8
 
@@ -58,7 +52,8 @@ Cache_Slot :: struct {
 Cd_Reader :: struct {
 	lock:   sync.Mutex, // cores may read from their own CD thread
 	letter: u8,
-	handle: win.HANDLE,
+	handle: Disc_Handle,
+	opened: bool, // handle is open
 	gen:    int,
 	ok:     bool,
 	cooked: bool, // a DVD/BD holding a PS1 file tree: only 2048-byte reads exist, raw sectors are synthesized
@@ -71,15 +66,9 @@ Cd_Reader :: struct {
 
 cd: Cd_Reader
 
-open_cd_volume :: proc(letter: u8) -> win.HANDLE {
-	path := fmt.tprintf(`\\.\%c:`, letter)
-	return win.CreateFileW(win.utf8_to_wstring(path), win.GENERIC_READ, win.FILE_SHARE_READ | win.FILE_SHARE_WRITE, nil, win.OPEN_EXISTING, 0, nil)
-}
-
-cd_read_toc :: proc(h: win.HANDLE) -> (toc: Cd_Toc, ok: bool) {
+cd_read_toc :: proc(h: Disc_Handle) -> (toc: Cd_Toc, ok: bool) {
 	raw: [4 + 100 * 8]u8
-	got: u32
-	if !win.DeviceIoControl(h, IOCTL_CDROM_READ_TOC, nil, 0, &raw[0], len(raw), &got, nil) do return
+	if !disc_read_toc_raw(h, raw[:]) do return
 	first, last := int(raw[2]), int(raw[3])
 	n := last - first + 1
 	if n <= 0 || n > 99 do return
@@ -103,12 +92,12 @@ cd_open :: proc(letter: u8) -> (cue_path: string, ok: bool) {
 	cd_close_locked()
 	cd.letter = letter
 	cd.gen += 1
-	cd.handle = open_cd_volume(letter)
-	if cd.handle == win.INVALID_HANDLE_VALUE do return "", false
+	cd.handle, cd.opened = disc_open(letter)
+	if !cd.opened do return "", false
 	toc, toc_ok := cd_read_toc(cd.handle)
 	if !toc_ok {
-		win.CloseHandle(cd.handle)
-		cd.handle = win.INVALID_HANDLE_VALUE
+		disc_close(cd.handle)
+		cd.opened = false
 		return "", false
 	}
 	cd.toc = toc
@@ -135,15 +124,13 @@ cd_open_iso :: proc(letter: u8) -> (iso_path: string, ok: bool) {
 	cd_close_locked()
 	cd.letter = letter
 	cd.gen += 1
-	cd.handle = open_cd_volume(letter)
-	if cd.handle == win.INVALID_HANDLE_VALUE do return "", false
+	cd.handle, cd.opened = disc_open(letter)
+	if !cd.opened do return "", false
 	// size: the ISO9660 volume space size (primary volume descriptor, sector 16)
 	pvd: [ISO_SECTOR]u8
-	got: u32
-	if !win.SetFilePointerEx(cd.handle, 16 * ISO_SECTOR, nil, win.FILE_BEGIN) ||
-	   !win.ReadFile(cd.handle, &pvd[0], ISO_SECTOR, &got, nil) || got != ISO_SECTOR || string(pvd[1:6]) != "CD001" {
-		win.CloseHandle(cd.handle)
-		cd.handle = win.INVALID_HANDLE_VALUE
+	if !disc_read_user(cd.handle, 16, pvd[:]) || string(pvd[1:6]) != "CD001" {
+		disc_close(cd.handle)
+		cd.opened = false
 		return "", false
 	}
 	cd.toc = {}
@@ -163,8 +150,8 @@ cd_close :: proc() {
 }
 
 cd_close_locked :: proc() {
-	if cd.handle != nil && cd.handle != win.INVALID_HANDLE_VALUE do win.CloseHandle(cd.handle)
-	cd.handle = nil
+	if cd.opened do disc_close(cd.handle)
+	cd.opened = false
 	cd.ok = false
 	cd.iso = false
 	delete(cd.cue)
@@ -198,11 +185,8 @@ cd_fill :: proc(slot: ^Cache_Slot, block: int) {
 	end := min(first + CACHE_BLOCK, cd.toc.leadout)
 	if cd.iso {
 		n := end - first
-		got: u32
-		ok := win.SetFilePointerEx(cd.handle, win.LARGE_INTEGER(i64(first) * ISO_SECTOR), nil, win.FILE_BEGIN) &&
-			win.ReadFile(cd.handle, &slot.data[0], u32(n * ISO_SECTOR), &got, nil) && got == u32(n * ISO_SECTOR)
-		if !ok {
-			retro_log_line("[disc] read of %d sectors at LBA %d failed (error %d)", n, first, win.GetLastError())
+		if !disc_read_user(cd.handle, first, slot.data[:n * ISO_SECTOR]) {
+			retro_log_line("[disc] read of %d sectors at LBA %d failed (error %d)", n, first, disc_last_error())
 			runtime.mem_zero(&slot.data[0], n * ISO_SECTOR)
 		}
 		return
@@ -218,19 +202,18 @@ cd_fill :: proc(slot: ^Cache_Slot, block: int) {
 			lba = run
 			continue
 		}
-		info := RAW_READ_INFO{disk_offset = i64(lba) * ISO_SECTOR, sector_count = u32(n), track_mode = mode}
 		ok := false
 		for attempt in 0 ..< 4 {
 			// drives disagree on which mode returns raw data sectors; alternate between both
-			if mode != TRACK_MODE_CDDA do info.track_mode = attempt % 2 == 0 ? TRACK_MODE_YELLOW_MODE2 : TRACK_MODE_XA_FORM2
-			got: u32
-			if win.DeviceIoControl(cd.handle, IOCTL_CDROM_RAW_READ, &info, size_of(info), &dst[0], u32(n * RAW_SECTOR), &got, nil) && got == u32(n * RAW_SECTOR) {
+			try_mode := mode
+			if mode != TRACK_MODE_CDDA do try_mode = attempt % 2 == 0 ? TRACK_MODE_YELLOW_MODE2 : TRACK_MODE_XA_FORM2
+			if disc_read_raw(cd.handle, lba, n, try_mode, dst) {
 				ok = true
 				break
 			}
 		}
 		if !ok {
-			retro_log_line("[disc] raw read of %d sectors at LBA %d failed (error %d)", n, lba, win.GetLastError())
+			retro_log_line("[disc] raw read of %d sectors at LBA %d failed (error %d)", n, lba, disc_last_error())
 			runtime.mem_zero(&dst[0], n * RAW_SECTOR)
 		}
 		lba = run
@@ -241,11 +224,8 @@ cd_fill :: proc(slot: ^Cache_Slot, block: int) {
 // EDC/ECC are left zero; the cores don't check them.
 cd_fill_cooked :: proc(lba, n: int, dst: []u8) {
 	user: [CACHE_BLOCK * ISO_SECTOR]u8
-	got: u32
-	ok := win.SetFilePointerEx(cd.handle, win.LARGE_INTEGER(i64(lba) * ISO_SECTOR), nil, win.FILE_BEGIN) &&
-		win.ReadFile(cd.handle, &user[0], u32(n * ISO_SECTOR), &got, nil) && got == u32(n * ISO_SECTOR)
-	if !ok {
-		retro_log_line("[disc] read of %d sectors at LBA %d failed (error %d)", n, lba, win.GetLastError())
+	if !disc_read_user(cd.handle, lba, user[:n * ISO_SECTOR]) {
+		retro_log_line("[disc] read of %d sectors at LBA %d failed (error %d)", n, lba, disc_last_error())
 		runtime.mem_zero(&user[0], n * ISO_SECTOR)
 	}
 	bcd :: proc(v: int) -> u8 {return u8(v / 10 << 4 | v % 10)}
@@ -575,14 +555,12 @@ vfs_closedir :: proc "c" (dirstream: rawptr) -> c.int {
 // file straight from the ISO9660 filesystem of the raw volume.
 
 iso_read_root_file :: proc(letter: u8, name: string, max_size := 64 * 1024, allocator := context.allocator) -> (data: []byte, ok: bool) {
-	h := open_cd_volume(letter)
-	if h == win.INVALID_HANDLE_VALUE do return
-	defer win.CloseHandle(h)
+	h, opened := disc_open(letter)
+	if !opened do return
+	defer disc_close(h)
 
-	read :: proc(h: win.HANDLE, lba: u32, buf: []byte) -> bool {
-		if !win.SetFilePointerEx(h, win.LARGE_INTEGER(i64(lba) * ISO_SECTOR), nil, win.FILE_BEGIN) do return false
-		got: u32
-		return bool(win.ReadFile(h, &buf[0], u32(len(buf)), &got, nil)) && got == u32(len(buf))
+	read :: proc(h: Disc_Handle, lba: u32, buf: []byte) -> bool {
+		return disc_read_user(h, int(lba), buf)
 	}
 	le32 :: proc(b: []byte) -> u32 {return u32(b[0]) | u32(b[1]) << 8 | u32(b[2]) << 16 | u32(b[3]) << 24}
 
@@ -616,30 +594,13 @@ iso_read_root_file :: proc(letter: u8, name: string, max_size := 64 * 1024, allo
 }
 
 // ---------------------------------------------------------------------------
-// Burned discs: the drive's current MMC profile says what kind of medium is inserted.
-
-IOCTL_CDROM_GET_CONFIGURATION :: 0x00024058
-
-Get_Configuration_Input :: struct {
-	feature:      u32, // 0 = profile list
-	request_type: u32, // 1 = current
-	reserved:     [2]rawptr,
-}
-
-// The drive's current MMC profile (0x08 CD-ROM, 0x09 CD-R, 0x10 DVD-ROM, 0x1A DVD+RW, ...); 0 = unknown.
-disc_profile :: proc(h: win.HANDLE) -> u16 {
-	input := Get_Configuration_Input{feature = 0, request_type = 1}
-	out: [8]byte
-	got: u32
-	if !win.DeviceIoControl(h, IOCTL_CDROM_GET_CONFIGURATION, &input, size_of(input), &out[0], len(out), &got, nil) || got < 8 do return 0
-	return u16(out[6]) << 8 | u16(out[7])
-}
+// Burned discs: the drive's current MMC profile (disc_profile) says what kind of medium is inserted.
 
 // true for CD-R/RW, DVD±R/RW/RAM, BD-R/RE; false for pressed (ROM) discs or when unknown.
 disc_is_recordable :: proc(letter: u8) -> bool {
-	h := open_cd_volume(letter)
-	if h == win.INVALID_HANDLE_VALUE do return false
-	defer win.CloseHandle(h)
+	h, opened := disc_open(letter)
+	if !opened do return false
+	defer disc_close(h)
 	profile := disc_profile(h)
 	switch profile {
 	case 0x0000, 0x0008, 0x0010, 0x0040: return false // none, CD-ROM, DVD-ROM, BD-ROM

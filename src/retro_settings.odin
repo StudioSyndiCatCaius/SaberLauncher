@@ -200,8 +200,13 @@ emu_volume :: proc() -> f32 {
 }
 
 emu_core_installed :: proc(name: string) -> (string, bool) {
+	file := core_file_name(name)
 	for dir in ([]string{retro_dir("cores"), retro_dir()}) {
-		path := path_join({dir, name})
+		path := path_join({dir, file})
+		if os.exists(path) do return path, true
+	}
+	for dir in SYSTEM_CORE_DIRS {
+		path := path_join({dir, file})
 		if os.exists(path) do return path, true
 	}
 	return "", false

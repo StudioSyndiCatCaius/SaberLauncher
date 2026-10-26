@@ -6,16 +6,11 @@ package saber
 // Saber) and quits.
 
 import "core:os"
-import "core:strings"
+import "core:path/filepath"
 import "core:sync"
 import "core:thread"
-import win "core:sys/windows"
 
-foreign import kernel32 "system:Kernel32.lib"
-@(default_calling_convention = "system")
-foreign kernel32 {
-	GetExitCodeProcess :: proc(hProcess: win.HANDLE, lpExitCode: ^win.DWORD) -> win.BOOL ---
-}
+// updater_path, run_hidden_wait and start_updater are in update_<os>.odin.
 
 Update_State :: enum i32 {
 	Idle,
@@ -36,10 +31,6 @@ UPDATE_STATUS := [Update_State]string {
 	.Failed     = "Check failed",
 }
 
-updater_path :: proc() -> string {
-	return path_join({app.exe_dir, "SaberUpdater.exe"})
-}
-
 update_get_state :: proc() -> Update_State {
 	return Update_State(sync.atomic_load(cast(^i32)&update_state))
 }
@@ -51,7 +42,7 @@ update_check_start :: proc() {
 		return
 	}
 	if !os.exists(updater_path()) {
-		set_status("SaberUpdater.exe not found")
+		set_status("%s not found", filepath.base(updater_path()))
 		sync.atomic_store(cast(^i32)&update_state, i32(Update_State.Failed))
 		return
 	}
@@ -72,27 +63,6 @@ update_check_worker :: proc() {
 	sync.atomic_store(cast(^i32)&update_state, i32(result))
 }
 
-@(private = "file")
-run_hidden_wait :: proc(exe, args: string) -> (code: u32, ok: bool) {
-	cmd := win.utf8_to_wstring(fmt_quote_cmd(exe, args))
-	si := win.STARTUPINFOW{cb = size_of(win.STARTUPINFOW)}
-	pi: win.PROCESS_INFORMATION
-	if !win.CreateProcessW(nil, cmd, nil, nil, false, win.CREATE_NO_WINDOW, nil, win.utf8_to_wstring(app.exe_dir), &si, &pi) {
-		return 0, false
-	}
-	defer win.CloseHandle(pi.hProcess)
-	defer win.CloseHandle(pi.hThread)
-	win.WaitForSingleObject(pi.hProcess, win.INFINITE)
-	exit: win.DWORD
-	if !GetExitCodeProcess(pi.hProcess, &exit) do return 0, false
-	return u32(exit), true
-}
-
-@(private = "file")
-fmt_quote_cmd :: proc(exe, args: string) -> string {
-	return strings.concatenate({"\"", exe, "\" ", args}, context.temp_allocator)
-}
-
 // Called once per frame from the main loop.
 update_poll :: proc() {
 	@(static) last := Update_State.Idle
@@ -105,10 +75,8 @@ update_poll :: proc() {
 	case .Failed:
 		set_status("Update check failed (offline?)")
 	case .Available:
-		exe := win.utf8_to_wstring(updater_path())
-		r := win.ShellExecuteW(nil, win.L("open"), exe, win.L("-y --wait --restart"), win.utf8_to_wstring(app.exe_dir), win.SW_SHOWNORMAL)
-		if uintptr(rawptr(r)) <= 32 {
-			set_status("Could not start SaberUpdater.exe")
+		if !start_updater("-y --wait --restart") {
+			set_status("Could not start %s", filepath.base(updater_path()))
 			sync.atomic_store(cast(^i32)&update_state, i32(Update_State.Failed))
 			return
 		}

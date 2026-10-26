@@ -12,13 +12,12 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import rl "vendor:raylib"
-import win "core:sys/windows"
 
 DC_SESSION_GAP :: 11400 // session 1 lead-out (6750) + session 2 lead-in (4500) + pregap (150)
 DC_RIP_CHUNK :: 32      // sectors per read while copying
 
 // IP.BIN's user data, from a raw sector of the disc's last data track.
-dc_read_ip :: proc(h: win.HANDLE, toc: ^Cd_Toc) -> (ip: [256]u8, ok: bool) {
+dc_read_ip :: proc(h: Disc_Handle, toc: ^Cd_Toc) -> (ip: [256]u8, ok: bool) {
 	lba := -1
 	for ti in 0 ..< toc.count do if !toc.tracks[ti].audio do lba = toc.tracks[ti].lba
 	if lba < 0 do return
@@ -30,20 +29,18 @@ dc_read_ip :: proc(h: win.HANDLE, toc: ^Cd_Toc) -> (ip: [256]u8, ok: bool) {
 	return ip, string(ip[:15]) == "SEGA SEGAKATANA"
 }
 
-dc_raw_read :: proc(h: win.HANDLE, lba: int, out: []u8) -> bool {
+dc_raw_read :: proc(h: Disc_Handle, lba: int, out: []u8) -> bool {
 	for mode in ([]u32{TRACK_MODE_YELLOW_MODE2, TRACK_MODE_XA_FORM2}) {
-		info := RAW_READ_INFO{disk_offset = i64(lba) * ISO_SECTOR, sector_count = 1, track_mode = mode}
-		got: u32
-		if win.DeviceIoControl(h, IOCTL_CDROM_RAW_READ, &info, size_of(info), &out[0], RAW_SECTOR, &got, nil) && got == RAW_SECTOR do return true
+		if disc_read_raw(h, lba, 1, mode, out) do return true
 	}
 	return false
 }
 
 // A burned Dreamcast CD-R in `letter` becomes a Main-screen game.
 dc_disc_game :: proc(letter: rune, label: string) -> (Game, bool) {
-	h := open_cd_volume(u8(letter))
-	if h == win.INVALID_HANDLE_VALUE do return {}, false
-	defer win.CloseHandle(h)
+	h, opened := disc_open(u8(letter))
+	if !opened do return {}, false
+	defer disc_close(h)
 	toc, toc_ok := cd_read_toc(h)
 	if !toc_ok do return {}, false
 	ip, ok := dc_read_ip(h, &toc)
@@ -67,9 +64,9 @@ dc_disc_game :: proc(letter: rune, label: string) -> (Game, bool) {
 // (the game is in the high-density area, beyond what PC drives can read).
 dc_is_gdrom :: proc(letter: rune) -> bool {
 	for name in ([]string{"ABSTRACT.TXT", "BIBLIOGR.TXT"}) {
-		if !os.exists(fmt.tprintf("%c:\\%s", letter, name)) do return false
+		if !os.exists(drive_path(letter, name)) do return false
 	}
-	data, err := os.read_entire_file(fmt.tprintf("%c:\\COPYRIGH.TXT", letter), context.temp_allocator)
+	data, err := os.read_entire_file(drive_path(letter, "COPYRIGH.TXT"), context.temp_allocator)
 	return err == nil && strings.contains(string(data), "SEGA")
 }
 
@@ -82,17 +79,11 @@ Dc_Track :: struct {
 	session: int,
 }
 
-IOCTL_CDROM_READ_TOC_EX :: 0x00024054
-CDROM_READ_TOC_EX_FORMAT_FULL_TOC :: 2
-
 // track number -> session number, from the drive's full TOC
-dc_read_sessions :: proc(h: win.HANDLE) -> (of_track: [100]u8, ok: bool) {
-	input: [4]u8
-	input[0] = CDROM_READ_TOC_EX_FORMAT_FULL_TOC | 0x80 // Format (low 4 bits), Msf (top bit)
-	input[1] = 1 // first session
+dc_read_sessions :: proc(h: Disc_Handle) -> (of_track: [100]u8, ok: bool) {
 	raw: [4 + 300 * 11]u8
-	got: u32
-	if !win.DeviceIoControl(h, IOCTL_CDROM_READ_TOC_EX, &input[0], len(input), &raw[0], len(raw), &got, nil) || got < 4 do return
+	got, read_ok := disc_read_full_toc_raw(h, raw[:])
+	if !read_ok || got < 4 do return
 	n := ((int(raw[0]) << 8 | int(raw[1])) + 2 - 4) / 11 // length field excludes itself
 	for i in 0 ..< n {
 		if 4 + i * 11 + 11 > int(got) do break
@@ -106,7 +97,7 @@ dc_read_sessions :: proc(h: win.HANDLE) -> (of_track: [100]u8, ok: bool) {
 // Track lengths and sessions. A track ends where the next one starts; the last track of a
 // session ends DC_SESSION_GAP sectors before the next session, which is exactly where Flycast's
 // cue parser puts that session, so every sector keeps its real address. Caller deletes.
-dc_layout :: proc(h: win.HANDLE, toc: ^Cd_Toc) -> []Dc_Track {
+dc_layout :: proc(h: Disc_Handle, toc: ^Cd_Toc) -> []Dc_Track {
 	sessions, has_sessions := dc_read_sessions(h)
 	session_of :: proc(s: ^[100]u8, has: bool, track: int) -> int {
 		return has && track < 100 ? max(int(s[track]), 1) : 1

@@ -7,7 +7,6 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import rl "vendor:raylib"
-import win "core:sys/windows"
 
 Game :: struct {
 	root:             string,
@@ -148,6 +147,12 @@ resolve_launch_exe :: proc(g: ^Game) -> (path: string, ok: bool) {
 
 game_launch :: proc(g: ^Game) -> (ok: bool, err: string) {
 	if g.platform != .None {
+		if g.gdrom {
+			return retro_play(g) // only explains why it can't play
+		}
+		splash_begin(g)
+		defer splash_end()
+		splash_play_intro()
 		return retro_play(g)
 	}
 	cmd: string
@@ -155,12 +160,11 @@ game_launch :: proc(g: ^Game) -> (ok: bool, err: string) {
 	fail_msg := "Failed to start game"
 
 	if exe_path, has_exe := resolve_launch_exe(g); has_exe {
-		args := strings.trim_space(g.launch_args)
-		cmd = args != "" ? fmt.tprintf("\"%s\" %s", exe_path, args) : fmt.tprintf("\"%s\"", exe_path)
+		cmd = exe_command(exe_path, strings.trim_space(g.launch_args))
 		wait_name = filepath.base(exe_path)
 		fail_msg = fmt.tprintf("Failed to start %s", g.exe_name)
 	} else if os.exists(g.play_bat) {
-		cmd = fmt.tprintf("cmd.exe /c \"%s\"", g.play_bat)
+		cmd = bat_command(g.play_bat)
 		fail_msg = "Failed to start PLAY.bat"
 	} else {
 		if strings.trim_space(g.exe_name) != "" {
@@ -169,8 +173,10 @@ game_launch :: proc(g: ^Game) -> (ok: bool, err: string) {
 		return false, "Missing exe in saber.ini and no PLAY.bat"
 	}
 
+	splash_begin(g)
 	pi, created := spawn_process("", cmd, g.root)
 	if !created {
+		splash_end()
 		return false, fail_msg
 	}
 	elapsed, _ := run_session(pi, .Game, g.title, wait_name)
@@ -218,11 +224,6 @@ today_iso :: proc() -> string {
 path_join :: proc(parts: []string) -> string {
 	p, _ := filepath.join(parts)
 	return p
-}
-
-wide_to_utf8 :: proc(p: [^]u16, n: int) -> string {
-	s, _ := win.wstring_to_utf8(win.wstring(p), n)
-	return s
 }
 
 ini_get :: proc(text, key: string) -> (string, bool) {

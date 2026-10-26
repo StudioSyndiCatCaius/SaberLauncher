@@ -4,8 +4,13 @@ import "core:c"
 
 // Minimal Lua 5.4 bindings against the static lib built by lua/build_lua.bat
 // (shared with the Flasher; vendor:lua only ships a DLL on Windows, which would break the single-exe build).
+// Elsewhere the system's Lua 5.4 is linked (foreign imports can't be supplied from another file).
 
-foreign import liblua "../Flasher/lua/lua54_static.lib"
+when ODIN_OS == .Windows {
+	foreign import liblua "../Flasher/lua/lua54_static.lib"
+} else {
+	foreign import liblua "system:lua"
+}
 
 lua_State :: struct {}
 lua_CFunction :: #type proc "c" (L: ^lua_State) -> c.int
