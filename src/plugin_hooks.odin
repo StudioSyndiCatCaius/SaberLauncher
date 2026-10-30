@@ -208,7 +208,7 @@ plugins_discs_changed :: proc() {
 		plugin_logf("disc inserted: %s (%s)", g.title, key)
 		plat := RETRO_PLATFORM_DIR[g.meta_platform]
 		for &p in plugins {
-			if p.platform != "" && p.platform != plat do continue
+			if p.L == nil || (p.platform != "" && p.platform != plat) do continue
 			L := p.L
 			top := lua_gettop(L)
 			lua_getglobal(L, "PLUGIN")
@@ -239,6 +239,7 @@ plugins_broadcast :: proc(hook: cstring, nargs: c.int, push: proc(L: ^lua_State)
 
 plugin_call_hook :: proc(p: ^Plugin, hook: cstring, nargs: c.int, push: proc(L: ^lua_State)) {
 	L := p.L
+	if L == nil do return
 	top := lua_gettop(L)
 	defer lua_settop(L, top)
 	lua_getglobal(L, "PLUGIN")

@@ -40,7 +40,8 @@ Plugin :: struct {
 	system:      [dynamic]Meta_Line, // string/number fields of the `system` table
 	actions:     [dynamic]Plugin_Action,
 	settings:    [dynamic]Plugin_Setting,
-	L:           ^lua_State,
+	L:           ^lua_State, // nil = turned off (not loaded this run)
+	enabled:     bool,       // the saved choice; differs from L != nil until Saber restarts
 }
 
 // An entry of the plugin's `actions` table: id = { name=, description=, Do=function() }.
@@ -96,17 +97,46 @@ plugins_init :: proc() {
 				continue
 			}
 			loaded[key] = true
+			if plugin_disabled(fi.name) {
+				p := Plugin{name = strings.clone(fi.name), file = strings.clone(fi.name), dir = strings.clone(fi.fullpath)}
+				p.icon, p.has_icon = load_texture_smooth(path_join({fi.fullpath, "icon.png"}), 256)
+				append(&plugins, p)
+				plugin_logf("%s: turned off", fi.name)
+				continue
+			}
 			plugin_load(main, fi.name, fi.fullpath)
 		}
 	}
 	plugin_logf("%d plugin(s) loaded", len(plugins))
 }
 
+plugin_disabled :: proc(file: string) -> bool {
+	for name in strings.split(app.settings.plugins_off, ";", context.temp_allocator) {
+		if strings.equal_fold(strings.trim_space(name), file) do return true
+	}
+	return false
+}
+
+// Saves the on/off choice; it takes effect when Saber restarts.
+plugin_set_enabled :: proc(p: ^Plugin, on: bool) {
+	p.enabled = on
+	off := make([dynamic]string, context.temp_allocator)
+	for &q in plugins do if !q.enabled do append(&off, q.file)
+	delete(app.settings.plugins_off)
+	app.settings.plugins_off = strings.join(off[:], ";")
+	save_settings()
+	if on == (p.L != nil) {
+		set_status("%s %s", p.name, on ? "on" : "off")
+	} else {
+		set_status("%s turns %s after Saber restarts (Settings > Restart Saber)", p.name, on ? "on" : "off")
+	}
+}
+
 plugins_shutdown :: proc() {
 	for &d in plugin_dialogs do dialog_free(&d)
 	clear(&plugin_dialogs)
 	for p in plugins {
-		lua_close(p.L)
+		if p.L != nil do lua_close(p.L)
 		if p.has_icon do rl.UnloadTexture(p.icon)
 	}
 	clear(&plugins)
@@ -160,7 +190,7 @@ plugin_load :: proc(path, file, dir: string) {
 	}
 	lua_setglobal(L, "PLUGIN")
 
-	p := Plugin{L = L, file = strings.clone(file), dir = strings.clone(dir)}
+	p := Plugin{L = L, enabled = true, file = strings.clone(file), dir = strings.clone(dir)}
 	p.icon, p.has_icon = load_texture_smooth(path_join({dir, "icon.png"}), 256)
 	lua_getglobal(L, "PLUGIN")
 	p.name = strings.clone(lua_field_string(L, -1, "name"))
@@ -311,7 +341,7 @@ plugins_apply :: proc(g: ^Game, from_ini := false) {
 	plat := RETRO_PLATFORM_DIR[g.meta_platform]
 	m: Game_Meta
 	for &p in plugins {
-		if p.platform != "" && p.platform != plat do continue
+		if p.L == nil || (p.platform != "" && p.platform != plat) do continue
 		L := p.L
 		top := lua_gettop(L)
 		lua_getglobal(L, "PLUGIN")
@@ -377,6 +407,7 @@ plugins_apply :: proc(g: ^Game, from_ini := false) {
 	} else {
 		append(&g.info, Meta_Line{"File", strings.clone(filepath.base(g.rom_path))})
 		if g.rom_crc != "" do append(&g.info, Meta_Line{"CRC32", strings.clone(g.rom_crc)})
+		if g.rom_crc == "" && g.disc_serial != g.rom_name do append(&g.info, Meta_Line{"Serial", strings.clone(g.disc_serial)}) // disc image
 	}
 }
 

@@ -45,6 +45,7 @@ App :: struct {
 	scan_buf:        [128]u8,
 	scan_message:    string,
 	quit:            bool,
+	restart:         bool, // start a new Saber after shutting down
 	drive_mask:      u32,
 	drive_rescan_at: f64,
 	fit_check_at:    f64,
@@ -161,6 +162,7 @@ main :: proc() {
 	theme_shutdown()
 	rl.CloseAudioDevice()
 	rl.CloseWindow()
+	if app.restart do restart_self()
 }
 
 // `Saber.exe --play-disc F` boots the console disc in F: right away;
@@ -413,6 +415,7 @@ Settings_Row :: enum {
 	Launch_Mode,
 	Updates,
 	Desktop,
+	Restart,
 }
 
 SETTINGS_ROWS :: len(Settings_Row)
@@ -468,7 +471,17 @@ handle_settings_input :: proc() {
 			set_status("Started Explorer")
 			sfx_click()
 		}
+	case .Restart:
+		if input.confirm {
+			restart_saber()
+		}
 	}
+}
+
+restart_saber :: proc() {
+	sfx_click()
+	app.restart = true
+	app.quit = true
 }
 
 set_volume :: proc(v: f32) {

@@ -558,10 +558,14 @@ iso_read_root_file :: proc(letter: u8, name: string, max_size := 64 * 1024, allo
 	h, opened := disc_open(letter)
 	if !opened do return
 	defer disc_close(h)
-
-	read :: proc(h: Disc_Handle, lba: u32, buf: []byte) -> bool {
-		return disc_read_user(h, int(lba), buf)
+	read :: proc(ctx: rawptr, lba: u32, buf: []byte) -> bool {
+		return disc_read_user((^Disc_Handle)(ctx)^, int(lba), buf)
 	}
+	return iso_find_root_file(read, &h, name, max_size, allocator)
+}
+
+// Walks the ISO9660 root directory; `read` fetches whole 2048-byte user sectors starting at lba.
+iso_find_root_file :: proc(read: proc(ctx: rawptr, lba: u32, buf: []byte) -> bool, h: rawptr, name: string, max_size: int, allocator := context.allocator) -> (data: []byte, ok: bool) {
 	le32 :: proc(b: []byte) -> u32 {return u32(b[0]) | u32(b[1]) << 8 | u32(b[2]) << 16 | u32(b[3]) << 24}
 
 	pvd: [ISO_SECTOR]byte

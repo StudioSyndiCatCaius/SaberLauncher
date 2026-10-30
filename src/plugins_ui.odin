@@ -26,17 +26,17 @@ handle_plugins_input :: proc() {
 			app.plugin_action = 0
 			sfx_click()
 		}
-		if (input.right || input.confirm) && plugin_items(p) > 0 {
+		if input.right || input.confirm {
 			app.plugin_focus = 1
 			app.plugin_action = 0
 			sfx_click()
 		}
 		return
 	}
-	// right column: actions first, then settings, as one list
+	// right column: the on/off switch, then actions, then settings, as one list
 	items := plugin_items(p)
-	on_setting := app.plugin_action >= len(p.actions)
-	if items == 0 || (input.left && !on_setting) {
+	on_setting := app.plugin_action == 0 || app.plugin_action > len(p.actions)
+	if input.left && !on_setting {
 		app.plugin_focus = 0
 		sfx_back()
 		return
@@ -50,17 +50,23 @@ handle_plugins_input :: proc() {
 		app.plugin_action += 1
 		sfx_click()
 	}
-	if app.plugin_action < len(p.actions) {
-		if input.confirm do run_plugin_action(p, &p.actions[app.plugin_action])
+	if app.plugin_action == 0 {
+		if input.left || input.right || input.confirm {
+			plugin_set_enabled(p, !p.enabled)
+			sfx_click()
+		}
+	} else if app.plugin_action <= len(p.actions) {
+		if input.confirm do run_plugin_action(p, &p.actions[app.plugin_action - 1])
 	} else {
-		s := &p.settings[app.plugin_action - len(p.actions)]
+		s := &p.settings[app.plugin_action - 1 - len(p.actions)]
 		if input.left do plugin_change_setting(p, s, -1)
 		else if input.right || input.confirm do plugin_change_setting(p, s, 1)
 	}
 }
 
 plugin_items :: proc(p: ^Plugin) -> int {
-	return len(p.actions) + len(p.settings)
+	if p.L == nil do return 1 // off: only the switch
+	return 1 + len(p.actions) + len(p.settings)
 }
 
 run_plugin_action :: proc(p: ^Plugin, a: ^Plugin_Action) {
@@ -112,6 +118,7 @@ draw_plugins :: proc(w, h: f32) {
 		}
 		draw_t_fit(p.name, tx, r.y + 11, r.width - tx + r.x - 16, 19, sel ? COL_TEXT : COL_MUTED, sel)
 		sub := p.file
+		if !p.enabled do sub = fmt.tprintf("%s  ·  OFF", p.file)
 		if p.platform != "" do sub = fmt.tprintf("%s  ·  %s", p.file, strings.to_upper(p.platform, context.temp_allocator))
 		draw_t_fit(sub, tx, r.y + 37, r.width - tx + r.x - 16, 14, COL_MUTED, false)
 	}
@@ -146,6 +153,28 @@ draw_plugins :: proc(w, h: f32) {
 		draw_t_fit(value, x + 150, y^ - 1, w - 150, 16, COL_TEXT, false)
 		y^ += 26
 	}
+	// on/off switch
+	{
+		sr := rl.Rectangle{x, y, iw, ACTION_ROW_H - 6}
+		focused := app.plugin_focus == 1 && app.plugin_action == 0
+		draw_panel(sr, focused)
+		draw_t_fit("Enabled", sr.x + 18, sr.y + 7, iw * 0.5, 18, focused ? COL_TEXT : COL_MUTED, false)
+		note := "Turning a plugin on or off needs a Saber restart."
+		if p.enabled != (p.L != nil) do note = "Restart Saber to apply (Settings > Restart Saber)."
+		draw_t_fit(note, sr.x + 18, sr.y + 30, iw * 0.53, 13, COL_MUTED, false)
+		val := rl.Rectangle{sr.x + iw * 0.55, sr.y + 6, iw * 0.45 - 12, sr.height - 12}
+		if d := draw_stepper(val, p.enabled ? "On" : "Off", p.enabled ? 1 : 0, 2, focused); d != 0 {
+			app.plugin_focus = 1
+			app.plugin_action = 0
+			plugin_set_enabled(p, !p.enabled)
+		}
+		y += ACTION_ROW_H + 8
+	}
+	if p.L == nil {
+		draw_t("This plugin is off.", x, y, 16, COL_MUTED)
+		return
+	}
+
 	if p.platform != "" do kv("Platform", strings.to_upper(p.platform, context.temp_allocator), x, &y, iw)
 	if p.game_count > 0 do kv("Games", fmt.tprintf("%d known serials", p.game_count), x, &y, iw)
 	for line in p.system {
@@ -164,10 +193,10 @@ draw_plugins :: proc(w, h: f32) {
 	for &a, i in p.actions {
 		ar := rl.Rectangle{x, y, iw, ACTION_ROW_H}
 		if ar.y + ar.height > r.y + r.height - 16 do break
-		focused := app.plugin_focus == 1 && app.plugin_action == i
+		focused := app.plugin_focus == 1 && app.plugin_action == i + 1
 		if mouse_over(ar) && rl.IsMouseButtonPressed(.LEFT) {
 			app.plugin_focus = 1
-			app.plugin_action = i
+			app.plugin_action = i + 1
 			run_plugin_action(p, &a)
 		}
 		draw_panel(ar, focused)
@@ -191,7 +220,7 @@ draw_plugins :: proc(w, h: f32) {
 	for &s, i in p.settings {
 		sr := rl.Rectangle{x, y, iw, ACTION_ROW_H - 6}
 		if sr.y + sr.height > r.y + r.height - 16 do break
-		idx := len(p.actions) + i
+		idx := 1 + len(p.actions) + i
 		focused := app.plugin_focus == 1 && app.plugin_action == idx
 		draw_panel(sr, focused)
 		if s.description != "" {

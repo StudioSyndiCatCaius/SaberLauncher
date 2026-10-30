@@ -9,7 +9,7 @@ import "core:c"
 when ODIN_OS == .Windows {
 	foreign import liblua "../Flasher/lua/lua54_static.lib"
 } else {
-	foreign import liblua "system:lua"
+	foreign import liblua "system:lua5.4"
 }
 
 lua_State :: struct {}

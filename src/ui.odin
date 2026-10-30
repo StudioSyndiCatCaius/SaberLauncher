@@ -278,7 +278,7 @@ draw_footer :: proc(w, h: f32) {
 		draw_hints(w, h, []Hint{{"A", "Choose"}, {"B", "Close"}})
 	case app.screen == .Plugins:
 		if app.plugin_focus == 1 {
-			on_setting := len(plugins) > 0 && app.plugin_action >= len(plugins[clamp(app.plugin_sel, 0, len(plugins) - 1)].actions)
+			on_setting := len(plugins) > 0 && (app.plugin_action == 0 || app.plugin_action > len(plugins[clamp(app.plugin_sel, 0, len(plugins) - 1)].actions))
 			draw_hints(w, h, []Hint{{"A", on_setting ? "Change" : "Run"}, {"B", "Plugins"}, {"LB / RB", "Menus"}})
 		} else {
 			draw_hints(w, h, []Hint{{"A", "Actions"}, {"B", "Home"}, {"LB / RB", "Menus"}})
@@ -628,6 +628,7 @@ SETTINGS_LABELS := [Settings_Row]string {
 	.Launch_Mode = "Launch mode",
 	.Updates     = "Check for updates",
 	.Desktop     = "Desktop",
+	.Restart     = "Restart Saber",
 }
 
 SETTINGS_HELP := [Settings_Row]string {
@@ -641,6 +642,7 @@ SETTINGS_HELP := [Settings_Row]string {
 	.Launch_Mode = "",
 	.Updates    = "Downloads the latest release with SaberUpdater, then restarts Saber. Needs Online Mode.",
 	.Desktop     = "Starts Explorer without closing Saber.",
+	.Restart     = "Closes and reopens Saber, e.g. after turning a plugin on or off.",
 }
 
 ROW_H :: 62
@@ -720,6 +722,12 @@ draw_settings :: proc(w, h: f32) {
 				open_desktop()
 				set_status("Started Explorer")
 				sfx_click()
+			}
+		case .Restart:
+			draw_t_right("Restart", val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
+			draw_glyph("A", val.x + val.width - 26, val.y + val.height * 0.5)
+			if mouse_over(r) && rl.IsMouseButtonPressed(.LEFT) {
+				restart_saber()
 			}
 		}
 	}
