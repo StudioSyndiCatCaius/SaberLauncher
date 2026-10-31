@@ -22,6 +22,44 @@ hw_gl_proc_address :: proc "contextless" (g: ^Hw_Gl, sym: cstring) -> rawptr {
 	return p
 }
 
+// Brings the Vulkan driver up once, before any GL context exists. Some AMD OpenGL drivers
+// (seen with 27.20.14044 on a Radeon + GeForce laptop) break every live GL context the
+// first time Vulkan initialises in the process, and PPSSPP probes Vulkan while starting,
+// which crashed Saber in atio6axx.dll. Once warmed up here, later probes are harmless.
+// Call before InitWindow.
+hw_gl_prepare_driver :: proc() {
+	Instance_Create_Info :: struct {
+		s_type:                           i32, // VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO = 1
+		next:                             rawptr,
+		flags:                            u32,
+		application_info:                 rawptr,
+		enabled_layer_count:              u32,
+		enabled_layer_names:              rawptr,
+		enabled_extension_count:          u32,
+		enabled_extension_names:          rawptr,
+	}
+	Get_Instance_Proc :: proc "system" (instance: rawptr, name: cstring) -> rawptr
+	Create_Instance :: proc "system" (info: ^Instance_Create_Info, alloc: rawptr, instance: ^rawptr) -> i32
+	Enumerate_Devices :: proc "system" (instance: rawptr, count: ^u32, devices: rawptr) -> i32
+	Destroy_Instance :: proc "system" (instance: rawptr, alloc: rawptr)
+
+	lib := win.LoadLibraryW(win.L("vulkan-1.dll"))
+	if lib == nil do return // no Vulkan driver: nothing to warm up
+	defer win.FreeLibrary(lib)
+	get_proc := Get_Instance_Proc(win.GetProcAddress(lib, "vkGetInstanceProcAddr"))
+	if get_proc == nil do return
+	create := Create_Instance(get_proc(nil, "vkCreateInstance"))
+	if create == nil do return
+	info := Instance_Create_Info{s_type = 1}
+	instance: rawptr
+	if create(&info, nil, &instance) != 0 || instance == nil do return
+	if enumerate := Enumerate_Devices(get_proc(instance, "vkEnumeratePhysicalDevices")); enumerate != nil {
+		n: u32
+		enumerate(instance, &n, nil)
+	}
+	if destroy := Destroy_Instance(get_proc(instance, "vkDestroyInstance")); destroy != nil do destroy(instance, nil)
+}
+
 // Remembers raylib's (current) context.
 hw_gl_bind_main :: proc(g: ^Hw_Gl) -> bool {
 	g.hdc = win.wglGetCurrentDC()

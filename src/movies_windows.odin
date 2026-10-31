@@ -11,7 +11,7 @@ import win "core:sys/windows"
 
 MOVIE_PLAYER_HINT :: "Install VLC (preferred) or Windows Media Player"
 
-movie_com_ready: bool
+@(thread_local) movie_com_ready: bool // COM is initialised per thread
 
 // {bcc18b79-ba16-442f-80c4-8a59c30c463b}
 IID_IShellItemImageFactory := &win.GUID{0xbcc18b79, 0xba16, 0x442f, {0x80, 0xc4, 0x8a, 0x59, 0xc3, 0x0c, 0x46, 0x3b}}

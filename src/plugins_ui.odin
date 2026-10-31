@@ -35,7 +35,8 @@ handle_plugins_input :: proc() {
 	}
 	// right column: the on/off switch, then actions, then settings, as one list
 	items := plugin_items(p)
-	on_setting := app.plugin_action == 0 || app.plugin_action > len(p.actions)
+	// left steps a setting's value; everywhere else it goes back to the list
+	on_setting := app.plugin_action > len(p.actions)
 	if input.left && !on_setting {
 		app.plugin_focus = 0
 		sfx_back()
@@ -51,7 +52,7 @@ handle_plugins_input :: proc() {
 		sfx_click()
 	}
 	if app.plugin_action == 0 {
-		if input.left || input.right || input.confirm {
+		if input.confirm {
 			plugin_set_enabled(p, !p.enabled)
 			sfx_click()
 		}
@@ -153,7 +154,7 @@ draw_plugins :: proc(w, h: f32) {
 		draw_t_fit(value, x + 150, y^ - 1, w - 150, 16, COL_TEXT, false)
 		y^ += 26
 	}
-	// on/off switch
+	// enabled checkbox
 	{
 		sr := rl.Rectangle{x, y, iw, ACTION_ROW_H - 6}
 		focused := app.plugin_focus == 1 && app.plugin_action == 0
@@ -162,11 +163,11 @@ draw_plugins :: proc(w, h: f32) {
 		note := "Turning a plugin on or off needs a Saber restart."
 		if p.enabled != (p.L != nil) do note = "Restart Saber to apply (Settings > Restart Saber)."
 		draw_t_fit(note, sr.x + 18, sr.y + 30, iw * 0.53, 13, COL_MUTED, false)
-		val := rl.Rectangle{sr.x + iw * 0.55, sr.y + 6, iw * 0.45 - 12, sr.height - 12}
-		if d := draw_stepper(val, p.enabled ? "On" : "Off", p.enabled ? 1 : 0, 2, focused); d != 0 {
+		if draw_checkbox(sr, p.enabled, focused) {
 			app.plugin_focus = 1
 			app.plugin_action = 0
 			plugin_set_enabled(p, !p.enabled)
+			sfx_click()
 		}
 		y += ACTION_ROW_H + 8
 	}
@@ -238,4 +239,26 @@ draw_plugins :: proc(w, h: f32) {
 		}
 		y += ACTION_ROW_H
 	}
+}
+
+// Checkbox at the right end of a row; returns true when the row is clicked.
+draw_checkbox :: proc(row: rl.Rectangle, checked, focused: bool) -> bool {
+	size := row.height - 18
+	box := rl.Rectangle{row.x + row.width - size - 16, row.y + (row.height - size) * 0.5, size, size}
+	if checked {
+		draw_glass(box, 8, mix_color(COL_PANEL_HI, COL_ACCENT, 0.55), 0.6, COL_ACCENT, focused ? 0.7 : 0.4, refract = 4)
+		// tick
+		a := rl.Vector2{box.x + size * 0.24, box.y + size * 0.52}
+		b := rl.Vector2{box.x + size * 0.43, box.y + size * 0.70}
+		c := rl.Vector2{box.x + size * 0.77, box.y + size * 0.31}
+		rl.DrawLineEx(a, b, 3, COL_TEXT)
+		rl.DrawLineEx(b, c, 3, COL_TEXT)
+		rl.DrawCircleV(b, 1.5, COL_TEXT)
+	} else {
+		draw_glass(box, 8, COL_PANEL, 0.2, COL_ACCENT, focused ? 0.5 : 0, refract = 4)
+	}
+	if focused {
+		draw_t_right(checked ? "On" : "Off", box.x - 12, row.y + (row.height - 17) * 0.5, 17, COL_TEXT)
+	}
+	return mouse_over(row) && rl.IsMouseButtonPressed(.LEFT)
 }

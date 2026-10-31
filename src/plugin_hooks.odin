@@ -271,6 +271,13 @@ lua_set_art :: proc "c" (L: ^lua_State) -> c.int {
 }
 
 game_set_box :: proc(g: ^Game, path: string) {
+	if scan_deferred {
+		if g.box_img.data != nil do rl.UnloadImage(g.box_img)
+		delete(g.box_file)
+		g.box_file = strings.clone(path)
+		g.box_img, _ = load_image_smooth(path)
+		return
+	}
 	if g.has_box {
 		rl.UnloadTexture(g.box)
 		g.has_box = false

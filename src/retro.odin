@@ -877,6 +877,15 @@ retro_draw_osd :: proc(w, h: f32) {
 // ---------------------------------------------------------------------------
 // In-game overlay (Home / Esc)
 
+// The paused game frame is what the overlay's glass panels see through.
+retro_capture_glass :: proc(w, h: f32) {
+	if glass_capture_begin(w, h) {
+		rl.ClearBackground(rl.BLACK)
+		retro_draw_frame(w, h, rl.WHITE)
+		glass_capture_end(.Wall)
+	}
+}
+
 RETRO_PAUSE_LABELS := [?]string{"Resume", "Save State", "Load State", "Emulation Settings", "Quit Game"}
 
 retro_pause_pressed :: proc() -> bool {
@@ -959,6 +968,7 @@ retro_pause_menu :: proc(g: ^Game) {
 		w := f32(rl.GetScreenWidth())
 		h := f32(rl.GetScreenHeight())
 		app.pause_t = smooth_to(app.pause_t, 1, 12)
+		retro_capture_glass(w, h)
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
 		retro_draw_frame(w, h, rl.WHITE)

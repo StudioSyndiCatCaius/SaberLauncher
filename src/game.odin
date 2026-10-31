@@ -38,6 +38,16 @@ Game :: struct {
 	rom_name:         string,         // its file name without extension, e.g. "Super Mario World (USA)"
 	rom_crc:          string,         // CRC32 of the ROM as hex ("" when too big to hash on scan)
 	gdrom:            bool,           // a pressed Dreamcast GD-ROM: listed, but unplayable from a PC drive
+	// filled by a drive scan on the worker thread, finished on the main thread (game_finish_scan)
+	box_img, logo_img: rl.Image,
+	pending_apply:    bool,
+	pending_from_ini: bool,
+	// Home carousel animation (draw_main); carried across rescans by root
+	drive_letter:     u8,
+	anim_t:           f32, // 0 -> 1 appearing; ghosts run it back to 0
+	slot_x:           f32, // eased carousel offset
+	has_slot:         bool,
+	last_rect:        rl.Rectangle,
 }
 
 game_from_folder :: proc(root: string, drive_label: string, from_drive: bool) -> (Game, bool) {
@@ -111,11 +121,42 @@ game_from_folder :: proc(root: string, drive_label: string, from_drive: bool) ->
 }
 
 game_load_art :: proc(g: ^Game) {
+	if scan_deferred {
+		g.box_img, _ = load_image_smooth(g.box_file)
+		g.logo_img, _ = load_image_smooth(g.logo_file)
+		return
+	}
 	g.box, g.has_box = load_texture_smooth(g.box_file)
 	g.logo, g.has_logo = load_texture_smooth(g.logo_file)
 }
 
+// Main-thread half of a deferred scan: upload the decoded art, then run the plugins.
+game_finish_scan :: proc(g: ^Game) {
+	if g.box_img.data != nil {
+		g.box, g.has_box = texture_from_image(g.box_img)
+		rl.UnloadImage(g.box_img)
+		g.box_img = {}
+	}
+	if g.logo_img.data != nil {
+		g.logo, g.has_logo = texture_from_image(g.logo_img)
+		rl.UnloadImage(g.logo_img)
+		g.logo_img = {}
+	}
+	if g.pending_apply {
+		g.pending_apply = false
+		plugins_apply(g, from_ini = g.pending_from_ini)
+	}
+}
+
 game_unload_art :: proc(g: ^Game) {
+	if g.box_img.data != nil {
+		rl.UnloadImage(g.box_img)
+		g.box_img = {}
+	}
+	if g.logo_img.data != nil {
+		rl.UnloadImage(g.logo_img)
+		g.logo_img = {}
+	}
 	if g.has_box {
 		rl.UnloadTexture(g.box)
 		g.has_box = false

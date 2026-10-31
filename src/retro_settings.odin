@@ -653,6 +653,7 @@ emu_menu_run_in_game :: proc() {
 		emu_menu_input()
 		w := f32(rl.GetScreenWidth())
 		h := f32(rl.GetScreenHeight())
+		retro_capture_glass(w, h)
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
 		retro_draw_frame(w, h, rl.WHITE)

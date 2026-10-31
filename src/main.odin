@@ -48,6 +48,10 @@ App :: struct {
 	restart:         bool, // start a new Saber after shutting down
 	drive_mask:      u32,
 	drive_rescan_at: f64,
+	drive_scan_kind: Drive_Scan_Kind, // what the next scan reads: a disc change wins
+	portable_mask:   u32, // insertable drives present at the last poll
+	disc_mask:       u32, // optical drives holding a disc at the last poll
+	jump_mask:       u32, // newly inserted letters: focus their first game once scanned
 	fit_check_at:    f64,
 	media_sig:       u64,
 	settings_focus:  int,
@@ -98,6 +102,7 @@ main :: proc() {
 	}
 	rl.SetTraceLogLevel(.WARNING)
 	// hidden until the splash is drawn, otherwise Windows shows a blank white window while loading
+	hw_gl_prepare_driver() // before any GL context: see hwgl_windows.odin
 	rl.SetConfigFlags({.VSYNC_HINT, .WINDOW_ALWAYS_RUN, .MSAA_4X_HINT, .WINDOW_HIDDEN})
 	rl.InitWindow(1280, 720, WINDOW_TITLE)
 	rl.SetExitKey(.KEY_NULL)
@@ -127,6 +132,7 @@ main :: proc() {
 		}
 		keep_fullscreen()
 		poll_drive_changes()
+		drive_scan_update()
 		theme_update()
 		if rl.IsKeyPressed(.F11) {
 			rl.ToggleBorderlessWindowed()
@@ -139,20 +145,41 @@ main :: proc() {
 		w := f32(rl.GetScreenWidth())
 		h := f32(rl.GetScreenHeight())
 
-		rl.BeginDrawing()
-		draw_background(w, h)
+		// Glass backdrops: the wallpaper for menu panels, and under a dialog the
+		// menus too, which are then drawn once into the capture instead of twice.
 		update_swipe()
-		draw_screens(w, h)
-		draw_header(w)
-		draw_footer(w, h)
+		under_dialog := false
+		if glass_capture_begin(w, h) {
+			draw_wallpaper(w, h)
+			glass_capture_end(.Wall)
+			if dialog_visible() {
+				glass_capture_begin(w, h)
+				draw_menus(w, h)
+				glass_capture_end(.Over)
+				under_dialog = true
+			}
+		}
+
+		rl.BeginDrawing()
+		if under_dialog {
+			glass_draw_scene()
+		} else {
+			draw_background(w, h)
+			draw_menus(w, h)
+		}
+		glass.source = under_dialog ? .Over : .Wall
+		draw_drive_scan_card(w, h)
 		draw_power_dialog(w, h)
 		draw_plugin_dialog(w, h)
 		emu_menu_draw(w, h)
+		glass.source = .Wall
 		rl.EndDrawing()
 
 		free_all(context.temp_allocator)
 	}
 
+	drive_scan_shutdown()
+	drive_ghosts_clear()
 	unload_all_games()
 	unload_all_apps()
 	unload_all_movies()
@@ -215,6 +242,10 @@ poll_drive_changes :: proc() {
 	mask := current_drive_mask()
 	now := rl.GetTime()
 	if mask != app.drive_mask {
+		portable := portable_drive_mask(mask)
+		app.jump_mask |= portable &~ app.portable_mask
+		if gone := app.portable_mask &~ mask; gone != 0 do drive_notice_removed(.Drive, gone)
+		app.portable_mask = portable
 		app.drive_mask = mask
 		app.drive_rescan_at = now + DRIVE_SETTLE_SEC
 		set_status("Drive change detected…")
@@ -222,14 +253,19 @@ poll_drive_changes :: proc() {
 	{
 		if sig := optical_media_signature(); sig != app.media_sig {
 			app.media_sig = sig
+			discs := disc_presence_mask()
+			app.jump_mask |= discs &~ app.disc_mask
+			if gone := app.disc_mask &~ discs; gone != 0 do drive_notice_removed(.Disc, gone)
+			app.disc_mask = discs
+			app.drive_scan_kind = .Disc
 			app.drive_rescan_at = now + DRIVE_SETTLE_SEC
 			set_status("Disc change detected…")
 		}
 	}
 	if app.drive_rescan_at != 0 && now >= app.drive_rescan_at {
 		app.drive_rescan_at = 0
-		rescan_drives()
-		set_status("Drives updated  ·  %d inserted", len(app.drive_games))
+		drive_scan_start(app.drive_scan_kind)
+		app.drive_scan_kind = .Drive
 	}
 }
 
@@ -252,27 +288,20 @@ draw_splash :: proc(step: string) {
 	free_all(context.temp_allocator)
 }
 
-rescan_drives :: proc() {
-	for &g in app.drive_games {
-		game_unload_art(&g)
-	}
-	clear(&app.drive_games)
-	scan_portable_drives(&app.drive_games)
-	app.selected_drive = clamp(app.selected_drive, 0, max(0, len(app.drive_games) - 1))
-	update_scan_message()
-	plugins_discs_changed()
-}
-
-rescan_all :: proc() {
-	unload_all_games()
+// Startup scans drives inline (behind the splash); a Y rescan uses the drive-scan worker.
+rescan_all :: proc(drives_async := false) {
 	unload_all_apps()
 	unload_all_movies()
-	clear(&app.drive_games)
+	for &g in app.library_games do game_unload_art(&g)
 	clear(&app.library_games)
 	clear(&app.shell_apps)
 	clear(&app.movies)
 	scan_library(&app.library_games, app.games_dir)
-	scan_portable_drives(&app.drive_games)
+	if !drives_async {
+		for &g in app.drive_games do game_unload_art(&g)
+		clear(&app.drive_games)
+		scan_portable_drives(&app.drive_games)
+	}
 	scan_apps(&app.shell_apps, app.apps_dir)
 	scan_movies(&app.movies, app.movies_dir)
 	app.selected_drive = clamp(app.selected_drive, 0, max(0, len(app.drive_games) - 1))
@@ -280,10 +309,16 @@ rescan_all :: proc() {
 	app.selected_app = clamp(app.selected_app, 0, max(0, len(app.shell_apps) - 1))
 	app.selected_movie = clamp(app.selected_movie, 0, max(0, len(app.movies) - 1))
 	app.drive_mask = current_drive_mask()
+	app.portable_mask = portable_drive_mask(app.drive_mask)
+	app.disc_mask = disc_presence_mask()
 	app.media_sig = optical_media_signature()
 	app.drive_rescan_at = 0
 	update_scan_message()
-	plugins_discs_changed()
+	if drives_async {
+		drive_scan_start(.Drive)
+	} else {
+		plugins_discs_changed()
+	}
 }
 
 update_scan_message :: proc() {
@@ -308,6 +343,17 @@ unload_all_games :: proc() {
 
 power_blocking :: proc() -> bool {
 	return app.power_open || app.power_t > 0.08
+}
+
+draw_menus :: proc(w, h: f32) {
+	draw_screens(w, h)
+	draw_header(w)
+	draw_footer(w, h)
+}
+
+// A modal is on screen (fading in or out included).
+dialog_visible :: proc() -> bool {
+	return app.power_open || app.power_t >= 0.02 || plugin_dialog_open() || emu_menu.open || emu_menu.t >= 0.02
 }
 
 input_locked :: proc() -> bool {
@@ -372,7 +418,7 @@ handle_app_input :: proc() {
 		return
 	}
 	if input.extra {
-		rescan_all()
+		rescan_all(drives_async = true)
 		set_status("Rescanned drives, library, movies and apps")
 		sfx_click()
 	}

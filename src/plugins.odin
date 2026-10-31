@@ -338,6 +338,12 @@ read_game_meta :: proc(L: ^lua_State, m: ^Game_Meta) {
 // Fills title / tags / info of a disc game from the plugins.
 // from_ini: a _Saber game; its own title, tags and box art win over the plugins'.
 plugins_apply :: proc(g: ^Game, from_ini := false) {
+	if scan_deferred {
+		// Lua lives on the main thread; game_finish_scan runs this later
+		g.pending_apply = true
+		g.pending_from_ini = from_ini
+		return
+	}
 	plat := RETRO_PLATFORM_DIR[g.meta_platform]
 	m: Game_Meta
 	for &p in plugins {

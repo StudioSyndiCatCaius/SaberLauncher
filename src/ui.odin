@@ -10,7 +10,7 @@ import rl "vendor:raylib"
 HEADER_H :: 84
 FOOTER_H :: 56
 PAD :: 40
-RADIUS :: 12
+RADIUS :: 18
 TITLE_STRIP :: 40
 
 // ---------------------------------------------------------------------------
@@ -21,18 +21,30 @@ roundness :: proc(r: rl.Rectangle, px: f32) -> f32 {
 	return m <= 0 ? 0 : min(1, px * 2 / m)
 }
 
+// A glass pane. `fill`'s alpha fades it (dialogs animating in); a near-opaque
+// fill frosts it more, for panels that carry a lot of text.
 draw_panel :: proc(r: rl.Rectangle, hi: bool, fill := rl.Color{}) {
 	fill := fill.a == 0 ? COL_PANEL : fill
-	rr := roundness(r, RADIUS)
-	rl.DrawRectangleRounded({r.x, r.y + 4, r.width, r.height}, rr, 8, COL_SHADOW)
-	rl.DrawRectangleRounded(r, rr, 8, hi ? COL_PANEL_HI : fill)
-	rl.DrawRectangleRoundedLinesEx(r, rr, 8, 1, hi ? COL_ACCENT_SOFT : COL_FAINT)
+	alpha := clamp(f32(fill.a) / 190, 0, 1)
+	frost := (ui_theme_light ? f32(0.42) : f32(0.30)) + 0.22 * clamp((f32(fill.a) - 196) / 48, 0, 1)
+	draw_soft_shadow(r, RADIUS, alpha * (hi ? 1.4 : 1))
+	if hi {
+		draw_glass(r, RADIUS, COL_PANEL_HI, frost * 0.8, COL_ACCENT, 0.55, alpha)
+	} else {
+		draw_glass(r, RADIUS, fill, frost, alpha = alpha)
+	}
 }
 
 draw_focus_ring :: proc(r: rl.Rectangle) {
-	a := u8(170 + 60 * math.sin(f32(rl.GetTime()) * 3.2))
-	g := rl.Rectangle{r.x - 3, r.y - 3, r.width + 6, r.height + 6}
-	rl.DrawRectangleRoundedLinesEx(g, roundness(g, RADIUS + 3), 8, 2.5, rl.Color{COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, a})
+	pulse := 0.5 + 0.5 * math.sin(f32(rl.GetTime()) * 3.2)
+	for i in 0 ..< 3 {
+		g := f32(3 + i * 3)
+		o := rl.Rectangle{r.x - g, r.y - g, r.width + g * 2, r.height + g * 2}
+		a := u8((f32(70) - f32(i) * 22) * (0.6 + 0.4 * pulse))
+		rl.DrawRectangleRoundedLinesEx(o, roundness(o, RADIUS + g), 10, 2, with_alpha(COL_ACCENT, a))
+	}
+	o := rl.Rectangle{r.x - 2, r.y - 2, r.width + 4, r.height + 4}
+	rl.DrawRectangleRoundedLinesEx(o, roundness(o, RADIUS + 2), 10, 1.5, with_alpha(COL_ACCENT, u8(150 + 80 * pulse)))
 }
 
 // Scissor stack that follows the swipe offset and survives nesting (marquees inside cards).
@@ -78,13 +90,10 @@ ui_button :: proc(id: string, r: rl.Rectangle, label: string, focused := false, 
 		hover_enter(id)
 	}
 	hot := hovered || focused
-	rr := roundness(r, RADIUS)
 	if hot {
-		rl.DrawRectangleRounded(r, rr, 8, rl.Color{COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, 46})
-		rl.DrawRectangleRoundedLinesEx(r, rr, 8, 2, COL_ACCENT)
+		draw_glass(r, r.height * 0.5, mix_color(COL_PANEL_HI, COL_ACCENT, 0.25), 0.35, COL_ACCENT, 0.7, refract = 8)
 	} else {
-		rl.DrawRectangleRounded(r, rr, 8, with_alpha(COL_TINT, 12))
-		rl.DrawRectangleRoundedLinesEx(r, rr, 8, 1, COL_FAINT)
+		draw_glass(r, r.height * 0.5, COL_PANEL, 0.22, refract = 8)
 	}
 	draw_t_center(label, r.x + r.width * 0.5, r.y + (r.height - 20) * 0.5, 20, hot ? COL_TEXT : COL_MUTED)
 	if hovered && rl.IsMouseButtonPressed(.LEFT) {
@@ -211,8 +220,9 @@ TAB_LABELS := [Screen]string {
 }
 
 draw_header :: proc(w: f32) {
-	rl.DrawRectangleGradientV(0, 0, i32(w), HEADER_H, with_alpha(COL_SHADE, 235), with_alpha(COL_SHADE, 190))
-	rl.DrawRectangle(0, HEADER_H - 1, i32(w), 1, COL_FAINT)
+	// glass strip running off the top and sides, so only its lower rim shows
+	draw_soft_shadow({0, 0, w, HEADER_H}, 0, 0.8)
+	draw_glass({-60, -60, w + 120, HEADER_H + 60}, 0, COL_PANEL_SOLID, ui_theme_light ? 0.40 : 0.28, refract = 10)
 
 	rl.DrawRectangleRounded({PAD, 28, 4, 28}, 1, 4, COL_ACCENT)
 	draw_t("SABER", PAD + 16, 24, 32, COL_TEXT)
@@ -226,6 +236,11 @@ draw_header :: proc(w: f32) {
 	total += gap * f32(SCREEN_COUNT - 1)
 	x := (w - total) * 0.5
 	ty: f32 = 33
+	if app.tab_w > 0 {
+		// liquid lens that slides under the active tab
+		lens := rl.Rectangle{app.tab_x - 18, ty - 10, app.tab_w + 36, size + 20}
+		draw_glass(lens, lens.height * 0.5, mix_color(COL_PANEL_HI, COL_ACCENT, 0.2), 0.25, COL_ACCENT, 0.45, refract = 10)
+	}
 	draw_glyph("LB", x - 64, ty + 9)
 	for label, s in TAB_LABELS {
 		tw := measure_t(label, size)
@@ -246,7 +261,6 @@ draw_header :: proc(w: f32) {
 		x += tw + gap
 	}
 	draw_glyph("RB", x - gap + 28, ty + 9)
-	rl.DrawRectangleRounded({app.tab_x, HEADER_H - 4, app.tab_w, 3}, 1, 4, COL_ACCENT)
 
 	draw_t_right(clock_label(), w - PAD, 26, 26, COL_TEXT)
 }
@@ -258,8 +272,7 @@ clock_label :: proc() -> string {
 
 draw_footer :: proc(w, h: f32) {
 	y := h - FOOTER_H
-	rl.DrawRectangleGradientV(0, i32(y), i32(w), FOOTER_H, with_alpha(COL_SHADE, 170), with_alpha(COL_SHADE, 235))
-	rl.DrawRectangle(0, i32(y), i32(w), 1, COL_FAINT)
+	draw_glass({-60, y, w + 120, FOOTER_H + 60}, 0, COL_PANEL_SOLID, ui_theme_light ? 0.40 : 0.28, refract = 10)
 
 	age := rl.GetTime() - app.status_at
 	if app.status != "" && age < STATUS_SECONDS {
@@ -279,7 +292,7 @@ draw_footer :: proc(w, h: f32) {
 	case app.screen == .Plugins:
 		if app.plugin_focus == 1 {
 			on_setting := len(plugins) > 0 && (app.plugin_action == 0 || app.plugin_action > len(plugins[clamp(app.plugin_sel, 0, len(plugins) - 1)].actions))
-			draw_hints(w, h, []Hint{{"A", on_setting ? "Change" : "Run"}, {"B", "Plugins"}, {"LB / RB", "Menus"}})
+			draw_hints(w, h, []Hint{{"A", app.plugin_action == 0 ? "Toggle" : on_setting ? "Change" : "Run"}, {"B", "Plugins"}, {"LB / RB", "Menus"}})
 		} else {
 			draw_hints(w, h, []Hint{{"A", "Actions"}, {"B", "Home"}, {"LB / RB", "Menus"}})
 		}
@@ -314,8 +327,7 @@ Card :: struct {
 card_for :: proc(s: Screen, i: int) -> Card {
 	#partial switch s {
 	case .Main:
-		g := &app.drive_games[i]
-		return {g.box, g.has_box, g.title, "NO ART", true, g.mod_name != "" ? fmt.tprintf("Modded : %s", g.mod_name) : ""}
+		return game_card(&app.drive_games[i])
 	case .Library:
 		g := &app.library_games[i]
 		return {g.box, g.has_box, g.title, "NO ART", true, ""}
@@ -329,34 +341,48 @@ card_for :: proc(s: Screen, i: int) -> Card {
 	return {}
 }
 
-draw_card :: proc(c: Card, r: rl.Rectangle, hi: bool, title_size: f32 = 17) {
+game_card :: proc(g: ^Game) -> Card {
+	return {g.box, g.has_box, g.title, "NO ART", true, g.mod_name != "" ? fmt.tprintf("Modded : %s", g.mod_name) : ""}
+}
+
+fade_color :: proc(c: rl.Color, a: f32) -> rl.Color {
+	return with_alpha(c, u8(f32(c.a) * clamp(a, 0, 1)))
+}
+
+// `alpha` < 1 fades the whole card (Home cards appearing / vanishing).
+draw_card :: proc(c: Card, r: rl.Rectangle, hi: bool, title_size: f32 = 17, alpha: f32 = 1) {
 	box := r
 	if hi {
 		box.y -= 6
 	}
-	draw_panel(box, hi)
+	if alpha < 1 {
+		draw_panel(box, hi, fade_color(hi ? COL_PANEL_HI : COL_PANEL, alpha))
+	} else {
+		draw_panel(box, hi)
+	}
 	art := rl.Rectangle{box.x + 8, box.y + 8, box.width - 16, box.height - 16 - TITLE_STRIP}
 	if hi {
 		splash_focus_art = art
 	}
+	tint := fade_color(rl.WHITE, alpha)
 	if c.has_tex && c.contain {
-		rl.DrawRectangleRounded(art, roundness(art, RADIUS - 4), 6, with_alpha(COL_SHADE, 70))
-		draw_texture_contain(c.tex, art)
+		rl.DrawRectangleRounded(art, roundness(art, RADIUS - 4), 6, fade_color(with_alpha(COL_SHADE, 70), alpha))
+		draw_texture_contain(c.tex, art, tint)
 	} else if c.has_tex {
-		draw_texture_cover(c.tex, art)
+		draw_texture_cover(c.tex, art, tint)
 	} else {
-		rl.DrawRectangleRounded(art, roundness(art, RADIUS - 4), 6, with_alpha(COL_TINT, 8))
-		draw_t_center(c.placeholder, art.x + art.width * 0.5, art.y + art.height * 0.5 - 8, 15, COL_MUTED)
+		rl.DrawRectangleRounded(art, roundness(art, RADIUS - 4), 6, fade_color(with_alpha(COL_TINT, 8), alpha))
+		draw_t_center(c.placeholder, art.x + art.width * 0.5, art.y + art.height * 0.5 - 8, 15, fade_color(COL_MUTED, alpha))
 	}
 	if c.badge != "" {
 		size: f32 = 12
 		tw := min(measure_t(c.badge, size), art.width - 28)
 		pill := rl.Rectangle{art.x + art.width - tw - 22, art.y + 6, tw + 16, 22}
-		rl.DrawRectangleRounded(pill, 1, 8, with_alpha(COL_ACCENT, 230))
-		draw_t_fit(c.badge, pill.x + 8, pill.y + 5, tw, size, rl.Color{16, 18, 24, 255}, false)
+		rl.DrawRectangleRounded(pill, 1, 8, fade_color(with_alpha(COL_ACCENT, 230), alpha))
+		draw_t_fit(c.badge, pill.x + 8, pill.y + 5, tw, size, fade_color(rl.Color{16, 18, 24, 255}, alpha), false)
 	}
-	draw_t_fit(c.title, box.x + 14, box.y + box.height - TITLE_STRIP + 8, box.width - 28, title_size, hi ? COL_TEXT : COL_MUTED, hi)
-	if hi {
+	draw_t_fit(c.title, box.x + 14, box.y + box.height - TITLE_STRIP + 8, box.width - 28, title_size, fade_color(hi ? COL_TEXT : COL_MUTED, alpha), hi)
+	if hi && alpha > 0.98 {
 		draw_focus_ring(box)
 	}
 }
@@ -380,12 +406,24 @@ card_mouse :: proc(s: Screen, i: int, r: rl.Rectangle) {
 // ---------------------------------------------------------------------------
 // Home: carousel of games on inserted drives
 
+// Overshoots a little past 1 before settling: a soft "pop".
+ease_out_back :: proc(t: f32) -> f32 {
+	c1 :: 1.70158
+	u := t - 1
+	return 1 + (c1 + 1) * u * u * u + c1 * u * u
+}
+
 draw_main :: proc(w, h: f32) {
 	top := f32(HEADER_H + 28)
 	draw_heading("INSERTED", len(app.drive_games), top)
 	bottom := h - FOOTER_H - 24
 
 	if len(app.drive_games) == 0 {
+		// let the last cards finish vanishing before the hint comes up
+		if len(drive_ghosts) > 0 {
+			draw_drive_ghosts()
+			return
+		}
 		pw := min(w - PAD * 2, 760)
 		r := rl.Rectangle{(w - pw) * 0.5, (top + bottom) * 0.5 - 110, pw, 220}
 		draw_panel(r, false)
@@ -404,7 +442,24 @@ draw_main :: proc(w, h: f32) {
 	gap: f32 = 40
 	step := card_w * 0.82 + gap
 	sel := clamp(app.selected_drive, 0, len(app.drive_games) - 1)
-	target := w * 0.5 - f32(sel) * step
+
+	// each card's glass hugs its box art; cards without art keep the default shape
+	n := len(app.drive_games)
+	widths := make([]f32, n, context.temp_allocator)
+	offsets := make([]f32, n, context.temp_allocator)
+	art_h := card_h - 16 - TITLE_STRIP
+	for i in 0 ..< n {
+		g := &app.drive_games[i]
+		widths[i] = card_w
+		if g.has_box && g.box.height > 0 {
+			aspect := f32(g.box.width) / f32(g.box.height)
+			widths[i] = clamp(art_h * aspect, art_h * 0.5, art_h * 1.6) + 16
+		}
+		if i > 0 {
+			offsets[i] = offsets[i - 1] + (widths[i - 1] + widths[i]) * 0.5 * 0.9 + gap
+		}
+	}
+	target := w * 0.5 - offsets[sel]
 	if !app.carousel_ready {
 		app.carousel_x = target
 		app.carousel_ready = true
@@ -424,20 +479,33 @@ draw_main :: proc(w, h: f32) {
 			}
 		}
 	}
+	draw_drive_ghosts()
 	for i in order {
-		cx := app.carousel_x + f32(i) * step
+		g := &app.drive_games[i]
+		// cards slide into the gaps left by removed ones, and pop in when inserted
+		if !g.has_slot {
+			g.slot_x = offsets[i]
+			g.has_slot = true
+		}
+		g.slot_x = smooth_to(g.slot_x, offsets[i], 12)
+		g.anim_t = min(1, g.anim_t + rl.GetFrameTime() * 2.4)
+		pop := ease_out_back(g.anim_t)
+		alpha := min(1, g.anim_t * 1.6)
+
+		cx := app.carousel_x + g.slot_x
 		k := clamp(abs(cx - w * 0.5) / step, 0, 1)
-		scale := 1 - 0.18 * k
-		cw := card_w * scale
+		scale := (1 - 0.18 * k) * (0.6 + 0.4 * pop)
+		cw := widths[i] * scale
 		ch := card_h * scale
-		r := rl.Rectangle{cx - cw * 0.5, area_top + (card_h - ch) * 0.5, cw, ch}
+		r := rl.Rectangle{cx - cw * 0.5, area_top + (card_h - ch) * 0.5 + (1 - g.anim_t) * 40, cw, ch}
+		g.last_rect = r
 		if r.x > w || r.x + r.width < 0 {
 			continue
 		}
 		card_mouse(.Main, i, r)
-		draw_card(card_for(.Main, i), r, i == sel, 18)
+		draw_card(card_for(.Main, i), r, i == sel, 18, alpha)
 		if k > 0.02 {
-			rl.DrawRectangleRounded(r, roundness(r, RADIUS), 8, with_alpha(COL_SHADE, u8(110 * k)))
+			rl.DrawRectangleRounded(r, roundness(r, RADIUS), 8, with_alpha(COL_SHADE, u8(110 * k * alpha)))
 		}
 	}
 
@@ -786,16 +854,17 @@ draw_volume_slider :: proc(r: rl.Rectangle, focused: bool) {
 		}
 	}
 	v := app.settings.volume
-	rl.DrawRectangleRounded(track, 1, 6, with_alpha(COL_TINT, 30))
+	rl.DrawRectangleRounded(track, 1, 6, with_alpha(COL_SHADE, 90))
 	rl.DrawRectangleRounded({track.x, track.y, track.width * v, track.height}, 1, 6, focused ? COL_ACCENT : COL_MUTED)
-	rl.DrawCircleV({track.x + track.width * v, track.y + 3}, focused ? 10 : 8, COL_TEXT)
+	kr: f32 = focused ? 13 : 11
+	knob := rl.Rectangle{track.x + track.width * v - kr * 1.4, track.y + 3 - kr, kr * 2.8, kr * 2}
+	draw_soft_shadow(knob, kr, 0.6)
+	draw_glass(knob, kr, rl.WHITE, ui_theme_light ? 0.5 : 0.28, COL_ACCENT, focused ? 0.5 : 0, refract = 6)
 	draw_t_right(fmt.tprintf("%d%%", int(v * 100 + 0.5)), r.x + r.width - 8, r.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
 }
 
 draw_select_box :: proc(r: rl.Rectangle, value: string, focused: bool) {
-	rr := roundness(r, 8)
-	rl.DrawRectangleRounded(r, rr, 6, with_alpha(COL_TINT, focused ? 20 : 10))
-	rl.DrawRectangleRoundedLinesEx(r, rr, 6, 1, focused ? COL_ACCENT_SOFT : COL_FAINT)
+	draw_glass(r, r.height * 0.5, COL_PANEL, 0.2, COL_ACCENT, focused ? 0.35 : 0, refract = 6)
 	draw_t(value, r.x + 16, r.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
 	draw_triangle_dir(r.x + r.width - 22, r.y + r.height * 0.5 + 2, 14, .Down, focused ? COL_ACCENT : COL_MUTED)
 }
@@ -812,10 +881,8 @@ draw_dropdown :: proc(row: rl.Rectangle) {
 	box := rl.Rectangle{row.x + row.width * 0.4, row.y + 4, row.width * 0.6 - 6, f32(n) * DROP_ITEM_H + 12}
 	box.height *= 0.85 + 0.15 * app.dropdown_t
 	a := app.dropdown_t
-	rr := roundness(box, RADIUS)
-	rl.DrawRectangleRounded({box.x, box.y + 8, box.width, box.height}, rr, 8, rl.Color{0, 0, 0, u8(120 * a)})
-	rl.DrawRectangleRounded(box, rr, 8, with_alpha(COL_PANEL_SOLID, u8(250 * a)))
-	rl.DrawRectangleRoundedLinesEx(box, rr, 8, 1, rl.Color{COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, u8(90 * a)})
+	draw_soft_shadow(box, RADIUS, a * 1.6)
+	draw_glass(box, RADIUS, COL_PANEL_SOLID, 0.6, COL_ACCENT, 0.25, a)
 	if a < 0.6 {
 		return
 	}
@@ -835,7 +902,7 @@ draw_dropdown :: proc(row: rl.Rectangle) {
 			}
 		}
 		if i == app.dropdown_sel {
-			rl.DrawRectangleRounded(it, roundness(it, 8), 6, rl.Color{COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, 40})
+			draw_glass(it, RADIUS - 6, mix_color(COL_PANEL_HI, COL_ACCENT, 0.3), 0.45, COL_ACCENT, 0.4, refract = 6)
 		}
 		current := mode == app.settings.launch_mode
 		if current {

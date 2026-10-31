@@ -55,6 +55,8 @@ Ui_Theme :: struct {
 
 // Each inspired by a console's menu.
 UI_THEMES := [?]Ui_Theme {
+	// Liquid Glass: clear panes over a deep indigo, ice-blue light
+	{"Liquid Glass", {10, 12, 30, 255}, {40, 48, 80, 190}, {70, 84, 130, 220}, {24, 28, 52, 244}, {140, 200, 255, 255}, {248, 250, 255, 255}, {176, 186, 214, 255}, {8, 10, 24, 255}, {255, 120, 190, 255}, false},
 	{"Saber", {8, 10, 18, 255}, {14, 18, 32, 196}, {22, 30, 52, 226}, {14, 18, 32, 244}, {92, 204, 255, 255}, {238, 242, 250, 255}, {148, 160, 186, 255}, {6, 8, 16, 255}, {255, 128, 150, 255}, false},
 	// Dreamcast: deep blue with the orange swirl
 	{"Dreamcast", {10, 18, 52, 255}, {18, 32, 84, 200}, {30, 52, 120, 230}, {16, 30, 78, 246}, {255, 122, 34, 255}, {244, 246, 255, 255}, {150, 168, 210, 255}, {6, 12, 36, 255}, {255, 90, 90, 255}, false},
@@ -120,25 +122,34 @@ MUS_EXTS :: []string{".mp3", ".ogg", ".wav", ".flac"}
 
 // Card art is drawn well below its native size; mipmaps keep it from shimmering.
 load_texture_smooth :: proc(path: string, max_px: i32 = 1024) -> (rl.Texture2D, bool) {
+	img, ok := load_image_smooth(path, max_px)
+	if !ok {
+		return {}, false
+	}
+	defer rl.UnloadImage(img)
+	return texture_from_image(img)
+}
+
+// CPU-side decode only, so it can run off the main thread (drive scans).
+load_image_smooth :: proc(path: string, max_px: i32 = 1024) -> (rl.Image, bool) {
 	if path == "" || !os.exists(path) {
 		return {}, false
 	}
-	tex: rl.Texture2D
 	ext := strings.to_lower(filepath.ext(path), context.temp_allocator)
 	if ext == ".png" || ext == ".bmp" || ext == ".gif" || ext == ".tga" || ext == ".qoi" {
-		tex = rl.LoadTexture(strings.clone_to_cstring(path, context.temp_allocator))
+		img := rl.LoadImage(strings.clone_to_cstring(path, context.temp_allocator))
+		if img.data != nil {
+			return img, true
+		}
 	}
+	// this raylib build has no JPG/WebP decoder; let the OS decode it
+	return shell_image(path, max_px, max_px, still = true)
+}
+
+texture_from_image :: proc(img: rl.Image) -> (rl.Texture2D, bool) {
+	tex := rl.LoadTextureFromImage(img)
 	if tex.id == 0 {
-		// this raylib build has no JPG/WebP decoder; let the OS decode it
-		img, ok := shell_image(path, max_px, max_px, still = true)
-		if !ok {
-			return {}, false
-		}
-		tex = rl.LoadTextureFromImage(img)
-		rl.UnloadImage(img)
-		if tex.id == 0 {
-			return {}, false
-		}
+		return {}, false
 	}
 	rl.GenTextureMipmaps(&tex)
 	rl.SetTextureFilter(tex, .TRILINEAR)
@@ -179,6 +190,7 @@ theme_shutdown :: proc() {
 	if theme.has_back { rl.UnloadSound(theme.sfx_back) }
 	if theme.has_over { rl.UnloadSound(theme.sfx_over) }
 	if theme.has_start { rl.UnloadSound(theme.sfx_start) }
+	glass_shutdown()
 }
 
 refresh_media_lists :: proc() {
@@ -357,7 +369,15 @@ theme_resume_after_game :: proc() {
 }
 
 draw_background :: proc(w, h: f32) {
+	draw_wallpaper(w, h)
+}
+
+// Wallpaper and its shading; also captured as the glass backdrop.
+draw_wallpaper :: proc(w, h: f32) {
 	rl.ClearBackground(COL_BG)
+	if !theme.has_bkg {
+		draw_ambient_orbs(w, h)
+	}
 	if theme.has_bkg {
 		// slow drift; one quad per frame
 		t := f32(rl.GetTime())

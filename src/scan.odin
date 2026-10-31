@@ -1,5 +1,6 @@
 package saber
 
+import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
@@ -7,6 +8,10 @@ import "core:strings"
 // Drives are addressed by letter on every platform; drives_<os>.odin maps letters to
 // volumes (on Linux, to mount points) and provides current_drive_mask, drive_type,
 // drive_root, drive_path, volume_label and volume_serial.
+
+// Set on the drive-scan worker (drive_scan.odin): texture uploads and plugin (Lua)
+// calls are recorded on each Game and finished on the main thread instead.
+@(thread_local) scan_deferred: bool
 
 DRIVE_REMOVABLE :: 2
 DRIVE_FIXED :: 3
@@ -38,7 +43,11 @@ scan_portable_drives :: proc(out: ^[dynamic]Game) {
 			continue
 		}
 
+		first := len(out)
+		defer for k in first ..< len(out) do out[k].drive_letter = u8(letter)
+		if scan_deferred do drive_scan_note(fmt.tprintf("%c:", letter))
 		label := volume_label(letter)
+		if scan_deferred do drive_scan_note(label)
 		root_str := strings.clone(drive_root(letter))
 		has_files := root_str != "" // "" = an optical drive whose disc isn't mounted (audio / raw data)
 		if has_files {
