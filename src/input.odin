@@ -161,6 +161,7 @@ go_screen :: proc(next: Screen) {
 	app.swipe_dir = f32(dir)
 	app.swipe_t = 0
 	app.dropdown_open = false
+	drives_menu.open = false
 	sfx_click()
 }
 

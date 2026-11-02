@@ -21,3 +21,5 @@ AGENTS.md
 /plugins/*/covers/
 /plugins/*/tmp/
 /plugins/*.log
+ReleaseLatest.py
+release.bat

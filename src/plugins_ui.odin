@@ -1,6 +1,7 @@
 package saber
 
 // Plugins page: installed plugins on the left, the selected one's info and actions on the right.
+// Second page (Y / click the heading): GET PLUGINS, the plugin store (plugin_store.odin).
 
 import "core:fmt"
 import "core:strings"
@@ -10,7 +11,19 @@ PLUGIN_ROW_H :: 64
 PLUGIN_LIST_W :: 380
 ACTION_ROW_H :: 58
 
+// Y flips between the installed plugins and the store.
+plugins_toggle_page :: proc() {
+	app.plugin_page = 1 - app.plugin_page
+	app.plugin_focus = 0
+	if app.plugin_page == 1 do store_on_open()
+	sfx_click()
+}
+
 handle_plugins_input :: proc() {
+	if app.plugin_page == 1 {
+		handle_store_input()
+		return
+	}
 	n := len(plugins)
 	if n == 0 do return
 	app.plugin_sel = clamp(app.plugin_sel, 0, n - 1)
@@ -88,9 +101,13 @@ pretty_key :: proc(key: string) -> string {
 
 draw_plugins :: proc(w, h: f32) {
 	top := f32(HEADER_H + 28)
-	draw_heading("PLUGINS", len(plugins), top)
+	draw_plugin_tabs(top)
 	y0 := top + 36
 	bottom := h - FOOTER_H - 24
+	if app.plugin_page == 1 {
+		draw_store(w, h, y0, bottom)
+		return
+	}
 	if len(plugins) == 0 {
 		draw_t("No plugins. Put .lua files in APP/plugins.", PAD, y0 + 8, 18, COL_MUTED)
 		return
@@ -239,6 +256,22 @@ draw_plugins :: proc(w, h: f32) {
 		}
 		y += ACTION_ROW_H
 	}
+}
+
+// "PLUGINS 4   GET PLUGINS": the current page is accent colored; clicking the other one switches.
+draw_plugin_tabs :: proc(y: f32) {
+	labels := [2]string{"PLUGINS", "GET PLUGINS"}
+	x := f32(PAD)
+	for label, i in labels {
+		text := i == 0 ? fmt.tprintf("%s  %d", label, len(plugins)) : label
+		tw := measure_t(text, 15)
+		col := i == app.plugin_page ? COL_ACCENT : COL_MUTED
+		draw_t(text, x, y, 15, col)
+		if i == app.plugin_page do rl.DrawRectangleRounded({x, y + 22, tw, 2}, 1, 4, COL_ACCENT)
+		if i != app.plugin_page && mouse_over({x - 6, y - 6, tw + 12, 30}) && rl.IsMouseButtonPressed(.LEFT) do plugins_toggle_page()
+		x += tw + 36
+	}
+	draw_glyph("Y", x + 4, y + 9)
 }
 
 // Checkbox at the right end of a row; returns true when the row is clicked.

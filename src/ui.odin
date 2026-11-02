@@ -287,14 +287,19 @@ draw_footer :: proc(w, h: f32) {
 		// the dialog draws its own hints
 	case app.power_open:
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Back"}})
+	case drives_menu.open:
+		draw_hints(w, h, []Hint{{"A", "Toggle"}, {"B", "Done"}})
 	case app.dropdown_open:
 		draw_hints(w, h, []Hint{{"A", "Choose"}, {"B", "Close"}})
+	case app.screen == .Plugins && app.plugin_page == 1:
+		draw_hints(w, h, []Hint{{"A", store.sel == 0 ? "Refresh" : "Download"}, {"B", "Plugins"}, {"Y", "Installed"}, {"LB / RB", "Menus"}})
+		return
 	case app.screen == .Plugins:
 		if app.plugin_focus == 1 {
 			on_setting := len(plugins) > 0 && (app.plugin_action == 0 || app.plugin_action > len(plugins[clamp(app.plugin_sel, 0, len(plugins) - 1)].actions))
 			draw_hints(w, h, []Hint{{"A", app.plugin_action == 0 ? "Toggle" : on_setting ? "Change" : "Run"}, {"B", "Plugins"}, {"LB / RB", "Menus"}})
 		} else {
-			draw_hints(w, h, []Hint{{"A", "Actions"}, {"B", "Home"}, {"LB / RB", "Menus"}})
+			draw_hints(w, h, []Hint{{"A", "Actions"}, {"B", "Home"}, {"Y", "Get Plugins"}, {"LB / RB", "Menus"}})
 		}
 	case app.screen == .Settings:
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Home"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
@@ -692,6 +697,7 @@ SETTINGS_LABELS := [Settings_Row]string {
 	.Volume      = "Music volume",
 	.Font        = "Font",
 	.Online_Mode = "Online Mode",
+	.Ignored_Drives = "Ignored drives",
 	.Emulation   = "Emulation",
 	.Launch_Mode = "Launch mode",
 	.Updates     = "Check for updates",
@@ -706,6 +712,7 @@ SETTINGS_HELP := [Settings_Row]string {
 	.Volume      = "Background music level.",
 	.Font        = "Bundled fonts from APP/assets/fonts, then Windows fonts.",
 	.Online_Mode = "Lets plugins use the internet (e.g. cover downloads). Turning it off stops all online activity at once.",
+	.Ignored_Drives = "Hard drives (besides the system drive) that are never scanned for games.",
 	.Emulation   = "Video, audio, controls and emulator cores for console games.",
 	.Launch_Mode = "",
 	.Updates    = "Downloads the latest release with SaberUpdater, then restarts Saber. Needs Online Mode.",
@@ -728,7 +735,7 @@ draw_settings :: proc(w, h: f32) {
 		i := int(row)
 		r := rl.Rectangle{x, y + f32(i) * (ROW_H + ROW_GAP), pw, ROW_H}
 		focused := app.settings_focus == i
-		if !app.dropdown_open && mouse_over(r) && app.settings_focus != i {
+		if !app.dropdown_open && !drives_menu.open && mouse_over(r) && app.settings_focus != i {
 			app.settings_focus = i
 			hover_enter(fmt.tprintf("set-%d", i))
 		}
@@ -763,6 +770,12 @@ draw_settings :: proc(w, h: f32) {
 		case .Online_Mode:
 			if d := draw_stepper(val, app.settings.online_mode ? "On" : "Off", app.settings.online_mode ? 1 : 0, 2, focused); d != 0 {
 				set_online_mode(!app.settings.online_mode)
+			}
+		case .Ignored_Drives:
+			draw_t_right(app.settings.ignore_drives == 0 ? "None" : drive_letters(app.settings.ignore_drives, ", "), val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
+			draw_glyph("A", val.x + val.width - 26, val.y + val.height * 0.5)
+			if !drives_menu.open && mouse_over(r) && rl.IsMouseButtonPressed(.LEFT) {
+				drives_menu_open()
 			}
 		case .Emulation:
 			draw_t_right("Open settings", val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
@@ -804,11 +817,12 @@ draw_settings :: proc(w, h: f32) {
 	if Settings_Row(app.settings_focus) == .Launch_Mode {
 		help = LAUNCH_MODE_HELP[app.settings.launch_mode]
 	}
-	if !app.dropdown_open {
+	if !app.dropdown_open && !drives_menu.open {
 		draw_t(help, x + 4, y + f32(SETTINGS_ROWS) * (ROW_H + ROW_GAP) + 8, 16, COL_MUTED)
 	}
 
 	draw_dropdown(launch_row)
+	drives_menu_draw(w, h)
 }
 
 // "< value  2/5 >" control; returns -1 / +1 when an arrow is clicked.

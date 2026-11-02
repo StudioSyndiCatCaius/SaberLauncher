@@ -71,13 +71,7 @@ plugins_init :: proc() {
 	if f, ferr := os.open(path_join({dir, "plugins.log"}), {.Write, .Create, .Trunc}); ferr == nil {
 		plugin_log = f
 	}
-	dirs := make([dynamic]string, context.temp_allocator)
-	append(&dirs, dir)
-	for d in strings.split(app.settings.plugin_dirs, ";", context.temp_allocator) {
-		d := strings.trim(strings.trim_space(d), `"`)
-		if d == "" do continue
-		append(&dirs, filepath.is_abs(d) ? d : path_join({app.exe_dir, d}))
-	}
+	dirs := plugin_dir_list()
 	loaded := make(map[string]bool, allocator = context.temp_allocator)
 	for d in dirs {
 		fis, err := os.read_all_directory_by_path(d, context.allocator)
@@ -108,6 +102,18 @@ plugins_init :: proc() {
 		}
 	}
 	plugin_logf("%d plugin(s) loaded", len(plugins))
+}
+
+// APP/plugins, then the Saber.ini `plugin_dirs=` folders (temp allocated).
+plugin_dir_list :: proc() -> []string {
+	dirs := make([dynamic]string, context.temp_allocator)
+	append(&dirs, path_join({app.exe_dir, "plugins"}))
+	for d in strings.split(app.settings.plugin_dirs, ";", context.temp_allocator) {
+		d := strings.trim(strings.trim_space(d), `"`)
+		if d == "" do continue
+		append(&dirs, filepath.is_abs(d) ? d : path_join({app.exe_dir, d}))
+	}
+	return dirs[:]
 }
 
 plugin_disabled :: proc(file: string) -> bool {

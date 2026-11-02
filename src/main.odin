@@ -38,6 +38,7 @@ App :: struct {
 	plugin_sel:      int,
 	plugin_action:   int,
 	plugin_focus:    int, // 0 = plugin list, 1 = actions
+	plugin_page:     int, // 0 = installed, 1 = GET PLUGINS (store)
 	scroll:          [Screen]f32,
 	status_buf:      [256]u8,
 	status:          string, // view into status_buf; survives the per-frame temp reset
@@ -388,6 +389,12 @@ handle_app_input :: proc() {
 	if app.swipe_t < 1 {
 		return
 	}
+	if drives_menu.open {
+		drives_menu_input()
+		eat_input()
+		input.mouse_eaten = true
+		return
+	}
 	if app.dropdown_open {
 		handle_dropdown_input()
 		eat_input()
@@ -403,8 +410,9 @@ handle_app_input :: proc() {
 		eat_input()
 		return
 	}
-	if input.cancel && app.screen == .Plugins && app.plugin_focus == 1 {
-		app.plugin_focus = 0
+	if input.cancel && app.screen == .Plugins && (app.plugin_focus == 1 || app.plugin_page == 1) {
+		if app.plugin_page == 1 do app.plugin_page = 0
+		else do app.plugin_focus = 0
 		sfx_back()
 		eat_input()
 		return
@@ -417,7 +425,9 @@ handle_app_input :: proc() {
 		eat_input()
 		return
 	}
-	if input.extra {
+	if input.extra && app.screen == .Plugins {
+		plugins_toggle_page()
+	} else if input.extra {
 		rescan_all(drives_async = true)
 		set_status("Rescanned drives, library, movies and apps")
 		sfx_click()
@@ -457,6 +467,7 @@ Settings_Row :: enum {
 	Volume,
 	Font,
 	Online_Mode,
+	Ignored_Drives,
 	Emulation,
 	Launch_Mode,
 	Updates,
@@ -498,6 +509,10 @@ handle_settings_input :: proc() {
 		if input.confirm { cycle_font(1) }
 	case .Online_Mode:
 		if step != 0 || input.confirm { set_online_mode(!app.settings.online_mode) }
+	case .Ignored_Drives:
+		if input.confirm {
+			drives_menu_open()
+		}
 	case .Emulation:
 		if input.confirm {
 			emu_open(false)

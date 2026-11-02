@@ -49,6 +49,8 @@ Http_Request :: struct {
 	url:      string,
 	path:     string, // "" = keep the body in memory (Http_Get)
 	gen:      u64,
+	on_done:  proc(r: ^Http_Request), // Odin callers (plugin store): called instead of a Lua callback
+	user:     [2]int,
 	// set by the worker
 	ok:       bool,
 	status:   int,
@@ -78,6 +80,14 @@ http_start :: proc(L: ^lua_State, url, path: string, callback: c.int) {
 		return
 	}
 	r.worker = thread.create_and_start_with_data(r, http_worker)
+}
+
+// Same as http_start, for Odin code: on_done runs on the main loop (r is freed afterwards).
+http_start_native :: proc(url, path: string, on_done: proc(r: ^Http_Request), user: [2]int) {
+	http_start(nil, url, path, LUA_NOREF)
+	r := http_requests[len(http_requests) - 1]
+	r.on_done = on_done
+	r.user = user
 }
 
 // Online Mode went off (or was toggled) since the request started.
@@ -133,7 +143,8 @@ online_update :: proc() {
 			r.ok = false // finished just as the killswitch flipped
 			r.err = strings.clone("Online Mode was turned off")
 		}
-		http_deliver(r)
+		if r.on_done != nil do r.on_done(r)
+		else do http_deliver(r)
 		http_free(r)
 	}
 }

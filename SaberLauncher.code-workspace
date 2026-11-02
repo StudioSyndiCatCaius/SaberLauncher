@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../SaberOS"
+		},
+		{
+			"path": "../../../../Github/SaberLauncherPlugins"
 		}
 	],
 	"settings": {

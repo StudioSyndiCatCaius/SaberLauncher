@@ -68,9 +68,20 @@ scan_rom_dir :: proc(out: ^[dynamic]Game, dir, label: string, found: ^int) {
 		}
 		platform, ok := rom_platform(ext)
 		if !ok do continue
+		if ext == ".md" && !md_has_sega_header(fi.fullpath) do continue // README.md etc.
 		append(out, rom_game(fi, label, platform))
 		found^ += 1
 	}
+}
+
+// Mega Drive ROMs carry "SEGA" at 0x100 (some pad it with a space); Markdown files never do.
+md_has_sega_header :: proc(path: string) -> bool {
+	f, err := os.open(path)
+	if err != nil do return false
+	defer os.close(f)
+	buf: [16]byte
+	n, _ := os.read_at(f, buf[:], 0x100)
+	return n == len(buf) && strings.contains(string(buf[:]), "SEGA")
 }
 
 rom_game :: proc(fi: os.File_Info, label: string, platform: Retro_Platform) -> Game {

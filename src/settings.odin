@@ -33,6 +33,7 @@ Settings :: struct {
 	volume:      f32,
 	online_mode: bool, // plugins may use the internet; off = killswitch
 	plugins_off: string, // disabled plugin folder names, ';'-separated; takes effect on restart
+	ignore_drives: u32, // bit per letter (A = bit 0): fixed drives skipped by the game scan
 	plugin_dirs: string, // extra plugin folders, ';'-separated, relative to the exe; APP/plugins always loads
 }
 
@@ -55,6 +56,9 @@ settings_load :: proc(path: string) -> Settings {
 		}
 		if v, found := ini_get(text, "plugin_dirs"); found {
 			s.plugin_dirs = strings.clone(v)
+		}
+		if v, found := ini_get(text, "ignore_drives"); found {
+			for c in strings.to_upper(v, context.temp_allocator) do if c >= 'A' && c <= 'Z' do s.ignore_drives |= 1 << u32(c - 'A')
 		}
 		if v, found := ini_get(text, "online"); found {
 			s.online_mode = v == "1" || strings.equal_fold(v, "true")
@@ -85,6 +89,7 @@ settings_save :: proc(path: string, s: Settings) {
 		int(s.online_mode),
 		s.plugins_off,
 		s.plugin_dirs,
+		drive_letters(s.ignore_drives),
 	)
 	_ = os.write_entire_file(path, text)
 }

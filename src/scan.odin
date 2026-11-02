@@ -25,7 +25,7 @@ scan_library :: proc(out: ^[dynamic]Game, games_dir: string) {
 }
 
 is_insertable_drive :: proc(letter: rune) -> bool {
-	if is_system_drive(letter) {
+	if is_system_drive(letter) || drive_ignored(letter) {
 		return false
 	}
 	kind := drive_type(letter)
