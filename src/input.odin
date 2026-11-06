@@ -25,6 +25,7 @@ Input :: struct {
 	menu_r:                bool, // RB
 	power:                 bool, // Select / Back
 	extra:                 bool, // Y
+	action:                bool, // X: a game's actions menu (install.odin)
 	using_pad:             bool,
 	mouse_eaten:           bool, // a modal took this frame's mouse: screens below ignore hover/clicks
 	repeat_dir:            Nav_Dir,
@@ -36,7 +37,7 @@ input: Input
 eat_input :: proc() {
 	input.up, input.down, input.left, input.right = false, false, false, false
 	input.confirm, input.cancel, input.menu_l, input.menu_r = false, false, false, false
-	input.power, input.extra = false, false
+	input.power, input.extra, input.action = false, false, false
 }
 
 input_poll :: proc() {
@@ -69,6 +70,7 @@ input_poll :: proc() {
 		if rl.IsGamepadButtonPressed(p, .RIGHT_TRIGGER_1) { input.menu_r = true }
 		if rl.IsGamepadButtonPressed(p, .MIDDLE_LEFT) || rl.IsGamepadButtonPressed(p, .MIDDLE_RIGHT) { input.power = true }
 		if rl.IsGamepadButtonPressed(p, .RIGHT_FACE_UP) { input.extra = true }
+		if rl.IsGamepadButtonPressed(p, .RIGHT_FACE_LEFT) { input.action = true }
 	}
 
 	if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) { dx -= 1 }
@@ -81,6 +83,7 @@ input_poll :: proc() {
 	if rl.IsKeyPressed(.E) || rl.IsKeyPressed(.RIGHT_BRACKET) { input.menu_r = true }
 	if rl.IsKeyPressed(.ESCAPE) || rl.IsKeyPressed(.TAB) { input.power = true }
 	if rl.IsKeyPressed(.F5) || rl.IsKeyPressed(.Y) { input.extra = true }
+	if rl.IsKeyPressed(.X) { input.action = true }
 
 	dir := Nav_Dir.None
 	if dy != 0 {
@@ -117,7 +120,7 @@ input_poll :: proc() {
 		case .None:
 		}
 	}
-	if input.confirm || input.cancel || input.menu_l || input.menu_r || input.power {
+	if input.confirm || input.cancel || input.menu_l || input.menu_r || input.power || input.action {
 		input.using_pad = true
 	}
 }

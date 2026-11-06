@@ -163,7 +163,8 @@ Retro :: struct {
 	assets_dir_c:    cstring,
 	game_path_c:     cstring,
 	sram_path:       string,
-	state_path:      string,
+	state_base:      string, // saves/<save key>: states are <base>.state, <base>.slotNN.state, <base>.suspend.state
+	save_mode:       Save_Mode, // fixed for the whole session (Settings tab only)
 	sram_snapshot:   []byte,
 	sram_check:      f64,
 
@@ -444,6 +445,11 @@ find_retro_core :: proc(p: Retro_Platform) -> (string, bool) {
 	return "", false
 }
 
+// Platforms whose games come on discs (memory card shared by every game, states per serial).
+retro_disc_platform :: proc(p: Retro_Platform) -> bool {
+	return p == .PS1 || p == .PS2 || p == .PSP || p == .DC
+}
+
 // Plays a disc game in Saber's window. Blocks until the player quits.
 retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	if g.gdrom {
@@ -489,17 +495,14 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	retro.saves_dir_c = strings.clone_to_cstring(saves)
 	retro.assets_dir_c = strings.clone_to_cstring(retro_dir())
 	retro.core_path_c = strings.clone_to_cstring(core_path)
-	// a modded (burned) disc gets its own memory card and states: "<serial>-<disc name>"
-	save_key := g.disc_serial
-	if g.mod_name != "" do save_key = fmt.tprintf("%s-%s", g.disc_serial, safe_file_name(g.mod_name))
-	retro.sram_path = path_join({saves, g.mod_name != "" ? fmt.tprintf("Memory Card-%s.srm", save_key) : "Memory Card.srm"})
-	if is_rom {
-		// cartridges keep their save with the game, named after the ROM file
-		save_key = safe_file_name(g.rom_name)
-		delete(retro.sram_path)
-		retro.sram_path = path_join({saves, fmt.tprintf("%s.srm", save_key)})
+	save_key, cart := retro_save_key(g)
+	switch {
+	case cart:             retro.sram_path = path_join({saves, fmt.tprintf("%s.srm", save_key)})
+	case g.mod_name != "": retro.sram_path = path_join({saves, fmt.tprintf("Memory Card-%s.srm", save_key)})
+	case:                  retro.sram_path = path_join({saves, "Memory Card.srm"})
 	}
-	retro.state_path = path_join({saves, fmt.tprintf("%s.state", save_key)})
+	retro.state_base = path_join({saves, save_key})
+	retro.save_mode = app.settings.save_mode
 	retro_log_open()
 	retro_load_overrides()
 	defer retro_free()
@@ -562,6 +565,7 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	started := rl.GetTime()
 	retro_run_loop(g)
 	g.playtime_seconds += int(rl.GetTime() - started)
+	g.suspend_checked = 0
 
 	retro_sram_save()
 	retro_audio_close()
@@ -577,6 +581,32 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	theme_resume_after_game()
 	eat_input()
 	return true, ""
+}
+
+// Name the game's states (and cartridge SRAM) are saved under. cart = a cartridge ROM,
+// whose save is named after the ROM file; discs share one memory card per platform.
+retro_save_key :: proc(g: ^Game) -> (key: string, cart: bool) {
+	// a modded (burned) disc gets its own memory card and states: "<serial>-<disc name>"
+	key = g.disc_serial
+	if g.mod_name != "" do key = fmt.tprintf("%s-%s", g.disc_serial, safe_file_name(g.mod_name))
+	// a disc installed into the library (install.odin) shares the physical disc's card and states
+	is_rom := g.rom_path != ""
+	installed_disc := is_rom && !g.from_drive && g.disc_serial != "" && retro_disc_platform(g.platform)
+	if is_rom && !installed_disc do return safe_file_name(g.rom_name), true
+	return key, false
+}
+
+// The game was suspended and resumes on its next start (cards show a bubble).
+// Checked at most every couple of seconds per game.
+game_suspended :: proc(g: ^Game) -> bool {
+	if g.platform == .None || g.gdrom || app.settings.save_mode == .None do return false
+	now := rl.GetTime()
+	if g.suspend_checked == 0 || now - g.suspend_checked > 2 {
+		g.suspend_checked = now
+		key, _ := retro_save_key(g)
+		g.suspended = key != "" && os.exists(path_join({retro_dir("saves", RETRO_PLATFORM_DIR[g.platform]), fmt.tprintf("%s.suspend.state", key)}))
+	}
+	return g.suspended
 }
 
 retro_open_disc :: proc(letter: u8, iso: bool) -> (string, bool) {
@@ -609,13 +639,14 @@ retro_free :: proc() {
 	delete(retro.disc_path_c)
 	delete(retro.rom_data)
 	delete(retro.sram_path)
-	delete(retro.state_path)
+	delete(retro.state_base)
 	if retro.log_file != nil do os.close(retro.log_file)
 	retro.log_file = nil
 }
 
 retro_run_loop :: proc(g: ^Game) {
 	next_frame := time.tick_now()
+	resume_checked := false
 	for !retro.quit {
 		if rl.WindowShouldClose() && !app.in_shell do break
 		keep_fullscreen()
@@ -633,6 +664,11 @@ retro_run_loop :: proc(g: ^Game) {
 		if retro.disc_letter != 0 do retro_watch_disc()
 		retro_update_input()
 		retro_run_frame()
+		if !resume_checked {
+			// after one frame: some cores can't take a state straight after load_game
+			resume_checked = true
+			retro_resume_suspended()
+		}
 		retro_upload_frame()
 
 		w := f32(rl.GetScreenWidth())
@@ -810,14 +846,14 @@ emu_apply_filter :: proc(tex: rl.Texture2D) {
 	emu_filter_tex, emu_filter_smooth = tex.id, emu.smooth
 }
 
-retro_draw_frame :: proc(w, h: f32, tint: rl.Color) {
-	tex, src := retro.tex, rl.Rectangle{0, 0, f32(retro.tex.width), f32(retro.tex.height)}
-	if hw_tex, hw_src, ok := retro_hw_texture(); ok {
+// The current frame (software or hardware-rendered) and where it goes on a w x h screen.
+retro_frame_layout :: proc(w, h: f32, integer_scale := true) -> (tex: rl.Texture2D, src, dst: rl.Rectangle, ok: bool) {
+	tex, src = retro.tex, rl.Rectangle{0, 0, f32(retro.tex.width), f32(retro.tex.height)}
+	if hw_tex, hw_src, hw := retro_hw_texture(); hw {
 		tex, src = hw_tex, hw_src
 	} else if !retro.has_tex {
 		return
 	}
-	emu_apply_filter(tex)
 	aspect := retro.av.geometry.aspect_ratio
 	if aspect <= 0 do aspect = f32(retro.frame_w) / f32(retro.frame_h)
 	switch emu.aspect {
@@ -832,7 +868,7 @@ retro_draw_frame :: proc(w, h: f32, tint: rl.Color) {
 		dw = w
 		dh = dw / aspect
 	}
-	if emu.integer_scale && emu.aspect != .Stretch {
+	if integer_scale && emu.integer_scale && emu.aspect != .Stretch {
 		// largest whole multiple of the source height that still fits
 		if sh := abs(src.height); sh > 0 {
 			if k := f32(int(min(dh / sh, dw / (sh * aspect)))); k >= 1 {
@@ -841,7 +877,13 @@ retro_draw_frame :: proc(w, h: f32, tint: rl.Color) {
 			}
 		}
 	}
-	dst := rl.Rectangle{(w - dw) / 2, (h - dh) / 2, dw, dh}
+	return tex, src, {(w - dw) / 2, (h - dh) / 2, dw, dh}, true
+}
+
+retro_draw_frame :: proc(w, h: f32, tint: rl.Color) {
+	tex, src, dst, ok := retro_frame_layout(w, h)
+	if !ok do return
+	emu_apply_filter(tex)
 	rl.DrawTexturePro(tex, src, dst, {}, 0, tint)
 	if emu.scanlines > 0 {
 		lines := int(abs(src.height))
@@ -886,7 +928,41 @@ retro_capture_glass :: proc(w, h: f32) {
 	}
 }
 
-RETRO_PAUSE_LABELS := [?]string{"Resume", "Save State", "Load State", "Emulation Settings", "Quit Game"}
+Pause_Item :: enum {
+	Resume,
+	Quick_Save,
+	Quick_Load,
+	Save_States,
+	Suspend,
+	Emu_Settings,
+	Quit,
+}
+
+PAUSE_ITEM_LABELS := [Pause_Item]string {
+	.Resume       = "Resume",
+	.Quick_Save   = "Quick Save",
+	.Quick_Load   = "Quick Load",
+	.Save_States  = "Save States",
+	.Suspend      = "Suspend",
+	.Emu_Settings = "Emulation Settings",
+	.Quit         = "Quit Game",
+}
+
+// What the pause menu offers in each Save_Mode.
+PAUSE_ITEMS_NONE := [?]Pause_Item{.Resume, .Emu_Settings, .Quit}
+PAUSE_ITEMS_SUSPEND := [?]Pause_Item{.Resume, .Suspend, .Emu_Settings, .Quit}
+PAUSE_ITEMS_QUICK := [?]Pause_Item{.Resume, .Quick_Save, .Quick_Load, .Suspend, .Emu_Settings, .Quit}
+PAUSE_ITEMS_FREE := [?]Pause_Item{.Resume, .Save_States, .Suspend, .Emu_Settings, .Quit}
+
+retro_pause_items :: proc() -> []Pause_Item {
+	switch retro.save_mode {
+	case .None:    return PAUSE_ITEMS_NONE[:]
+	case .Suspend: return PAUSE_ITEMS_SUSPEND[:]
+	case .Quick:   return PAUSE_ITEMS_QUICK[:]
+	case .Free:    return PAUSE_ITEMS_FREE[:]
+	}
+	return PAUSE_ITEMS_NONE[:]
+}
 
 retro_pause_pressed :: proc() -> bool {
 	if guide_pressed(false) do return true
@@ -906,9 +982,21 @@ retro_pause_menu :: proc(g: ^Game) {
 	sfx_click()
 	app.pause_sel = 0
 	app.pause_t = 0
-	sub_buf: [128]u8
 	sub := g.tags
-	n := len(RETRO_PAUSE_LABELS)
+	items := retro_pause_items()
+	n := len(items)
+	labels := make([]string, n)
+	defer delete(labels)
+	emu_item := 0
+	for it, i in items {
+		labels[i] = PAUSE_ITEM_LABELS[it]
+		if it == .Emu_Settings do emu_item = i
+	}
+	// Quicksave mode shows the quicksave's screenshot beside the menu
+	thumb: rl.Texture2D
+	has_thumb := false
+	if retro.save_mode == .Quick do thumb, has_thumb = load_texture_smooth(retro_slot_path(0, "png"), THUMB_W)
+	defer if has_thumb do rl.UnloadTexture(thumb)
 	// The key/button that opened the overlay still reads as "pressed" until the next
 	// EndDrawing polls events, so ignore input on the first pass or it closes instantly.
 	first := true
@@ -935,30 +1023,54 @@ retro_pause_menu :: proc(g: ^Game) {
 			return
 		}
 		if !first && input.extra {
-			app.pause_sel = 3 // Y: straight to Emulation Settings
+			app.pause_sel = emu_item // Y: straight to Emulation Settings
 			input.confirm = true
 		}
 		if input.confirm {
-			switch app.pause_sel {
-			case 0:
+			switch items[app.pause_sel] {
+			case .Resume:
 				return
-			case 1:
-				sub = retro_save_state() ? "State saved" : "Couldn't save state"
-				sfx_click()
-			case 2:
-				if retro_load_state() {
+			case .Quick_Save:
+				if retro_save_slot(0) {
+					sub = "Quick saved"
+					if has_thumb do rl.UnloadTexture(thumb)
+					thumb, has_thumb = load_texture_smooth(retro_slot_path(0, "png"), THUMB_W)
+					sfx_click()
+				} else {
+					sub = "Couldn't save state"
+					sfx_back()
+				}
+			case .Quick_Load:
+				if retro_load_state_file(retro_slot_path(0)) {
 					sfx_click()
 					retro_osd("State loaded")
 					return
 				}
-				sub = fmt.bprintf(sub_buf[:], "No save state for %s yet", g.rom_path != "" ? g.title : g.disc_serial)
+				sub = "No quicksave yet"
 				sfx_back()
-			case 3:
+			case .Save_States:
+				if retro_slots_menu(g) {
+					retro_osd("State loaded")
+					return
+				}
+				if retro.quit do return
+				app.pause_t = 1
+				first = true
+			case .Suspend:
+				// the quit path writes the memory card; the state comes back on the next start
+				if retro_save_state_file(retro_suspend_path()) {
+					sfx_back()
+					retro.quit = true
+					return
+				}
+				sub = "Couldn't suspend this game"
+				sfx_back()
+			case .Emu_Settings:
 				emu_menu_run_in_game()
 				if retro.quit do return
 				app.pause_t = 1
 				first = true
-			case 4:
+			case .Quit:
 				sfx_back()
 				retro.quit = true
 				return
@@ -973,11 +1085,169 @@ retro_pause_menu :: proc(g: ^Game) {
 		rl.ClearBackground(rl.BLACK)
 		retro_draw_frame(w, h, rl.WHITE)
 		rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(150 * app.pause_t)))
-		if clicked := draw_modal_menu(g.title, sub, RETRO_PAUSE_LABELS[:], app.pause_sel, app.pause_t, w, h, true); clicked >= 0 {
+		if clicked := draw_modal_menu(g.title, sub, labels, app.pause_sel, app.pause_t, w, h, true); clicked >= 0 {
 			app.pause_sel = clicked
 			input.confirm = true
 		}
+		if has_thumb && app.pause_t > 0.5 {
+			// right of draw_modal_menu's panel (460 wide)
+			tw: f32 = 320
+			r := rl.Rectangle{w * 0.5 + 230 + 28, h * 0.5 - (tw * 0.75 + 56) * 0.5, tw + 24, tw * 0.75 + 56}
+			draw_panel(r, false, with_alpha(COL_PANEL_SOLID, u8(244 * app.pause_t)))
+			draw_t("Quicksave", r.x + 12, r.y + 12, 16, COL_MUTED)
+			draw_texture_contain(thumb, {r.x + 12, r.y + 44, tw, tw * 0.75})
+		}
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"Y", "Settings"}, {"B", "Resume"}})
+		rl.EndDrawing()
+		free_all(context.temp_allocator)
+		first = false
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Free Save: SAVE_SLOTS state slots with screenshots
+
+Retro_Slot :: struct {
+	used:    bool,
+	saved:   time.Time,
+	tex:     rl.Texture2D,
+	has_tex: bool,
+}
+
+retro_slot_refresh :: proc(s: ^Retro_Slot, slot: int) {
+	if s.has_tex do rl.UnloadTexture(s.tex)
+	s^ = {}
+	s.saved, s.used = file_mtime(retro_slot_path(slot))
+	if s.used do s.tex, s.has_tex = load_texture_smooth(retro_slot_path(slot, "png"), THUMB_W)
+}
+
+SLOT_COLS :: 5
+SLOT_ROWS :: (SAVE_SLOTS + SLOT_COLS - 1) / SLOT_COLS
+
+Slot_Grid :: struct {
+	x, y, cw, ch, gap, label_h: f32,
+}
+
+// Cards as big as fit between the title and the hint bar.
+slot_grid :: proc(w, h: f32) -> (g: Slot_Grid) {
+	g.gap, g.label_h, g.y = 16, 40, 120
+	avail_h := h - FOOTER_H - 24 - g.y
+	g.cw = (min(w - PAD * 2, 1500) - g.gap * (SLOT_COLS - 1)) / SLOT_COLS
+	if max_cw := ((avail_h - g.gap * (SLOT_ROWS - 1)) / SLOT_ROWS - g.label_h - 16) / 0.75 + 16; g.cw > max_cw do g.cw = max_cw
+	g.ch = (g.cw - 16) * 0.75 + 16 + g.label_h
+	g.x = (w - (g.cw * SLOT_COLS + g.gap * (SLOT_COLS - 1))) * 0.5
+	return
+}
+
+slot_card :: proc(g: Slot_Grid, i: int) -> rl.Rectangle {
+	return {g.x + f32(i % SLOT_COLS) * (g.cw + g.gap), g.y + f32(i / SLOT_COLS) * (g.ch + g.gap), g.cw, g.ch}
+}
+
+// Grid of slots over the paused game. A loads a slot (saves into an empty one), X saves
+// (a filled slot needs a second press), B goes back. Returns true when a state was loaded.
+retro_slots_menu :: proc(game: ^Game) -> bool {
+	slots: [SAVE_SLOTS]Retro_Slot // slots[i] is slot i + 1
+	for &s, i in slots do retro_slot_refresh(&s, i + 1)
+	defer for s in slots do if s.has_tex do rl.UnloadTexture(s.tex)
+
+	sel, overwrite := 0, -1
+	msg_buf: [128]u8
+	msg := "A: load (or save to an empty slot)    X: save"
+	t: f32
+	first := true
+	for {
+		if rl.WindowShouldClose() && !app.in_shell {
+			retro.quit = true
+			return false
+		}
+		input_poll()
+		if first {
+			eat_input()
+			guide_pressed(false)
+		}
+		w := f32(rl.GetScreenWidth())
+		h := f32(rl.GetScreenHeight())
+		grid := slot_grid(w, h)
+
+		moved := false
+		if input.left && sel % SLOT_COLS > 0 { sel -= 1; moved = true }
+		if input.right && sel % SLOT_COLS < SLOT_COLS - 1 && sel + 1 < SAVE_SLOTS { sel += 1; moved = true }
+		if input.up && sel >= SLOT_COLS { sel -= SLOT_COLS; moved = true }
+		if input.down && sel + SLOT_COLS < SAVE_SLOTS { sel += SLOT_COLS; moved = true }
+		do_load, do_save := input.confirm, input.action
+		for i in 0 ..< SAVE_SLOTS {
+			if !mouse_over(slot_card(grid, i), true) do continue
+			if sel != i {
+				sel = i
+				moved = true
+				hover_enter(fmt.tprintf("slot-%d", i))
+			}
+			if rl.IsMouseButtonPressed(.LEFT) do do_load = true
+			if rl.IsMouseButtonPressed(.RIGHT) do do_save = true
+		}
+		if moved {
+			sfx_click()
+			overwrite = -1
+		}
+		if !first && (input.cancel || guide_pressed(false) || rl.IsKeyPressed(.ESCAPE) || rl.IsKeyPressed(.F1)) {
+			sfx_back()
+			return false
+		}
+		slot := sel + 1
+		if first {
+			// opening press
+		} else if do_load && slots[sel].used {
+			if retro_load_state_file(retro_slot_path(slot)) {
+				sfx_click()
+				return true
+			}
+			msg = fmt.bprintf(msg_buf[:], "Couldn't load slot %d", slot)
+			sfx_back()
+		} else if do_save || do_load {
+			if slots[sel].used && overwrite != sel {
+				overwrite = sel
+				msg = fmt.bprintf(msg_buf[:], "Slot %d already has a save: press X again to overwrite it", slot)
+				sfx_click()
+			} else if retro_save_slot(slot) {
+				overwrite = -1
+				retro_slot_refresh(&slots[sel], slot)
+				msg = fmt.bprintf(msg_buf[:], "Saved to slot %d", slot)
+				sfx_click()
+			} else {
+				msg = "Couldn't save state"
+				sfx_back()
+			}
+		}
+
+		t = smooth_to(t, 1, 12)
+		retro_capture_glass(w, h)
+		rl.BeginDrawing()
+		rl.ClearBackground(rl.BLACK)
+		retro_draw_frame(w, h, rl.WHITE)
+		rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(190 * t)))
+		draw_t_fit(fmt.tprintf("Save States - %s", game.title), grid.x, 40, w - grid.x * 2, 28, COL_TEXT, true)
+		draw_t(msg, grid.x, 80, 16, overwrite >= 0 ? COL_WARN : COL_MUTED)
+		for i in 0 ..< SAVE_SLOTS {
+			r := slot_card(grid, i)
+			s := slots[i]
+			draw_panel(r, i == sel)
+			shot := rl.Rectangle{r.x + 8, r.y + 8, r.width - 16, (r.width - 16) * 0.75}
+			rl.DrawRectangleRec(shot, {0, 0, 0, 120})
+			if s.has_tex {
+				draw_texture_contain(s.tex, shot)
+			} else {
+				draw_t_center(s.used ? "No picture" : "Empty", shot.x + shot.width * 0.5, shot.y + shot.height * 0.5 - 9, 18, COL_MUTED)
+			}
+			ly := shot.y + shot.height + (grid.label_h - 16) * 0.5
+			draw_t(fmt.tprintf("Slot %d", i + 1), r.x + 12, ly, 16, i == sel ? COL_TEXT : COL_MUTED)
+			if s.used {
+				y, mo, d := time.date(s.saved)
+				hh, mm, _ := time.clock_from_time(s.saved)
+				draw_t_right(fmt.tprintf("%04d-%02d-%02d %02d:%02d", y, int(mo), d, hh, mm), r.x + r.width - 12, ly + 2, 13, COL_MUTED)
+			}
+			if i == sel do draw_focus_ring(r)
+		}
+		draw_hints(w, h, []Hint{{"A", slots[sel].used ? "Load" : "Save"}, {"X", "Save"}, {"B", "Back"}})
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 		first = false
@@ -1138,24 +1408,78 @@ retro_flush_single_samples :: proc() {
 // ---------------------------------------------------------------------------
 // Saves
 
-retro_save_state :: proc() -> bool {
+SAVE_SLOTS :: 20 // Free Save mode
+THUMB_W :: 256
+THUMB_H :: 192
+
+// Slot 0 is the quicksave (<key>.state, the file older Saber builds wrote); 1..SAVE_SLOTS are
+// the Free Save slots (<key>.slotNN.state). Each has a <same name>.png screenshot.
+retro_slot_path :: proc(slot: int, ext := "state") -> string {
+	if slot == 0 do return fmt.tprintf("%s.%s", retro.state_base, ext)
+	return fmt.tprintf("%s.slot%02d.%s", retro.state_base, slot, ext)
+}
+
+retro_suspend_path :: proc() -> string {
+	return fmt.tprintf("%s.suspend.state", retro.state_base)
+}
+
+retro_save_state_file :: proc(path: string) -> bool {
 	size := int(retro.core.serialize_size())
 	if size <= 0 do return false
 	buf := make([]byte, size)
 	defer delete(buf)
 	retro_hw_begin()
-	defer retro_hw_end()
-	if !retro.core.serialize(raw_data(buf), c.size_t(size)) do return false
-	return os.write_entire_file(retro.state_path, buf) == nil
+	ok := retro.core.serialize(raw_data(buf), c.size_t(size))
+	retro_hw_end()
+	return ok && os.write_entire_file(path, buf) == nil
 }
 
-retro_load_state :: proc() -> bool {
-	data, err := os.read_entire_file(retro.state_path, context.allocator)
+retro_load_state_file :: proc(path: string) -> bool {
+	data, err := os.read_entire_file(path, context.allocator)
 	if err != nil do return false
 	defer delete(data)
 	retro_hw_begin()
 	defer retro_hw_end()
 	return retro.core.unserialize(raw_data(data), c.size_t(len(data)))
+}
+
+// Saves the state + a small screenshot of the frozen frame (call while paused).
+retro_save_slot :: proc(slot: int) -> bool {
+	if !retro_save_state_file(retro_slot_path(slot)) do return false
+	retro_save_thumb(retro_slot_path(slot, "png"))
+	return true
+}
+
+// Draws the current frame into a small render texture, so hardware-rendered frames work too.
+retro_save_thumb :: proc(path: string) {
+	tex, src, dst, ok := retro_frame_layout(THUMB_W, THUMB_H, false)
+	if !ok do return
+	rt := rl.LoadRenderTexture(THUMB_W, THUMB_H)
+	if rt.id == 0 do return
+	defer rl.UnloadRenderTexture(rt)
+	rl.SetTextureFilter(tex, .BILINEAR)
+	emu_filter_tex = 0 // the game's own filter goes back on at the next draw
+	rl.BeginTextureMode(rt)
+	rl.ClearBackground(rl.BLACK)
+	rl.DrawTexturePro(tex, src, dst, {}, 0, rl.WHITE)
+	rl.EndTextureMode()
+	img := rl.LoadImageFromTexture(rt.texture)
+	defer rl.UnloadImage(img)
+	rl.ImageFlipVertical(&img) // render textures come back bottom-up
+	rl.ExportImage(img, strings.clone_to_cstring(path, context.temp_allocator))
+}
+
+// A suspended game picks up where it was; the suspend state is used once.
+retro_resume_suspended :: proc() {
+	if retro.save_mode == .None do return
+	path := retro_suspend_path()
+	if !os.exists(path) do return
+	if retro_load_state_file(path) {
+		_ = os.remove(path)
+		retro_osd("Resumed")
+	} else {
+		retro_osd("Couldn't resume the suspended game")
+	}
 }
 
 retro_sram :: proc() -> []byte {

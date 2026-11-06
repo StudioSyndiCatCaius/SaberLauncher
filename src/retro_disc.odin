@@ -105,16 +105,29 @@ cd_open :: proc(letter: u8) -> (cue_path: string, ok: bool) {
 	if cd.cooked do retro_log_line("[disc] DVD/BD medium: synthesizing raw sectors from 2048-byte reads")
 	for &s in cd.cache do s.block = -1
 
+	cd.cue = cd_cue_text(&toc, fmt.tprintf("disc%d.bin", cd.gen))
+	cd.ok = true
+	return cd_virtual_path(letter, cd.gen, "cue"), true
+}
+
+// The .cue for a single-file raw image of `toc` (PlayStation discs: data in MODE2/2352). Caller deletes.
+cd_cue_text :: proc(toc: ^Cd_Toc, bin_name: string) -> string {
 	sb := strings.builder_make()
-	fmt.sbprintf(&sb, "FILE \"disc%d.bin\" BINARY\r\n", cd.gen)
+	fmt.sbprintf(&sb, "FILE \"%s\" BINARY\r\n", bin_name)
 	for ti in 0 ..< toc.count {
 		t := toc.tracks[ti]
 		fmt.sbprintf(&sb, "  TRACK %02d %s\r\n", t.number, t.audio ? "AUDIO" : "MODE2/2352")
 		fmt.sbprintf(&sb, "    INDEX 01 %02d:%02d:%02d\r\n", t.lba / (75 * 60), (t.lba / 75) % 60, t.lba % 75)
 	}
-	cd.cue = strings.to_string(sb)
-	cd.ok = true
-	return cd_virtual_path(letter, cd.gen, "cue"), true
+	return strings.to_string(sb)
+}
+
+// The ISO9660 volume space size in 2048-byte sectors (primary volume descriptor, sector 16).
+iso_volume_sectors :: proc(h: Disc_Handle) -> (sectors: int, ok: bool) {
+	pvd: [ISO_SECTOR]u8
+	if !disc_read_user(h, 16, pvd[:]) || string(pvd[1:6]) != "CD001" do return
+	sectors = int(u32(pvd[80]) | u32(pvd[81]) << 8 | u32(pvd[82]) << 16 | u32(pvd[83]) << 24)
+	return sectors, sectors > 16
 }
 
 // Opens the disc in `letter` as a plain .iso of its 2048-byte sectors (DVD-based systems).
@@ -126,15 +139,14 @@ cd_open_iso :: proc(letter: u8) -> (iso_path: string, ok: bool) {
 	cd.gen += 1
 	cd.handle, cd.opened = disc_open(letter)
 	if !cd.opened do return "", false
-	// size: the ISO9660 volume space size (primary volume descriptor, sector 16)
-	pvd: [ISO_SECTOR]u8
-	if !disc_read_user(cd.handle, 16, pvd[:]) || string(pvd[1:6]) != "CD001" {
+	sectors, has_pvd := iso_volume_sectors(cd.handle)
+	if !has_pvd {
 		disc_close(cd.handle)
 		cd.opened = false
 		return "", false
 	}
 	cd.toc = {}
-	cd.toc.leadout = int(u32(pvd[80]) | u32(pvd[81]) << 8 | u32(pvd[82]) << 16 | u32(pvd[83]) << 24)
+	cd.toc.leadout = sectors
 	cd.iso = true
 	cd.cooked = false
 	for &s in cd.cache do s.block = -1
@@ -170,14 +182,14 @@ cd_bin_size :: proc() -> i64 {
 	return i64(cd.toc.leadout) * i64(cd_sector_size())
 }
 
-cd_track_mode :: proc(lba: int) -> u32 {
-	for ti := cd.toc.count - 1; ti >= 0; ti -= 1 {
-		if lba >= cd.toc.tracks[ti].lba do return cd.toc.tracks[ti].audio ? TRACK_MODE_CDDA : TRACK_MODE_YELLOW_MODE2
+toc_track_mode :: proc(toc: ^Cd_Toc, lba: int) -> u32 {
+	for ti := toc.count - 1; ti >= 0; ti -= 1 {
+		if lba >= toc.tracks[ti].lba do return toc.tracks[ti].audio ? TRACK_MODE_CDDA : TRACK_MODE_YELLOW_MODE2
 	}
 	return TRACK_MODE_YELLOW_MODE2
 }
 
-// Fills a cache slot with CACHE_BLOCK sectors, split where the track mode changes.
+// Fills a cache slot with CACHE_BLOCK sectors.
 // Unreadable sectors (scratches) come back as zeros instead of failing the core.
 cd_fill :: proc(slot: ^Cache_Slot, block: int) {
 	slot.block = block
@@ -191,14 +203,23 @@ cd_fill :: proc(slot: ^Cache_Slot, block: int) {
 		}
 		return
 	}
+	cd_read_sectors(cd.handle, &cd.toc, cd.cooked, first, end - first, slot.data[:])
+}
+
+// n (<= CACHE_BLOCK) raw 2352-byte sectors at lba, split where the track mode changes; shared by
+// the live reader and the installer (install.odin). Unreadable runs are zero-filled.
+// Returns the first LBA that couldn't be read, or -1.
+cd_read_sectors :: proc(h: Disc_Handle, toc: ^Cd_Toc, cooked: bool, first, n: int, dst: []u8) -> (bad: int) {
+	bad = -1
+	end := first + n
 	for lba := first; lba < end; {
-		mode := cd_track_mode(lba)
+		mode := toc_track_mode(toc, lba)
 		run := lba + 1
-		for run < end && cd_track_mode(run) == mode do run += 1
-		n := run - lba
-		dst := slot.data[(lba - first) * RAW_SECTOR:]
-		if cd.cooked {
-			cd_fill_cooked(lba, n, dst)
+		for run < end && toc_track_mode(toc, run) == mode do run += 1
+		count := run - lba
+		out := dst[(lba - first) * RAW_SECTOR:]
+		if cooked {
+			if !cd_fill_cooked(h, lba, count, out) && bad < 0 do bad = lba
 			lba = run
 			continue
 		}
@@ -207,24 +228,27 @@ cd_fill :: proc(slot: ^Cache_Slot, block: int) {
 			// drives disagree on which mode returns raw data sectors; alternate between both
 			try_mode := mode
 			if mode != TRACK_MODE_CDDA do try_mode = attempt % 2 == 0 ? TRACK_MODE_YELLOW_MODE2 : TRACK_MODE_XA_FORM2
-			if disc_read_raw(cd.handle, lba, n, try_mode, dst) {
+			if disc_read_raw(h, lba, count, try_mode, out) {
 				ok = true
 				break
 			}
 		}
 		if !ok {
-			retro_log_line("[disc] raw read of %d sectors at LBA %d failed (error %d)", n, lba, disc_last_error())
-			runtime.mem_zero(&dst[0], n * RAW_SECTOR)
+			retro_log_line("[disc] raw read of %d sectors at LBA %d failed (error %d)", count, lba, disc_last_error())
+			runtime.mem_zero(&out[0], count * RAW_SECTOR)
+			if bad < 0 do bad = lba
 		}
 		lba = run
 	}
+	return
 }
 
 // Reads n user-data sectors and wraps each in a Mode 2 Form 1 frame (sync, MSF header, XA subheader).
-// EDC/ECC are left zero; the cores don't check them.
-cd_fill_cooked :: proc(lba, n: int, dst: []u8) {
+// EDC/ECC are left zero; the cores don't check them. false = the read failed (zeros instead).
+cd_fill_cooked :: proc(h: Disc_Handle, lba, n: int, dst: []u8) -> bool {
 	user: [CACHE_BLOCK * ISO_SECTOR]u8
-	if !disc_read_user(cd.handle, lba, user[:n * ISO_SECTOR]) {
+	ok := disc_read_user(h, lba, user[:n * ISO_SECTOR])
+	if !ok {
 		retro_log_line("[disc] read of %d sectors at LBA %d failed (error %d)", n, lba, disc_last_error())
 		runtime.mem_zero(&user[0], n * ISO_SECTOR)
 	}
@@ -238,6 +262,7 @@ cd_fill_cooked :: proc(lba, n: int, dst: []u8) {
 		s[18], s[22] = 0x08, 0x08 // subheader: data, form 1
 		copy(s[24:], user[i * ISO_SECTOR:][:ISO_SECTOR])
 	}
+	return ok
 }
 
 cd_read_bin :: proc(gen: int, offset: i64, out: []u8) -> i64 {

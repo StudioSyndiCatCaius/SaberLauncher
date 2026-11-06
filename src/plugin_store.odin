@@ -11,6 +11,8 @@ package saber
 // Install downloads only that plugin's files into APP/plugins/.store/stage/<folder>/, then moves
 // them into APP/plugins/<folder>/ (files the repo doesn't have, like settings.ini, are kept).
 // New plugins load right away; updates of a loaded plugin apply after a restart.
+// Installs write a `.saber_store` marker (the repo); only marked plugins can be deleted
+// (PLUGINS page > Delete Plugin), so the built-in ones are safe.
 // Everything needs Online Mode.
 
 import "core:encoding/json"
@@ -314,6 +316,8 @@ store_finish_install :: proc(p: ^Store_Plugin) {
 		}
 	}
 	os.remove_all(path_join({stage, p.folder}))
+	repo := &store.repos[p.repo]
+	_ = os.write_entire_file(path_join({dest_root, p.folder, STORE_MARKER}), transmute([]u8)fmt.tprintf("%s/%s\n", repo.owner, repo.name))
 	p.state = .Installed
 	if q := store_installed(p); q != nil {
 		set_status("%s updated: restart Saber to apply (Settings > Restart Saber)", p.name)
@@ -323,6 +327,71 @@ store_finish_install :: proc(p: ^Store_Plugin) {
 		set_status("%s installed", p.name)
 	}
 	plugin_logf("store: installed %s from %s/%s", p.folder, store.repos[p.repo].owner, store.repos[p.repo].name)
+}
+
+STORE_MARKER :: ".saber_store"
+COL_STORE_OK :: rl.Color{64, 196, 104, 255}
+
+// Installed from the store into APP/plugins (built-in plugins have no marker).
+plugin_is_downloaded :: proc(p: ^Plugin) -> bool {
+	root := path_join({app.exe_dir, "plugins"})
+	return strings.equal_fold(filepath.dir(p.dir), root) && os.exists(path_join({p.dir, STORE_MARKER}))
+}
+
+// Unloads a store-installed plugin and deletes its folder.
+plugin_delete :: proc(idx: int) {
+	p := &plugins[idx]
+	if !plugin_is_downloaded(p) do return
+	if p.L != nil {
+		// drop everything still pointing into its Lua state
+		for i := len(plugin_dialogs) - 1; i >= 0; i -= 1 {
+			if plugin_dialogs[i].L == p.L {
+				dialog_free(&plugin_dialogs[i])
+				ordered_remove(&plugin_dialogs, i)
+			}
+		}
+		for r in http_requests {
+			if r.L != p.L do continue
+			if r.callback != LUA_NOREF do luaL_unref(r.L, LUA_REGISTRYINDEX, r.callback)
+			r.callback = LUA_NOREF
+			r.L = nil
+		}
+		lua_close(p.L)
+	}
+	if p.has_icon do rl.UnloadTexture(p.icon)
+	name := strings.clone(p.name, context.temp_allocator)
+	err := os.remove_all(p.dir)
+	for &sp in store.plugins do if strings.equal_fold(sp.folder, p.file) do sp.state = .Available
+	plugin_logf("store: deleted %s (%s)", p.file, p.dir)
+	ordered_remove(&plugins, idx)
+	app.plugin_sel = clamp(app.plugin_sel, 0, max(0, len(plugins) - 1))
+	app.plugin_focus = 0
+	app.plugin_action = 0
+	if err != nil {
+		set_status("%s removed, but some files couldn't be deleted", name)
+	} else {
+		set_status("%s deleted", name)
+	}
+	sfx_back()
+}
+
+// Green ring that fills while downloading, and a green tick circle once installed.
+draw_store_badge :: proc(cx, cy: f32, p: ^Store_Plugin) {
+	R :: 11
+	switch {
+	case p.state == .Installing:
+		t := len(p.files) > 0 ? f32(p.done) / f32(len(p.files)) : 0
+		spin := f32(rl.GetTime()) * 360
+		rl.DrawRing({cx, cy}, R - 3, R, 0, 360, 32, with_alpha(COL_STORE_OK, 60))
+		rl.DrawRing({cx, cy}, R - 3, R, spin, spin + max(30, 360 * t), 32, COL_STORE_OK)
+	case store_installed(p) != nil || p.state == .Installed:
+		rl.DrawCircleV({cx, cy}, R, COL_STORE_OK)
+		a := rl.Vector2{cx - 5, cy}
+		b := rl.Vector2{cx - 1.5, cy + 4}
+		c := rl.Vector2{cx + 5.5, cy - 4}
+		rl.DrawLineEx(a, b, 2.5, rl.WHITE)
+		rl.DrawLineEx(b, c, 2.5, rl.WHITE)
+	}
 }
 
 store_on_open :: proc() {
@@ -398,10 +467,11 @@ draw_store :: proc(w, h, y0, bottom: f32) {
 			draw_texture_fit(p.icon, r.x + 14, r.y + 10, 44, 44)
 			tx = r.x + 72
 		}
-		draw_t_fit(p.name, tx, r.y + 11, r.width - tx + r.x - 16, 19, sel ? COL_TEXT : COL_MUTED, sel)
+		draw_store_badge(r.x + r.width - 26, r.y + r.height * 0.5, p)
+		draw_t_fit(p.name, tx, r.y + 11, r.width - tx + r.x - 52, 19, sel ? COL_TEXT : COL_MUTED, sel)
 		sub := fmt.tprintf("%s/%s", store.repos[p.repo].owner, store.repos[p.repo].name)
 		if st := store_plugin_status(p); st != "" do sub = fmt.tprintf("%s  ·  %s", st, sub)
-		draw_t_fit(sub, tx, r.y + 37, r.width - tx + r.x - 16, 14, COL_MUTED, false)
+		draw_t_fit(sub, tx, r.y + 37, r.width - tx + r.x - 52, 14, COL_MUTED, false)
 	}
 
 	// detail

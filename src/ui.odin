@@ -90,10 +90,13 @@ ui_button :: proc(id: string, r: rl.Rectangle, label: string, focused := false, 
 		hover_enter(id)
 	}
 	hot := hovered || focused
+	// modal menus sit over busy pictures (paused games): frost them nearly solid so labels stay readable
+	frost: f32 = modal ? 0.5 : 0
+	refract: f32 = modal ? 2 : 8
 	if hot {
-		draw_glass(r, r.height * 0.5, mix_color(COL_PANEL_HI, COL_ACCENT, 0.25), 0.35, COL_ACCENT, 0.7, refract = 8)
+		draw_glass(r, r.height * 0.5, mix_color(COL_PANEL_HI, COL_ACCENT, 0.25), 0.35 + frost, COL_ACCENT, 0.7, refract = refract)
 	} else {
-		draw_glass(r, r.height * 0.5, COL_PANEL, 0.22, refract = 8)
+		draw_glass(r, r.height * 0.5, modal ? COL_PANEL_SOLID : COL_PANEL, 0.22 + frost, refract = refract)
 	}
 	draw_t_center(label, r.x + r.width * 0.5, r.y + (r.height - 20) * 0.5, 20, hot ? COL_TEXT : COL_MUTED)
 	if hovered && rl.IsMouseButtonPressed(.LEFT) {
@@ -285,7 +288,7 @@ draw_footer :: proc(w, h: f32) {
 	switch {
 	case plugin_dialog_open():
 		// the dialog draws its own hints
-	case app.power_open:
+	case app.power_open, game_menu.open:
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Back"}})
 	case drives_menu.open:
 		draw_hints(w, h, []Hint{{"A", "Toggle"}, {"B", "Done"}})
@@ -296,15 +299,19 @@ draw_footer :: proc(w, h: f32) {
 		return
 	case app.screen == .Plugins:
 		if app.plugin_focus == 1 {
-			on_setting := len(plugins) > 0 && (app.plugin_action == 0 || app.plugin_action > len(plugins[clamp(app.plugin_sel, 0, len(plugins) - 1)].actions))
-			draw_hints(w, h, []Hint{{"A", app.plugin_action == 0 ? "Toggle" : on_setting ? "Change" : "Run"}, {"B", "Plugins"}, {"LB / RB", "Menus"}})
+			sp := len(plugins) > 0 ? &plugins[clamp(app.plugin_sel, 0, len(plugins) - 1)] : nil
+			on_delete := sp != nil && app.plugin_action == plugin_delete_row(sp)
+			on_setting := sp != nil && !on_delete && (app.plugin_action == 0 || app.plugin_action > len(sp.actions))
+			draw_hints(w, h, []Hint{{"A", on_delete ? "Delete" : app.plugin_action == 0 ? "Toggle" : on_setting ? "Change" : "Run"}, {"B", "Plugins"}, {"LB / RB", "Menus"}})
 		} else {
 			draw_hints(w, h, []Hint{{"A", "Actions"}, {"B", "Home"}, {"Y", "Get Plugins"}, {"LB / RB", "Menus"}})
 		}
 	case app.screen == .Settings:
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Home"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
 	case app.screen == .Main:
-		draw_hints(w, h, []Hint{{"A", "Play"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
+		draw_hints(w, h, []Hint{{"A", "Play"}, {"X", "Actions"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
+	case app.screen == .Library:
+		draw_hints(w, h, []Hint{{"A", "Play"}, {"X", "Actions"}, {"B", "Home"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}})
 	case:
 		draw_hints(w, h, []Hint{{"A", app.screen == .Apps ? "Open" : "Play"}, {"B", "Home"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}})
 	}
@@ -327,6 +334,26 @@ Card :: struct {
 	placeholder: string,
 	contain:     bool, // show the whole image (covers, icons) instead of filling and cropping
 	badge:       string, // small bubble in the art's top-right corner
+	badge2:      string, // a second bubble under it ("Suspended")
+	kind:        Card_Kind, // games: PC vs emulated get a tinted glass rim
+	tag:         string,    // e.g. "PC", "PS2", "NES"
+}
+
+Card_Kind :: enum {
+	Other,
+	Pc,
+	Emulated,
+}
+
+CARD_KIND_COL := [Card_Kind]rl.Color {
+	.Other    = {},
+	.Pc       = {236, 92, 84, 255},  // red-ish
+	.Emulated = {72, 204, 150, 255}, // green-ish
+}
+
+game_kind :: proc(g: ^Game) -> (Card_Kind, string) {
+	if g.platform == .None do return .Pc, "PC"
+	return .Emulated, strings.to_upper(RETRO_PLATFORM_DIR[g.platform], context.temp_allocator)
 }
 
 card_for :: proc(s: Screen, i: int) -> Card {
@@ -335,19 +362,21 @@ card_for :: proc(s: Screen, i: int) -> Card {
 		return game_card(&app.drive_games[i])
 	case .Library:
 		g := &app.library_games[i]
-		return {g.box, g.has_box, g.title, "NO ART", true, ""}
+		kind, tag := game_kind(g)
+		return {g.box, g.has_box, g.title, "NO ART", true, "", game_suspended(g) ? "Suspended" : "", kind, tag}
 	case .Movies:
 		m := &app.movies[i]
-		return {m.thumb, m.has_thumb, m.title, "VIDEO", false, ""}
+		return {m.thumb, m.has_thumb, m.title, "VIDEO", false, "", "", .Other, ""}
 	case .Apps:
 		a := &app.shell_apps[i]
-		return {a.icon, a.has_icon, a.title, "APP", true, ""}
+		return {a.icon, a.has_icon, a.title, "APP", true, "", "", .Other, ""}
 	}
 	return {}
 }
 
 game_card :: proc(g: ^Game) -> Card {
-	return {g.box, g.has_box, g.title, "NO ART", true, g.mod_name != "" ? fmt.tprintf("Modded : %s", g.mod_name) : ""}
+	kind, tag := game_kind(g)
+	return {g.box, g.has_box, g.title, "NO ART", true, g.mod_name != "" ? fmt.tprintf("Modded : %s", g.mod_name) : "", game_suspended(g) ? "Suspended" : "", kind, tag}
 }
 
 fade_color :: proc(c: rl.Color, a: f32) -> rl.Color {
@@ -365,6 +394,10 @@ draw_card :: proc(c: Card, r: rl.Rectangle, hi: bool, title_size: f32 = 17, alph
 	} else {
 		draw_panel(box, hi)
 	}
+	if c.kind != .Other {
+		// PC vs emulated: a faint coloured rim on the glass, a bit stronger when focused
+		rl.DrawRectangleRoundedLinesEx(box, roundness(box, RADIUS), 10, hi ? 2 : 1.5, fade_color(with_alpha(CARD_KIND_COL[c.kind], hi ? 170 : 110), alpha))
+	}
 	art := rl.Rectangle{box.x + 8, box.y + 8, box.width - 16, box.height - 16 - TITLE_STRIP}
 	if hi {
 		splash_focus_art = art
@@ -379,12 +412,16 @@ draw_card :: proc(c: Card, r: rl.Rectangle, hi: bool, title_size: f32 = 17, alph
 		rl.DrawRectangleRounded(art, roundness(art, RADIUS - 4), 6, fade_color(with_alpha(COL_TINT, 8), alpha))
 		draw_t_center(c.placeholder, art.x + art.width * 0.5, art.y + art.height * 0.5 - 8, 15, fade_color(COL_MUTED, alpha))
 	}
-	if c.badge != "" {
+	badge_y := art.y + 6
+	for text, i in ([2]string{c.badge, c.badge2}) {
+		if text == "" do continue
 		size: f32 = 12
-		tw := min(measure_t(c.badge, size), art.width - 28)
-		pill := rl.Rectangle{art.x + art.width - tw - 22, art.y + 6, tw + 16, 22}
-		rl.DrawRectangleRounded(pill, 1, 8, fade_color(with_alpha(COL_ACCENT, 230), alpha))
-		draw_t_fit(c.badge, pill.x + 8, pill.y + 5, tw, size, fade_color(rl.Color{16, 18, 24, 255}, alpha), false)
+		tw := min(measure_t(text, size), art.width - 28)
+		pill := rl.Rectangle{art.x + art.width - tw - 22, badge_y, tw + 16, 22}
+		col := i == 0 ? COL_ACCENT : rl.Color{232, 192, 76, 255}
+		rl.DrawRectangleRounded(pill, 1, 8, fade_color(with_alpha(col, 230), alpha))
+		draw_t_fit(text, pill.x + 8, pill.y + 5, tw, size, fade_color(rl.Color{16, 18, 24, 255}, alpha), false)
+		badge_y += 28
 	}
 	draw_t_fit(c.title, box.x + 14, box.y + box.height - TITLE_STRIP + 8, box.width - 28, title_size, fade_color(hi ? COL_TEXT : COL_MUTED, alpha), hi)
 	if hi && alpha > 0.98 {
@@ -397,10 +434,15 @@ card_mouse :: proc(s: Screen, i: int, r: rl.Rectangle) {
 		return
 	}
 	hover_enter(fmt.tprintf("card-%d-%d", int(s), i))
+	if (s == .Main || s == .Library) && rl.IsMouseButtonPressed(.RIGHT) {
+		grid_selection(s)^ = i
+		game_menu_open(s, i)
+		return
+	}
 	if rl.IsMouseButtonPressed(.LEFT) {
 		sel := grid_selection(s)
 		if sel^ == i {
-			activate_item(s, i)
+			queue_activate(s, i)
 		} else {
 			sel^ = i
 			sfx_click()
@@ -681,7 +723,7 @@ draw_detail :: proc(s: Screen, i: int, r: rl.Rectangle) {
 
 	btn := rl.Rectangle{x, r.y + r.height - 28 - 52, min(iw, 240), 52}
 	if ui_button(fmt.tprintf("detail-%d", int(s)), btn, "", true) {
-		activate_item(s, i)
+		queue_activate(s, i)
 	}
 	gw := draw_glyph("A", btn.x + 18, btn.y + btn.height * 0.5)
 	draw_t(action, btn.x + 18 + gw + 12, btn.y + 16, 20, COL_TEXT)
@@ -699,6 +741,7 @@ SETTINGS_LABELS := [Settings_Row]string {
 	.Online_Mode = "Online Mode",
 	.Ignored_Drives = "Ignored drives",
 	.Emulation   = "Emulation",
+	.Save_States = "Save states",
 	.Launch_Mode = "Launch mode",
 	.Updates     = "Check for updates",
 	.Desktop     = "Desktop",
@@ -714,6 +757,7 @@ SETTINGS_HELP := [Settings_Row]string {
 	.Online_Mode = "Lets plugins use the internet (e.g. cover downloads). Turning it off stops all online activity at once.",
 	.Ignored_Drives = "Hard drives (besides the system drive) that are never scanned for games.",
 	.Emulation   = "Video, audio, controls and emulator cores for console games.",
+	.Save_States = "",
 	.Launch_Mode = "",
 	.Updates    = "Downloads the latest release with SaberUpdater, then restarts Saber. Needs Online Mode.",
 	.Desktop     = "Starts Explorer without closing Saber.",
@@ -723,6 +767,20 @@ SETTINGS_HELP := [Settings_Row]string {
 ROW_H :: 62
 ROW_GAP :: 8
 
+SAVE_MODE_HELP := [Save_Mode]string {
+	.None    = "No save states: games only keep their own saves. Applies to the next game you start.",
+	.Suspend = "Suspend in the pause menu saves and closes the game; it picks up there next time. Applies to the next game you start.",
+	.Quick   = "One Quick Save / Quick Load slot, plus Suspend. Applies to the next game you start.",
+	.Free    = "20 save state slots with screenshots, plus Suspend. Applies to the next game you start.",
+}
+
+SAVE_MODE_SHORT := [Save_Mode]string {
+	.None    = "No save states",
+	.Suspend = "Suspend saves + closes the game, resumes next time",
+	.Quick   = "One quicksave slot, plus Suspend",
+	.Free    = "20 slots with screenshots, plus Suspend",
+}
+
 draw_settings :: proc(w, h: f32) {
 	top := f32(HEADER_H + 28)
 	draw_heading("SETTINGS", -1, top)
@@ -730,12 +788,26 @@ draw_settings :: proc(w, h: f32) {
 	x := (w - pw) * 0.5
 	y := top + 36
 
-	launch_row: rl.Rectangle
+	// Rows past the screen scroll so the focused one (and the help line under the last) stays visible.
+	step := f32(ROW_H + ROW_GAP)
+	view := h - y - 80
+	target := app.scroll[.Settings]
+	fy := f32(app.settings_focus) * step
+	if fy - target < 0 do target = fy
+	if fy + step + 30 - target > view do target = fy + step + 30 - view
+	target = clamp(target, 0, max(f32(SETTINGS_ROWS) * step + 30 - view, 0))
+	app.scroll[.Settings] = smooth_to(app.scroll[.Settings], target, 14)
+	list := rl.Rectangle{0, y - 4, w, view + 34}
+	y -= app.scroll[.Settings]
+	push_clip(list)
+
+	launch_row, save_row: rl.Rectangle
 	for row in Settings_Row {
 		i := int(row)
-		r := rl.Rectangle{x, y + f32(i) * (ROW_H + ROW_GAP), pw, ROW_H}
+		r := rl.Rectangle{x, y + f32(i) * step, pw, ROW_H}
 		focused := app.settings_focus == i
-		if !app.dropdown_open && !drives_menu.open && mouse_over(r) && app.settings_focus != i {
+		if r.y + r.height < list.y || r.y > list.y + list.height do continue
+		if !app.dropdown_open && !drives_menu.open && mouse_over(r) && mouse_over(list) && app.settings_focus != i {
 			app.settings_focus = i
 			hover_enter(fmt.tprintf("set-%d", i))
 		}
@@ -783,6 +855,12 @@ draw_settings :: proc(w, h: f32) {
 			if mouse_over(r) && rl.IsMouseButtonPressed(.LEFT) {
 				emu_open(false)
 			}
+		case .Save_States:
+			save_row = r
+			draw_select_box(val, SAVE_MODE_NAMES[app.settings.save_mode], focused)
+			if !app.dropdown_open && mouse_over(val) && rl.IsMouseButtonPressed(.LEFT) {
+				open_dropdown(.Save_Mode)
+			}
 		case .Launch_Mode:
 			launch_row = r
 			draw_select_box(val, LAUNCH_MODE_NAMES[app.settings.launch_mode], focused)
@@ -817,11 +895,15 @@ draw_settings :: proc(w, h: f32) {
 	if Settings_Row(app.settings_focus) == .Launch_Mode {
 		help = LAUNCH_MODE_HELP[app.settings.launch_mode]
 	}
-	if !app.dropdown_open && !drives_menu.open {
-		draw_t(help, x + 4, y + f32(SETTINGS_ROWS) * (ROW_H + ROW_GAP) + 8, 16, COL_MUTED)
+	if Settings_Row(app.settings_focus) == .Save_States {
+		help = SAVE_MODE_HELP[app.settings.save_mode]
 	}
+	if !app.dropdown_open && !drives_menu.open {
+		draw_t(help, x + 4, y + f32(SETTINGS_ROWS) * step + 8, 16, COL_MUTED)
+	}
+	pop_clip()
 
-	draw_dropdown(launch_row)
+	draw_dropdown(app.dropdown_kind == .Save_Mode ? save_row : launch_row)
 	drives_menu_draw(w, h)
 }
 
@@ -891,7 +973,7 @@ draw_dropdown :: proc(row: rl.Rectangle) {
 	if !app.dropdown_open && app.dropdown_t < 0.02 {
 		return
 	}
-	n := len(Launch_Mode)
+	n := dropdown_count()
 	box := rl.Rectangle{row.x + row.width * 0.4, row.y + 4, row.width * 0.6 - 6, f32(n) * DROP_ITEM_H + 12}
 	box.height *= 0.85 + 0.15 * app.dropdown_t
 	a := app.dropdown_t
@@ -902,8 +984,7 @@ draw_dropdown :: proc(row: rl.Rectangle) {
 	}
 
 	clicked_inside := false
-	for mode in Launch_Mode {
-		i := int(mode)
+	for i in 0 ..< n {
 		it := rl.Rectangle{box.x + 6, box.y + 6 + f32(i) * DROP_ITEM_H, box.width - 12, DROP_ITEM_H}
 		if app.dropdown_open && mouse_over(it) {
 			if app.dropdown_sel != i {
@@ -912,18 +993,18 @@ draw_dropdown :: proc(row: rl.Rectangle) {
 			}
 			if rl.IsMouseButtonPressed(.LEFT) {
 				clicked_inside = true
-				choose_launch_mode(mode)
+				dropdown_choose(i)
 			}
 		}
 		if i == app.dropdown_sel {
 			draw_glass(it, RADIUS - 6, mix_color(COL_PANEL_HI, COL_ACCENT, 0.3), 0.45, COL_ACCENT, 0.4, refract = 6)
 		}
-		current := mode == app.settings.launch_mode
+		name, help, current := dropdown_item(i)
 		if current {
 			rl.DrawCircleV({it.x + 16, it.y + 20}, 4, COL_ACCENT)
 		}
-		draw_t(LAUNCH_MODE_NAMES[mode], it.x + 30, it.y + 9, 18, i == app.dropdown_sel ? COL_TEXT : COL_MUTED)
-		draw_t_fit(LAUNCH_MODE_HELP[mode], it.x + 30, it.y + 33, it.width - 40, 13, COL_MUTED, false)
+		draw_t(name, it.x + 30, it.y + 9, 18, i == app.dropdown_sel ? COL_TEXT : COL_MUTED)
+		draw_t_fit(help, it.x + 30, it.y + 33, it.width - 40, 13, COL_MUTED, false)
 	}
 	if app.dropdown_open && !clicked_inside && !input.using_pad && rl.IsMouseButtonPressed(.LEFT) && !rl.CheckCollisionPointRec(rl.GetMousePosition(), box) {
 		app.dropdown_open = false

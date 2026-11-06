@@ -24,6 +24,29 @@ LAUNCH_MODE_KEYS := [Launch_Mode]string {
 	.Shell      = "shell",
 }
 
+// What the emulation pause menu offers for save states. Read once per game (retro.save_mode),
+// so it can only change between games, from the Settings tab.
+Save_Mode :: enum {
+	None,    // no states at all
+	Suspend, // "Suspend": save + quit, resumed (once) on the next start
+	Quick,   // one quicksave slot + Suspend
+	Free,    // SAVE_SLOTS slots + Suspend
+}
+
+SAVE_MODE_NAMES := [Save_Mode]string {
+	.None    = "None",
+	.Suspend = "Suspend Only",
+	.Quick   = "Quicksave",
+	.Free    = "Free Save",
+}
+
+SAVE_MODE_KEYS := [Save_Mode]string {
+	.None    = "none",
+	.Suspend = "suspend",
+	.Quick   = "quick",
+	.Free    = "free",
+}
+
 Settings :: struct {
 	launch_mode: Launch_Mode,
 	ui_theme:    string,
@@ -35,10 +58,11 @@ Settings :: struct {
 	plugins_off: string, // disabled plugin folder names, ';'-separated; takes effect on restart
 	ignore_drives: u32, // bit per letter (A = bit 0): fixed drives skipped by the game scan
 	plugin_dirs: string, // extra plugin folders, ';'-separated, relative to the exe; APP/plugins always loads
+	save_mode:   Save_Mode,
 }
 
 settings_load :: proc(path: string) -> Settings {
-	s := Settings{volume = 0.7, font = "Arial"}
+	s := Settings{volume = 0.7, font = "Arial", save_mode = .Suspend}
 	if data, err := os.read_entire_file(path, context.allocator); err == nil {
 		defer delete(data)
 		text := string(data)
@@ -63,6 +87,9 @@ settings_load :: proc(path: string) -> Settings {
 		if v, found := ini_get(text, "online"); found {
 			s.online_mode = v == "1" || strings.equal_fold(v, "true")
 		}
+		if v, found := ini_get(text, "save_states"); found {
+			for key, m in SAVE_MODE_KEYS do if strings.equal_fold(v, key) do s.save_mode = m
+		}
 		if v, found := ini_get(text, "plugins_off"); found {
 			s.plugins_off = strings.clone(v)
 		}
@@ -79,7 +106,7 @@ settings_load :: proc(path: string) -> Settings {
 
 settings_save :: proc(path: string, s: Settings) {
 	text := fmt.tprintf(
-		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\nonline=%d\nplugins_off=%s\nplugin_dirs=%s\n",
+		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\nonline=%d\nplugins_off=%s\nplugin_dirs=%s\nignore_drives=%s\n",
 		LAUNCH_MODE_KEYS[s.launch_mode],
 		s.ui_theme,
 		s.bkg,
@@ -90,6 +117,7 @@ settings_save :: proc(path: string, s: Settings) {
 		s.plugins_off,
 		s.plugin_dirs,
 		drive_letters(s.ignore_drives),
+		SAVE_MODE_KEYS[s.save_mode],
 	)
 	_ = os.write_entire_file(path, text)
 }

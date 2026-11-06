@@ -22,6 +22,7 @@ App :: struct {
 	screen:          Screen,
 	exe_dir:         string,
 	games_dir:       string,
+	roms_dir:        string, // games_roms: installed discs and ROMs (install.odin)
 	apps_dir:        string,
 	movies_dir:      string,
 	settings_path:   string,
@@ -39,6 +40,7 @@ App :: struct {
 	plugin_action:   int,
 	plugin_focus:    int, // 0 = plugin list, 1 = actions
 	plugin_page:     int, // 0 = installed, 1 = GET PLUGINS (store)
+	plugin_delete_armed: bool, // "Delete Plugin" pressed once
 	scroll:          [Screen]f32,
 	status_buf:      [256]u8,
 	status:          string, // view into status_buf; survives the per-frame temp reset
@@ -58,6 +60,8 @@ App :: struct {
 	settings_focus:  int,
 	dropdown_open:   bool,
 	dropdown_sel:    int,
+	dropdown_kind:   Dropdown_Kind,
+	pending_open:    Maybe([2]int), // {screen, item} clicked while drawing; opened by handle_app_input
 	dropdown_t:      f32,
 	slider_drag:     bool,
 	power_open:      bool,
@@ -89,6 +93,7 @@ main :: proc() {
 		_ = os.set_working_directory(app.exe_dir)
 	}
 	app.games_dir = path_join({app.exe_dir, "games"})
+	app.roms_dir = path_join({app.exe_dir, "games_roms"})
 	app.apps_dir = path_join({app.exe_dir, "apps"})
 	app.movies_dir = path_join({app.exe_dir, "movies"})
 	app.settings_path = path_join({app.exe_dir, "Saber.ini"})
@@ -134,6 +139,7 @@ main :: proc() {
 		keep_fullscreen()
 		poll_drive_changes()
 		drive_scan_update()
+		install_update()
 		theme_update()
 		if rl.IsKeyPressed(.F11) {
 			rl.ToggleBorderlessWindowed()
@@ -170,7 +176,9 @@ main :: proc() {
 		}
 		glass.source = under_dialog ? .Over : .Wall
 		draw_drive_scan_card(w, h)
+		draw_install_card(w, h)
 		draw_power_dialog(w, h)
+		draw_game_menu(w, h)
 		draw_plugin_dialog(w, h)
 		emu_menu_draw(w, h)
 		glass.source = .Wall
@@ -179,6 +187,7 @@ main :: proc() {
 		free_all(context.temp_allocator)
 	}
 
+	install_shutdown()
 	drive_scan_shutdown()
 	drive_ghosts_clear()
 	unload_all_games()
@@ -293,11 +302,9 @@ draw_splash :: proc(step: string) {
 rescan_all :: proc(drives_async := false) {
 	unload_all_apps()
 	unload_all_movies()
-	for &g in app.library_games do game_unload_art(&g)
-	clear(&app.library_games)
 	clear(&app.shell_apps)
 	clear(&app.movies)
-	scan_library(&app.library_games, app.games_dir)
+	rescan_library()
 	if !drives_async {
 		for &g in app.drive_games do game_unload_art(&g)
 		clear(&app.drive_games)
@@ -320,6 +327,18 @@ rescan_all :: proc(drives_async := false) {
 	} else {
 		plugins_discs_changed()
 	}
+}
+
+// PC games (games/) and installed discs / ROMs (games_roms/), keeping the selection on the same game.
+rescan_library :: proc() {
+	keep := ""
+	if sel := app.selected_lib; sel >= 0 && sel < len(app.library_games) do keep = fmt.tprint(app.library_games[sel].root)
+	for &g in app.library_games do game_unload_art(&g)
+	clear(&app.library_games)
+	scan_library(&app.library_games, app.games_dir)
+	scan_library_roms(&app.library_games, app.roms_dir)
+	for g, i in app.library_games do if keep != "" && g.root == keep do app.selected_lib = i
+	app.selected_lib = clamp(app.selected_lib, 0, max(0, len(app.library_games) - 1))
 }
 
 update_scan_message :: proc() {
@@ -354,7 +373,7 @@ draw_menus :: proc(w, h: f32) {
 
 // A modal is on screen (fading in or out included).
 dialog_visible :: proc() -> bool {
-	return app.power_open || app.power_t >= 0.02 || plugin_dialog_open() || emu_menu.open || emu_menu.t >= 0.02
+	return app.power_open || app.power_t >= 0.02 || plugin_dialog_open() || emu_menu.open || emu_menu.t >= 0.02 || game_menu.open || game_menu.t >= 0.02
 }
 
 input_locked :: proc() -> bool {
@@ -369,6 +388,16 @@ open_power_dialog :: proc() {
 }
 
 handle_app_input :: proc() {
+	if game_menu_update() {
+		eat_input()
+		return
+	}
+	if p, ok := app.pending_open.?; ok {
+		app.pending_open = nil
+		activate_item(Screen(p[0]), p[1])
+		eat_input()
+		return
+	}
 	if emu_menu.open {
 		emu_menu_input()
 		eat_input()
@@ -387,6 +416,12 @@ handle_app_input :: proc() {
 		return
 	}
 	if app.swipe_t < 1 {
+		return
+	}
+	if game_menu.open {
+		game_menu_input()
+		eat_input()
+		input.mouse_eaten = true
 		return
 	}
 	if drives_menu.open {
@@ -445,6 +480,8 @@ handle_app_input :: proc() {
 			}
 			if input.confirm {
 				activate_item(.Main, app.selected_drive)
+			} else if input.action {
+				game_menu_open(.Main, app.selected_drive)
 			}
 		}
 	case .Library, .Movies, .Apps:
@@ -452,6 +489,8 @@ handle_app_input :: proc() {
 		nav_grid(sel, grid_count(app.screen), grid_layout(app.screen).cols)
 		if input.confirm {
 			activate_item(app.screen, sel^)
+		} else if input.action && app.screen == .Library {
+			game_menu_open(.Library, sel^)
 		}
 	case .Plugins:
 		handle_plugins_input()
@@ -469,6 +508,7 @@ Settings_Row :: enum {
 	Online_Mode,
 	Ignored_Drives,
 	Emulation,
+	Save_States,
 	Launch_Mode,
 	Updates,
 	Desktop,
@@ -517,6 +557,10 @@ handle_settings_input :: proc() {
 		if input.confirm {
 			emu_open(false)
 		}
+	case .Save_States:
+		if input.confirm {
+			open_dropdown(.Save_Mode)
+		}
 	case .Launch_Mode:
 		if input.confirm {
 			open_dropdown()
@@ -553,16 +597,57 @@ set_volume :: proc(v: f32) {
 	save_settings()
 }
 
-open_dropdown :: proc() {
+// The Settings tab's dropdown lists (one open at a time).
+Dropdown_Kind :: enum {
+	Launch_Mode,
+	Save_Mode,
+}
+
+open_dropdown :: proc(kind := Dropdown_Kind.Launch_Mode) {
 	app.dropdown_open = true
-	app.dropdown_sel = int(app.settings.launch_mode)
+	app.dropdown_kind = kind
 	app.dropdown_t = 0
-	app.settings_focus = int(Settings_Row.Launch_Mode)
+	switch kind {
+	case .Launch_Mode:
+		app.dropdown_sel = int(app.settings.launch_mode)
+		app.settings_focus = int(Settings_Row.Launch_Mode)
+	case .Save_Mode:
+		app.dropdown_sel = int(app.settings.save_mode)
+		app.settings_focus = int(Settings_Row.Save_States)
+	}
+	sfx_click()
+}
+
+dropdown_count :: proc() -> int {
+	return app.dropdown_kind == .Save_Mode ? len(Save_Mode) : len(Launch_Mode)
+}
+
+dropdown_item :: proc(i: int) -> (name, help: string, current: bool) {
+	if app.dropdown_kind == .Save_Mode {
+		m := Save_Mode(i)
+		return SAVE_MODE_NAMES[m], SAVE_MODE_SHORT[m], m == app.settings.save_mode
+	}
+	m := Launch_Mode(i)
+	return LAUNCH_MODE_NAMES[m], LAUNCH_MODE_HELP[m], m == app.settings.launch_mode
+}
+
+dropdown_choose :: proc(i: int) {
+	if app.dropdown_kind == .Launch_Mode {
+		choose_launch_mode(Launch_Mode(i))
+		return
+	}
+	app.dropdown_open = false
+	if Save_Mode(i) == app.settings.save_mode {
+		sfx_back()
+		return
+	}
+	app.settings.save_mode = Save_Mode(i)
+	save_settings()
 	sfx_click()
 }
 
 handle_dropdown_input :: proc() {
-	n := len(Launch_Mode)
+	n := dropdown_count()
 	if input.up {
 		app.dropdown_sel = (app.dropdown_sel - 1 + n) % n
 		sfx_click()
@@ -577,7 +662,7 @@ handle_dropdown_input :: proc() {
 		return
 	}
 	if input.confirm {
-		choose_launch_mode(Launch_Mode(app.dropdown_sel))
+		dropdown_choose(app.dropdown_sel)
 	}
 }
 
@@ -766,18 +851,20 @@ grid_selection :: proc(s: Screen) -> ^int {
 	return &app.selected_app
 }
 
+// Mouse clicks arrive while drawing (inside scissor clips, the swipe camera, or a glass
+// capture's render texture); a game or player runs its own frame loop, so it must start
+// from handle_app_input instead, with nothing of this frame's drawing still active.
+queue_activate :: proc(s: Screen, i: int) {
+	app.pending_open = [2]int{int(s), i}
+}
+
 activate_item :: proc(s: Screen, i: int) {
 	if input_locked() || i < 0 || i >= grid_count(s) {
 		return
 	}
 	#partial switch s {
 	case .Main, .Library:
-		g := s == .Main ? &app.drive_games[i] : &app.library_games[i]
-		if ok, err := game_launch(g); !ok {
-			set_status("%s", err)
-		} else {
-			set_status("Played %s  ·  %s total", g.title, format_playtime(g.playtime_seconds))
-		}
+		play_game(s == .Main ? &app.drive_games[i] : &app.library_games[i])
 	case .Movies:
 		m := &app.movies[i]
 		if ok, err := movie_launch(m); !ok {
@@ -795,5 +882,18 @@ activate_item :: proc(s: Screen, i: int) {
 		} else {
 			set_status("Closed %s", a.title)
 		}
+	}
+}
+
+play_game :: proc(g: ^Game) {
+	if install_busy_with(g) {
+		set_status("Installing %s  ·  wait for it to finish, or cancel it from the actions menu (X)", g.title)
+		sfx_back()
+		return
+	}
+	if ok, err := game_launch(g); !ok {
+		set_status("%s", err)
+	} else {
+		set_status("Played %s  ·  %s total", g.title, format_playtime(g.playtime_seconds))
 	}
 }

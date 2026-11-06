@@ -24,6 +24,23 @@ scan_library :: proc(out: ^[dynamic]Game, games_dir: string) {
 	scan_children(out, games_dir, "Library", false)
 }
 
+// APP/games_roms/: one folder per platform holding installed discs (<game>/_Saber/saber.ini
+// with rom=, see install.odin) and loose ROMs / disc images copied as-is.
+scan_library_roms :: proc(out: ^[dynamic]Game, roms_dir: string) {
+	fis, err := os.read_all_directory_by_path(roms_dir, context.allocator)
+	if err != nil do return
+	defer os.file_info_slice_delete(fis, context.allocator)
+	first := len(out)
+	found := 0
+	scan_rom_dir(out, roms_dir, "Library", &found)
+	for fi in fis {
+		if fi.type != .Directory || strings.has_suffix(fi.name, INSTALL_PART) do continue
+		scan_children(out, fi.fullpath, "Library", false)
+		scan_rom_dir(out, fi.fullpath, "Library", &found)
+	}
+	for k in first ..< len(out) do out[k].from_drive = false
+}
+
 is_insertable_drive :: proc(letter: rune) -> bool {
 	if is_system_drive(letter) || drive_ignored(letter) {
 		return false
@@ -87,7 +104,7 @@ scan_children :: proc(out: ^[dynamic]Game, parent, label: string, from_drive: bo
 			continue
 		}
 		base := fi.name if fi.name != "" else filepath.base(fi.fullpath)
-		if base == "." || base == ".." || base == "_Saber" {
+		if base == "." || base == ".." || base == "_Saber" || strings.has_suffix(base, INSTALL_PART) {
 			continue
 		}
 		if g, ok := game_from_folder(fi.fullpath, label, from_drive); ok {

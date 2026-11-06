@@ -42,14 +42,16 @@ handle_plugins_input :: proc() {
 		if input.right || input.confirm {
 			app.plugin_focus = 1
 			app.plugin_action = 0
+			app.plugin_delete_armed = false
 			sfx_click()
 		}
 		return
 	}
-	// right column: the on/off switch, then actions, then settings, as one list
+	// right column: the on/off switch, then actions, then settings, then Delete (store plugins), as one list
 	items := plugin_items(p)
+	del := plugin_delete_row(p)
 	// left steps a setting's value; everywhere else it goes back to the list
-	on_setting := app.plugin_action > len(p.actions)
+	on_setting := app.plugin_action > len(p.actions) && app.plugin_action != del
 	if input.left && !on_setting {
 		app.plugin_focus = 0
 		sfx_back()
@@ -58,13 +60,17 @@ handle_plugins_input :: proc() {
 	app.plugin_action = clamp(app.plugin_action, 0, items - 1)
 	if input.up && app.plugin_action > 0 {
 		app.plugin_action -= 1
+		app.plugin_delete_armed = false
 		sfx_click()
 	}
 	if input.down && app.plugin_action < items - 1 {
 		app.plugin_action += 1
+		app.plugin_delete_armed = false
 		sfx_click()
 	}
-	if app.plugin_action == 0 {
+	if app.plugin_action == del {
+		if input.confirm do plugin_delete_press(app.plugin_sel)
+	} else if app.plugin_action == 0 {
 		if input.confirm {
 			plugin_set_enabled(p, !p.enabled)
 			sfx_click()
@@ -79,8 +85,48 @@ handle_plugins_input :: proc() {
 }
 
 plugin_items :: proc(p: ^Plugin) -> int {
-	if p.L == nil do return 1 // off: only the switch
-	return 1 + len(p.actions) + len(p.settings)
+	n := p.L == nil ? 1 : 1 + len(p.actions) + len(p.settings) // off: only the switch
+	if plugin_is_downloaded(p) do n += 1
+	return n
+}
+
+// Row index of "Delete Plugin" (last row), -1 for built-in plugins.
+plugin_delete_row :: proc(p: ^Plugin) -> int {
+	return plugin_is_downloaded(p) ? plugin_items(p) - 1 : -1
+}
+
+// First press arms, second press deletes.
+plugin_delete_press :: proc(idx: int) {
+	if !app.plugin_delete_armed {
+		app.plugin_delete_armed = true
+		set_status("Press again to delete %s", plugins[idx].name)
+		sfx_click()
+		return
+	}
+	app.plugin_delete_armed = false
+	plugin_delete(idx)
+}
+
+draw_delete_row :: proc(p: ^Plugin, x, y, iw: f32) {
+	idx := plugin_delete_row(p)
+	ar := rl.Rectangle{x, y, iw, ACTION_ROW_H}
+	focused := app.plugin_focus == 1 && app.plugin_action == idx
+	armed := focused && app.plugin_delete_armed
+	if mouse_over(ar) && rl.IsMouseButtonPressed(.LEFT) {
+		if !focused do app.plugin_delete_armed = false
+		app.plugin_focus = 1
+		app.plugin_action = idx
+		plugin_delete_press(app.plugin_sel)
+		return
+	}
+	draw_panel(ar, focused)
+	draw_t_fit(armed ? "Delete Plugin?" : "Delete Plugin", ar.x + 18, ar.y + 9, iw - 140, 18, armed ? COL_WARN : focused ? COL_TEXT : COL_MUTED, focused)
+	desc := armed ? "Press A again to delete its folder (settings and data too)" : "Downloaded from the store: removes it from APP/plugins"
+	draw_t_fit(desc, ar.x + 18, ar.y + 33, iw - 140, 14, COL_MUTED, false)
+	if focused {
+		draw_t_right(armed ? "Confirm" : "Delete", ar.x + ar.width - 44, ar.y + 19, 17, COL_TEXT)
+		draw_glyph("A", ar.x + ar.width - 26, ar.y + ar.height * 0.5)
+	}
 }
 
 run_plugin_action :: proc(p: ^Plugin, a: ^Plugin_Action) {
@@ -190,6 +236,7 @@ draw_plugins :: proc(w, h: f32) {
 	}
 	if p.L == nil {
 		draw_t("This plugin is off.", x, y, 16, COL_MUTED)
+		if plugin_is_downloaded(p) do draw_delete_row(p, x, y + 36, iw)
 		return
 	}
 
@@ -231,6 +278,7 @@ draw_plugins :: proc(w, h: f32) {
 	}
 
 	// settings
+	defer if plugin_is_downloaded(p) && y + ACTION_ROW_H < r.y + r.height - 16 do draw_delete_row(p, x, y + 14, iw)
 	if len(p.settings) == 0 do return
 	y += 14
 	draw_t("SETTINGS", x, y, 15, COL_ACCENT)

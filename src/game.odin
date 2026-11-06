@@ -38,6 +38,8 @@ Game :: struct {
 	rom_name:         string,         // its file name without extension, e.g. "Super Mario World (USA)"
 	rom_crc:          string,         // CRC32 of the ROM as hex ("" when too big to hash on scan)
 	gdrom:            bool,           // a pressed Dreamcast GD-ROM: listed, but unplayable from a PC drive
+	suspended:        bool,           // cached game_suspended
+	suspend_checked:  f64,
 	// filled by a drive scan on the worker thread, finished on the main thread (game_finish_scan)
 	box_img, logo_img: rl.Image,
 	pending_apply:    bool,
@@ -96,6 +98,15 @@ game_from_folder :: proc(root: string, drive_label: string, from_drive: bool) ->
 		}
 		if v, found := ini_get(text, "platform"); found {
 			for p in Retro_Platform do if p != .None && strings.equal_fold(RETRO_PLATFORM_DIR[p], v) do g.meta_platform = p
+		}
+		// an installed disc / ROM (install.odin): played by the libretro host instead of an exe
+		if v, found := ini_get(text, "rom"); found && v != "" && g.meta_platform != .None {
+			g.rom_path = filepath.is_abs(v) ? strings.clone(v) : path_join({root, v})
+			g.rom_name = strings.clone(filepath.stem(v))
+			g.platform = g.meta_platform
+		}
+		if v, found := ini_get(text, "mod"); found && v != "" {
+			g.mod_name = strings.clone(v)
 		}
 		g.logo_file = path_join({saber, logo_name})
 		g.box_file = path_join({saber, box_name})

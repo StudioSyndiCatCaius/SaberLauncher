@@ -68,3 +68,10 @@ volume_serial :: proc(letter: u8) -> (serial: u32, present: bool) {
 	ok := GetVolumeInformationW(win.LPCWSTR(raw_data(root[:])), nil, 0, &serial, nil, nil, nil, 0)
 	return serial, bool(ok)
 }
+
+// Bytes this user may still write on the volume holding `dir` (which must exist); false = unknown.
+disk_free_bytes :: proc(dir: string) -> (i64, bool) {
+	free: win.ULARGE_INTEGER
+	if !win.GetDiskFreeSpaceExW(win.utf8_to_wstring(dir), &free, nil, nil) do return 0, false
+	return i64(free), true
+}

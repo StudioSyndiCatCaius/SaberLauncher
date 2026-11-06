@@ -128,24 +128,19 @@ Cue_Bin :: struct {
 cue_ps1_serial :: proc(cue_path: string) -> (serial: string, ok: bool) {
 	data, err := os.read_entire_file(cue_path, context.temp_allocator)
 	if err != nil || len(data) > 64 * 1024 do return
-	bin_name, mode: string
+	files := cue_file_names(string(data))
+	if len(files) == 0 do return
+	bin_name := files[0]
+	mode: string
 	it := string(data)
 	for line in strings.split_lines_iterator(&it) {
-		l := strings.trim_space(line)
-		up := strings.to_upper(l, context.temp_allocator)
-		if bin_name == "" && strings.has_prefix(up, "FILE ") {
-			if a := strings.index_byte(l, '"'); a >= 0 {
-				if b := strings.last_index_byte(l, '"'); b > a do bin_name = l[a + 1:b]
-			} else {
-				fields := strings.fields(l, context.temp_allocator)
-				if len(fields) >= 2 do bin_name = fields[1]
-			}
-		} else if mode == "" && strings.has_prefix(up, "TRACK ") {
+		up := strings.to_upper(strings.trim_space(line), context.temp_allocator)
+		if strings.has_prefix(up, "TRACK ") {
 			fields := strings.fields(up, context.temp_allocator)
 			if len(fields) >= 3 do mode = fields[2]
+			break
 		}
 	}
-	if bin_name == "" do return
 	cb := Cue_Bin{sector = 2352, user = 24}
 	switch mode {
 	case "MODE2/2352": // PS1 discs (XA)
@@ -176,6 +171,23 @@ cue_ps1_serial :: proc(cue_path: string) -> (serial: string, ok: bool) {
 		if strings.trim_space(k) == "BOOT" do return serial_from_boot(v), true
 	}
 	return
+}
+
+// The FILE entries of a .cue, in order (temp): `FILE "Game (Track 1).bin" BINARY`.
+cue_file_names :: proc(cue_text: string) -> []string {
+	names := make([dynamic]string, context.temp_allocator)
+	it := cue_text
+	for line in strings.split_lines_iterator(&it) {
+		l := strings.trim_space(line)
+		if !strings.has_prefix(strings.to_upper(l, context.temp_allocator), "FILE ") do continue
+		if a := strings.index_byte(l, '"'); a >= 0 {
+			if b := strings.last_index_byte(l, '"'); b > a do append(&names, l[a + 1:b])
+		} else {
+			fields := strings.fields(l, context.temp_allocator)
+			if len(fields) >= 2 do append(&names, fields[1])
+		}
+	}
+	return names[:]
 }
 
 rom_crc :: proc(fi: os.File_Info) -> string {

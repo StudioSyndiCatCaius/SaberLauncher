@@ -139,9 +139,38 @@ dc_prepare :: proc(g: ^Game) -> (cue_path: string, ok: bool, err: string) {
 	}
 	os.make_directory_all(dir)
 
-	if _, opened := cd_open(letter); !opened do return "", false, fmt.tprintf("Couldn't read the disc in %c:", letter)
-	defer cd_close()
-	tracks := dc_layout(cd.handle, &cd.toc)
+	h, opened := disc_open(letter)
+	if !opened do return "", false, fmt.tprintf("Couldn't read the disc in %c:", letter)
+	defer disc_close(h)
+	Draw :: struct {
+		g:    ^Game,
+		last: f64,
+	}
+	draw := Draw{g = g, last = -1}
+	progress :: proc(data: rawptr, done, total: int) -> bool {
+		d := (^Draw)(data)
+		now := rl.GetTime()
+		if now - d.last <= 0.05 do return true
+		d.last = now
+		return dc_draw_progress(d.g, f32(done) / f32(max(total, 1)))
+	}
+	ripped, rip_ok, rip_err := dc_rip(h, dir, progress, &draw, strict = false)
+	if !rip_ok do return "", false, rip_err
+	delete(ripped)
+	_ = os.write_entire_file(path_join({dir, "complete"}), "")
+	retro_log_line("[dc] copied %c: to %s", letter, dir)
+	return cue, true, ""
+}
+
+// false from a Rip_Progress cancels the copy.
+Rip_Progress :: #type proc(data: rawptr, done, total: int) -> bool
+
+// Copies a Dreamcast CD-R into `dir` as trackNN.bin files + disc.cue; returns the .cue path.
+// strict: an unreadable sector fails the copy (installs) instead of being zero-filled (play cache).
+dc_rip :: proc(h: Disc_Handle, dir: string, progress: Rip_Progress, data: rawptr, strict: bool) -> (cue_path: string, ok: bool, err: string) {
+	toc, toc_ok := cd_read_toc(h)
+	if !toc_ok do return "", false, "Couldn't read the disc's table of contents"
+	tracks := dc_layout(h, &toc)
 	defer delete(tracks)
 	total := 0
 	for t in tracks do total += t.length
@@ -153,31 +182,30 @@ dc_prepare :: proc(g: ^Game) -> (cue_path: string, ok: bool, err: string) {
 	done := 0
 	buf := make([]u8, DC_RIP_CHUNK * RAW_SECTOR)
 	defer delete(buf)
-	last_draw := -1.0
 	for &t in tracks {
 		name := fmt.tprintf("track%02d.bin", t.number)
 		f, ferr := os.open(path_join({dir, name}), {.Write, .Create, .Trunc})
 		if ferr != nil do return "", false, "Couldn't write the disc copy (disk full?)"
 		for s := 0; s < t.length; {
 			n := min(DC_RIP_CHUNK, t.length - s)
-			got := cd_read_bin(cd.gen, i64(t.lba + s) * RAW_SECTOR, buf[:n * RAW_SECTOR])
-			if got != i64(n * RAW_SECTOR) {
-				os.close(f)
-				return "", false, "The disc was removed while copying"
+			chunk := buf[:n * RAW_SECTOR]
+			for k := 0; k < n; k += CACHE_BLOCK {
+				m := min(CACHE_BLOCK, n - k)
+				if bad := cd_read_sectors(h, &toc, false, t.lba + s + k, m, chunk[k * RAW_SECTOR:]); bad >= 0 && strict {
+					os.close(f)
+					return "", false, fmt.tprintf("Couldn't read sector %d (scratched disc, or it was removed)", bad)
+				}
 			}
 			if s == 0 && !t.audio do t.mode = buf[15] == 1 ? 1 : 2
-			if _, werr := os.write(f, buf[:n * RAW_SECTOR]); werr != nil {
+			if _, werr := os.write(f, chunk); werr != nil {
 				os.close(f)
 				return "", false, "Couldn't write the disc copy (disk full?)"
 			}
 			s += n
 			done += n
-			if now := rl.GetTime(); now - last_draw > 0.05 {
-				last_draw = now
-				if !dc_draw_progress(g, f32(done) / f32(max(total, 1))) {
-					os.close(f)
-					return "", false, "Cancelled"
-				}
+			if !progress(data, done, total) {
+				os.close(f)
+				return "", false, "Cancelled"
 			}
 		}
 		os.close(f)
@@ -189,10 +217,9 @@ dc_prepare :: proc(g: ^Game) -> (cue_path: string, ok: bool, err: string) {
 		fmt.sbprintf(&sb, "  TRACK %02d %s\r\n", t.number, t.audio ? "AUDIO" : t.mode == 1 ? "MODE1/2352" : "MODE2/2352")
 		fmt.sbprintf(&sb, "    INDEX 01 00:00:00\r\n")
 	}
-	if os.write_entire_file(cue, strings.to_string(sb)) != nil do return "", false, "Couldn't write the disc copy"
-	_ = os.write_entire_file(path_join({dir, "complete"}), "")
-	retro_log_line("[dc] copied %d sectors of %c: to %s", total, letter, dir)
-	return cue, true, ""
+	cue_path = path_join({dir, "disc.cue"})
+	if os.write_entire_file(cue_path, strings.to_string(sb)) != nil do return "", false, "Couldn't write the disc copy"
+	return strings.clone(cue_path), true, ""
 }
 
 // One frame of the copy screen. false = the player cancelled.
