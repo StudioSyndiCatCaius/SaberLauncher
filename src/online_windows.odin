@@ -16,6 +16,7 @@ InternetCloseHandle: proc "system" (h: HINTERNET) -> win.BOOL
 HttpQueryInfoW: proc "system" (h: HINTERNET, level: u32, buf: rawptr, len: ^u32, index: ^u32) -> win.BOOL
 
 HTTP_QUERY_STATUS_CODE :: 19
+HTTP_QUERY_CONTENT_LENGTH :: 5
 HTTP_QUERY_FLAG_NUMBER :: 0x20000000
 INTERNET_FLAG_RELOAD :: 0x80000000
 INTERNET_FLAG_NO_UI :: 0x00000200
@@ -58,6 +59,11 @@ http_fetch :: proc(r: ^Http_Request, body: ^[dynamic]u8) -> bool {
 	sz := u32(size_of(status))
 	HttpQueryInfoW(h, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &status, &sz, nil)
 	r.status = int(status)
+	length: u32
+	sz = u32(size_of(length))
+	if HttpQueryInfoW(h, HTTP_QUERY_CONTENT_LENGTH | HTTP_QUERY_FLAG_NUMBER, &length, &sz, nil) {
+		sync.atomic_store(&r.total, i64(length))
+	}
 
 	buf: [16 * 1024]u8
 	for {
@@ -72,6 +78,7 @@ http_fetch :: proc(r: ^Http_Request, body: ^[dynamic]u8) -> bool {
 		}
 		if got == 0 do break
 		append(body, ..buf[:got])
+		sync.atomic_store(&r.got, i64(len(body)))
 		if len(body) > HTTP_MAX_BYTES {
 			r.err = strings.clone("Response too large")
 			return false

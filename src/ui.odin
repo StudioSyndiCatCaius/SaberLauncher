@@ -297,7 +297,16 @@ draw_footer :: proc(w, h: f32) {
 	case app.dropdown_open:
 		draw_hints(w, h, []Hint{{"A", "Choose"}, {"B", "Close"}})
 	case app.screen == .Plugins && app.plugin_page == 1:
-		draw_hints(w, h, []Hint{{"A", store.sel == 0 ? "Refresh" : "Download"}, {"B", "Plugins"}, {"Y", "Installed"}, {"LB / RB", "Menus"}})
+		draw_hints(w, h, []Hint{{"A", store.sel[.Plugin] == 0 ? "Refresh" : "Download"}, {"B", "Plugins"}, {"Y", "Installed"}, {"LB / RB", "Menus"}})
+		return
+	case app.screen == .Apps && app.apps_page == 1:
+		sp := app_store_selected()
+		a_label := sp == nil ? "Refresh" : app_store_action_label(sp)
+		if sp != nil && app_store_installed(sp) {
+			draw_hints(w, h, []Hint{{"A", a_label}, {"X", "Remove"}, {"B", "Apps"}, {"Y", "Installed"}, {"LB / RB", "Menus"}})
+		} else {
+			draw_hints(w, h, []Hint{{"A", a_label}, {"B", "Apps"}, {"Y", "Installed"}, {"LB / RB", "Menus"}})
+		}
 		return
 	case app.screen == .Plugins:
 		if app.plugin_focus == 1 {
@@ -314,6 +323,8 @@ draw_footer :: proc(w, h: f32) {
 		draw_hints(w, h, []Hint{{"A", "Play"}, {"X", "Actions"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
 	case app.screen == .Library:
 		draw_hints(w, h, []Hint{{"A", "Play"}, {"X", "Actions"}, {"B", "Home"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}})
+	case app.screen == .Apps:
+		draw_hints(w, h, []Hint{{"A", "Open"}, {"X", "Autostart"}, {"B", "Home"}, {"Y", "Get Apps"}, {"LB / RB", "Menus"}})
 	case:
 		draw_hints(w, h, []Hint{{"A", app.screen == .Apps ? "Open" : "Play"}, {"B", "Home"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}})
 	}
@@ -372,7 +383,7 @@ card_for :: proc(s: Screen, i: int) -> Card {
 		return {m.thumb, m.has_thumb, m.title, "VIDEO", false, "", "", .Other, ""}
 	case .Apps:
 		a := &app.shell_apps[i]
-		return {a.icon, a.has_icon, a.title, "APP", true, "", "", .Other, ""}
+		return {a.icon, a.has_icon, a.title, "APP", true, app_is_autostart(a) ? "Autostart" : "", "", .Other, ""}
 	}
 	return {}
 }
@@ -604,14 +615,12 @@ draw_movies :: proc(w, h: f32) {
 	draw_grid_page(.Movies, "MOVIES", "No movies yet. Drop .mp4 / .mkv / .avi files into APP/movies.", w, h)
 }
 
-draw_apps :: proc(w, h: f32) {
-	draw_grid_page(.Apps, "APPS", "No apps yet. Add a .toml (name, exe, exe_args) to APP/apps.", w, h)
-}
 
 draw_grid_page :: proc(s: Screen, heading, empty: string, w, h: f32) {
 	top := f32(HEADER_H + 28)
 	n := grid_count(s)
-	draw_heading(heading, n, top)
+	if s == .Apps do draw_apps_tabs(top)
+	else do draw_heading(heading, n, top)
 	grid_top := top + 36
 	bottom := h - FOOTER_H - 20
 	left_w := math.round(w * 0.6)
@@ -722,6 +731,9 @@ draw_detail :: proc(s: Screen, i: int, r: rl.Rectangle) {
 		} else {
 			kv("Program", filepath.base(a.exe), x, &y, iw)
 			kv("Args", strings.trim_space(a.args), x, &y, iw)
+		}
+		if app_is_autostart(a) {
+			kv("Autostart", app.settings.launch_mode == .Standalone ? "On (needs Autorun or Shellrun)" : "On sign-in", x, &y, iw)
 		}
 	}
 

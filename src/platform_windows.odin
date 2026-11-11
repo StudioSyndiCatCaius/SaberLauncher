@@ -39,6 +39,9 @@ instance_mutex: win.HANDLE
 
 // Starts a fresh Saber; call last, after everything is shut down.
 restart_self :: proc() -> bool {
+	if app.supervised {
+		win.ExitProcess(SUPERVISED_RESTART) // the supervisor starts the new copy
+	}
 	if instance_mutex != nil { // last handle closed = mutex gone, so the new copy passes single_instance
 		win.CloseHandle(instance_mutex)
 		instance_mutex = nil

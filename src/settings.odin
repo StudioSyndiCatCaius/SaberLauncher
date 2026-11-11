@@ -59,10 +59,12 @@ Settings :: struct {
 	ignore_drives: u32, // bit per letter (A = bit 0): fixed drives skipped by the game scan
 	plugin_dirs: string, // extra plugin folders, ';'-separated, relative to the exe; APP/plugins always loads
 	save_mode:   Save_Mode,
+	autostart_app: string, // apps .toml file name launched once per sign-in (Autorun / Shell modes)
+	shell_startup: bool, // as the account shell, start the sign-in programs Explorer would (Run keys, Startup folders)
 }
 
 settings_load :: proc(path: string) -> Settings {
-	s := Settings{volume = 0.7, font = "Arial", save_mode = .Suspend}
+	s := Settings{volume = 0.7, font = "Arial", save_mode = .Suspend, shell_startup = true}
 	if data, err := os.read_entire_file(path, context.allocator); err == nil {
 		defer delete(data)
 		text := string(data)
@@ -90,6 +92,12 @@ settings_load :: proc(path: string) -> Settings {
 		if v, found := ini_get(text, "save_states"); found {
 			for key, m in SAVE_MODE_KEYS do if strings.equal_fold(v, key) do s.save_mode = m
 		}
+		if v, found := ini_get(text, "shell_startup"); found {
+			s.shell_startup = v == "1" || strings.equal_fold(v, "true")
+		}
+		if v, found := ini_get(text, "autostart_app"); found {
+			s.autostart_app = strings.clone(v)
+		}
 		if v, found := ini_get(text, "plugins_off"); found {
 			s.plugins_off = strings.clone(v)
 		}
@@ -106,7 +114,7 @@ settings_load :: proc(path: string) -> Settings {
 
 settings_save :: proc(path: string, s: Settings) {
 	text := fmt.tprintf(
-		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\nonline=%d\nplugins_off=%s\nplugin_dirs=%s\nignore_drives=%s\nsave_states=%s\n",
+		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\nonline=%d\nplugins_off=%s\nplugin_dirs=%s\nignore_drives=%s\nsave_states=%s\nshell_startup=%d\nautostart_app=%s\n",
 		LAUNCH_MODE_KEYS[s.launch_mode],
 		s.ui_theme,
 		s.bkg,
@@ -118,6 +126,8 @@ settings_save :: proc(path: string, s: Settings) {
 		s.plugin_dirs,
 		drive_letters(s.ignore_drives),
 		SAVE_MODE_KEYS[s.save_mode],
+		int(s.shell_startup),
+		s.autostart_app,
 	)
 	_ = os.write_entire_file(path, text)
 }

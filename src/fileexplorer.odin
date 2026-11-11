@@ -217,6 +217,7 @@ explorer_activate :: proc(i: int) {
 explorer_play_sound :: proc(i: int) {
 	explorer_stop_sound()
 	path := explorer_path(i)
+	crash_note("explorer: loading sound %s", path)
 	explorer.music = rl.LoadMusicStream(strings.clone_to_cstring(path, context.temp_allocator))
 	if !rl.IsMusicValid(explorer.music) {
 		set_status("Couldn't play %s", explorer.entries[i].name)
@@ -233,10 +234,14 @@ explorer_play_sound :: proc(i: int) {
 
 explorer_stop_sound :: proc() {
 	if !explorer.has_music do return
+	crash_note("explorer: stopping sound preview")
 	rl.StopMusicStream(explorer.music)
+	crash_note("explorer: unloading sound preview")
 	rl.UnloadMusicStream(explorer.music)
 	explorer.has_music = false
+	crash_note("explorer: resuming menu music")
 	theme_resume_after_game()
+	crash_note("explorer: sound preview stopped")
 }
 
 // Copies a picture into Saber's backgrounds or a sound into its music.

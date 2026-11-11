@@ -28,6 +28,7 @@ App :: struct {
 	settings_path:   string,
 	settings:        Settings,
 	in_shell:        bool, // started by Winlogon in place of Explorer
+	supervised:      bool, // child of the shell supervisor (crash_windows.odin)
 	drive_games:     [dynamic]Game,
 	library_games:   [dynamic]Game,
 	shell_apps:      [dynamic]Shell_App,
@@ -40,6 +41,7 @@ App :: struct {
 	plugin_action:   int,
 	plugin_focus:    int, // 0 = plugin list, 1 = actions
 	plugin_page:     int, // 0 = installed, 1 = GET PLUGINS (store)
+	apps_page:       int, // 0 = app grid, 1 = GET APPS (store)
 	plugin_delete_armed: bool, // "Delete Plugin" pressed once
 	scroll:          [Screen]f32,
 	status_buf:      [256]u8,
@@ -85,9 +87,13 @@ TARGET_FPS :: 60
 STATUS_SECONDS :: 6.0
 
 main :: proc() {
-	if !single_instance() {
+	if shell_supervise() {
+		return // this process was the shell supervisor; the real Saber ran as its child
+	}
+	if !app.supervised && !single_instance() { // a supervised child: the supervisor holds the mutex
 		return
 	}
+	crash_init()
 	app.exe_dir = exe_directory()
 	if app.exe_dir != "" {
 		_ = os.set_working_directory(app.exe_dir)
@@ -131,6 +137,7 @@ main :: proc() {
 	draw_splash("Scanning drives and library")
 	rescan_all()
 	play_disc_from_args()
+	autostart_app_on_login()
 
 	for !app.quit {
 		if rl.WindowShouldClose() && !app.in_shell {
@@ -147,6 +154,7 @@ main :: proc() {
 		}
 		input_poll()
 		online_update()
+		app_store_update()
 		update_poll()
 		handle_app_input()
 
@@ -198,6 +206,7 @@ main :: proc() {
 	unload_all_games()
 	unload_all_apps()
 	unload_all_movies()
+	app_store_shutdown()
 	online_shutdown()
 	plugins_shutdown()
 	font_shutdown()
@@ -470,6 +479,11 @@ handle_app_input :: proc() {
 		eat_input()
 		return
 	}
+	if input.cancel && app.screen == .Apps && app.apps_page == 1 {
+		apps_toggle_page()
+		eat_input()
+		return
+	}
 	if input.cancel {
 		if app.screen != .Main {
 			sfx_back()
@@ -480,6 +494,8 @@ handle_app_input :: proc() {
 	}
 	if input.extra && app.screen == .Plugins {
 		plugins_toggle_page()
+	} else if input.extra && app.screen == .Apps {
+		apps_toggle_page()
 	} else if input.extra {
 		rescan_all(drives_async = true)
 		set_status("Rescanned drives, library, movies and apps")
@@ -503,12 +519,18 @@ handle_app_input :: proc() {
 			}
 		}
 	case .Library, .Movies, .Apps:
+		if app.screen == .Apps && app.apps_page == 1 {
+			handle_app_store_input()
+			break
+		}
 		sel := grid_selection(app.screen)
 		nav_grid(sel, grid_count(app.screen), grid_layout(app.screen).cols)
 		if input.confirm {
 			activate_item(app.screen, sel^)
 		} else if input.action && app.screen == .Library {
 			game_menu_open(.Library, sel^)
+		} else if input.action && app.screen == .Apps && len(app.shell_apps) > 0 {
+			toggle_autostart_app(&app.shell_apps[sel^])
 		}
 	case .Plugins:
 		handle_plugins_input()

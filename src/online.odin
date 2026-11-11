@@ -57,6 +57,8 @@ Http_Request :: struct {
 	body:     []u8,
 	err:      string,
 	done:     bool, // atomic
+	got:      i64,  // atomic: bytes received so far
+	total:    i64,  // atomic: Content-Length, 0 = unknown
 	worker:   ^thread.Thread,
 }
 
@@ -83,11 +85,13 @@ http_start :: proc(L: ^lua_State, url, path: string, callback: c.int) {
 }
 
 // Same as http_start, for Odin code: on_done runs on the main loop (r is freed afterwards).
-http_start_native :: proc(url, path: string, on_done: proc(r: ^Http_Request), user: [2]int) {
+// The request stays valid until on_done returns (progress: atomic r.got / r.total).
+http_start_native :: proc(url, path: string, on_done: proc(r: ^Http_Request), user: [2]int) -> ^Http_Request {
 	http_start(nil, url, path, LUA_NOREF)
 	r := http_requests[len(http_requests) - 1]
 	r.on_done = on_done
 	r.user = user
+	return r
 }
 
 // Online Mode went off (or was toggled) since the request started.

@@ -52,8 +52,12 @@ detect_launch_mode :: proc() -> Launch_Mode {
 	return .Standalone
 }
 
+// Dev builds can pretend to be the shell: odin build src -define:SABER_FORCE_SHELL=true
+SABER_FORCE_SHELL :: #config(SABER_FORCE_SHELL, false)
+
 // True when Saber was started by Winlogon instead of Explorer.
 is_acting_as_shell :: proc() -> bool {
+	if SABER_FORCE_SHELL do return true
 	return GetShellWindow != nil && GetShellWindow() == nil
 }
 

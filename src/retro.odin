@@ -535,11 +535,16 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	retro_load_overrides()
 	defer retro_free()
 
+	crash_note("retro: loading core %s", core_path)
 	if _, loaded := dynlib.initialize_symbols(&retro.core, core_path, "retro_", "__handle"); !loaded {
 		cd_close()
 		return false, fmt.tprintf("Couldn't load %s", core_path)
 	}
-	defer dynlib.unload_library(retro.core.__handle)
+	defer {
+		crash_note("retro: unloading core %s", core_path)
+		dynlib.unload_library(retro.core.__handle)
+		crash_note("retro: back in the menu after %s", core_path)
+	}
 
 	// RetroArch's order: environment, init, then the other callbacks. Some cores (Mesen)
 	// only create the objects those setters write to in retro_init.
@@ -592,21 +597,29 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	rl.SetTargetFPS(0) // paced by audio + vsync instead
 	guide_reset()
 	started := rl.GetTime()
+	crash_note("retro: running %s", g.title)
 	retro_run_loop(g)
 	g.playtime_seconds += int(rl.GetTime() - started)
 	g.suspend_checked = 0
 
+	crash_note("retro: quit, saving memory card")
 	retro_sram_save()
+	crash_note("retro: quit, closing audio stream")
 	retro_audio_close()
 	retro_hw_begin()
+	crash_note("retro: quit, core context_destroy")
 	if rhw.ready && rhw.cb.context_destroy != nil do rhw.cb.context_destroy()
 	rhw.cb.context_destroy = nil
+	crash_note("retro: quit, core unload_game")
 	retro.core.unload_game()
+	crash_note("retro: quit, core deinit")
 	retro.core.deinit()
 	retro_hw_end()
+	crash_note("retro: quit, destroying GL context")
 	retro_hw_stop()
 	cd_close()
 	rl.SetTargetFPS(TARGET_FPS)
+	crash_note("retro: quit, resuming menu music")
 	theme_resume_after_game()
 	eat_input()
 	return true, ""

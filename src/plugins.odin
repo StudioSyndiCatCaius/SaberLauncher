@@ -183,6 +183,8 @@ plugin_load :: proc(path, file, dir: string) {
 	lua_register(L, "Http_Get", lua_http_get)
 	lua_register(L, "Http_Download", lua_http_download)
 	lua_register(L, "Http_Pending", lua_http_pending)
+	lua_register(L, "Register_App", lua_register_app)
+	lua_register(L, "Unregister_App", lua_unregister_app)
 
 	cpath := strings.clone_to_cstring(path, context.temp_allocator)
 	if luaL_loadfilex(L, cpath, nil) != LUA_OK || lua_pcall(L, 0, 1, 0) != LUA_OK {

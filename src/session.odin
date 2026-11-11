@@ -29,6 +29,7 @@ Session :: struct {
 	windowless_at: f64,
 	gone_at:       f64,
 	focus_tries:   int,
+	refocus_at:    f64,
 	detached:      bool, // user chose "Return to Saber" while it keeps running
 }
 
@@ -39,6 +40,7 @@ EXIT_GRACE :: 0.7
 APP_WINDOWLESS_SEC :: 4.0
 APP_NEVER_SHOWN_SEC :: 15.0
 FOCUS_WINDOW_SEC :: 10.0
+REFOCUS_SEC :: 1.0
 
 // Blocks until the launched program (and anything it spawned) is gone, or the
 // user leaves it from the Home-button overlay. Returns seconds spent, and whether
@@ -124,6 +126,12 @@ session_tick :: proc(s: ^Session, now: f64) -> bool {
 		fg := foreground_window()
 		if now - s.started < FOCUS_WINDOW_SEC && !session_owns_window(s, fg) && s.focus_tries < 20 {
 			s.focus_tries += 1
+			force_foreground(hwnd)
+		} else if app.in_shell && s.kind == .Game && (fg == nil || fg == native_hwnd()) && now >= s.refocus_at {
+			// No taskbar to click back into the game: when focus fell to nobody (a launcher
+			// or popup closed) or to Saber's hidden window, hand it back. A background game
+			// gets throttled by Windows, and many pause or drop frames when unfocused.
+			s.refocus_at = now + REFOCUS_SEC
 			force_foreground(hwnd)
 		}
 	} else if s.kind == .App {

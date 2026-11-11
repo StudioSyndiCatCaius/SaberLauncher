@@ -21,7 +21,7 @@ plugins_toggle_page :: proc() {
 
 handle_plugins_input :: proc() {
 	if app.plugin_page == 1 {
-		handle_store_input()
+		handle_store_input(.Plugin)
 		return
 	}
 	n := len(plugins)
@@ -151,7 +151,7 @@ draw_plugins :: proc(w, h: f32) {
 	y0 := top + 36
 	bottom := h - FOOTER_H - 24
 	if app.plugin_page == 1 {
-		draw_store(w, h, y0, bottom)
+		draw_store(.Plugin, w, h, y0, bottom)
 		return
 	}
 	if len(plugins) == 0 {
@@ -308,18 +308,22 @@ draw_plugins :: proc(w, h: f32) {
 
 // "PLUGINS 4   GET PLUGINS": the current page is accent colored; clicking the other one switches.
 draw_plugin_tabs :: proc(y: f32) {
-	labels := [2]string{"PLUGINS", "GET PLUGINS"}
+	if draw_page_tabs(y, {fmt.tprintf("PLUGINS  %d", len(plugins)), "GET PLUGINS"}, app.plugin_page) do plugins_toggle_page()
+}
+
+// Two page tabs + the Y glyph; true when the other tab was clicked.
+draw_page_tabs :: proc(y: f32, labels: [2]string, page: int) -> (switch_page: bool) {
 	x := f32(PAD)
-	for label, i in labels {
-		text := i == 0 ? fmt.tprintf("%s  %d", label, len(plugins)) : label
+	for text, i in labels {
 		tw := measure_t(text, 15)
-		col := i == app.plugin_page ? COL_ACCENT : COL_MUTED
+		col := i == page ? COL_ACCENT : COL_MUTED
 		draw_t(text, x, y, 15, col)
-		if i == app.plugin_page do rl.DrawRectangleRounded({x, y + 22, tw, 2}, 1, 4, COL_ACCENT)
-		if i != app.plugin_page && mouse_over({x - 6, y - 6, tw + 12, 30}) && rl.IsMouseButtonPressed(.LEFT) do plugins_toggle_page()
+		if i == page do rl.DrawRectangleRounded({x, y + 22, tw, 2}, 1, 4, COL_ACCENT)
+		if i != page && mouse_over({x - 6, y - 6, tw + 12, 30}) && rl.IsMouseButtonPressed(.LEFT) do switch_page = true
 		x += tw + 36
 	}
 	draw_glyph("Y", x + 4, y + 9)
+	return
 }
 
 // Checkbox at the right end of a row; returns true when the row is clicked.
