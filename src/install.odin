@@ -618,6 +618,7 @@ Game_Menu_Row :: enum {
 	Play,
 	Install,
 	Cancel_Install,
+	Browse, // file explorer on the card's drive (fileexplorer.odin)
 	Plugin, // a plugin's game_actions row (Game_Menu_Item.action)
 	Close,
 }
@@ -672,6 +673,7 @@ game_menu_rows :: proc(g: ^Game) -> []Game_Menu_Item {
 	} else if _, can, why := install_kind(g); can || why != "" {
 		append(&rows, Game_Menu_Item{row = .Install})
 	}
+	if g.from_drive && g.drive_letter >= 'A' && g.drive_letter <= 'Z' do append(&rows, Game_Menu_Item{row = .Browse})
 	for _, i in plugin_game_actions do append(&rows, Game_Menu_Item{row = .Plugin, action = i})
 	append(&rows, Game_Menu_Item{row = .Close})
 	return rows[:]
@@ -688,6 +690,8 @@ game_menu_label :: proc(g: ^Game, item: Game_Menu_Item) -> string {
 		total := sync.atomic_load(&install.total_bytes)
 		if total <= 0 do return "Cancel Install"
 		return fmt.tprintf("Cancel Install (%d%%)", int(f64(sync.atomic_load(&install.done_bytes)) * 100 / f64(total)))
+	case .Browse:
+		return "Browse Files"
 	case .Plugin:
 		return plugin_game_actions[item.action].name
 	case .Close:
@@ -781,6 +785,9 @@ game_menu_choose :: proc(g: ^Game, item: Game_Menu_Item) {
 		install_cancel()
 		set_status("Cancelling the install of %s…", install.title)
 		game_menu_close()
+	case .Browse:
+		game_menu.open = false
+		explorer_open(g)
 	case .Plugin:
 		game_menu.open = false
 		sfx_click()

@@ -288,6 +288,8 @@ draw_footer :: proc(w, h: f32) {
 	switch {
 	case plugin_dialog_open():
 		// the dialog draws its own hints
+	case explorer.open:
+		explorer_hints(w, h)
 	case app.power_open, game_menu.open, bios_menu.open:
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Back"}})
 	case drives_menu.open:

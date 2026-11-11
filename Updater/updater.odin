@@ -90,15 +90,20 @@ run :: proc() -> bool {
 	remote_version := strings.trim_prefix(release.tag_name, "v")
 
 	fmt.printfln("Installed: %s   Latest: %s", local_version, remote_version)
-	if compare_versions(remote_version, local_version) <= 0 && !has_arg("--force") {
+	forced := has_arg("--force")
+	if compare_versions(remote_version, local_version) <= 0 && !forced {
 		fmt.println("Saber is up to date.")
-		return true
+		// Interactive runs may still reinstall the same (or older) release.
+		if has_arg("--check") || has_arg("-y") || !confirm_no(fmt.tprintf("Reinstall %s anyway? [y/N] ", remote_version)) {
+			return true
+		}
+		forced = true
 	}
 	if has_arg("--check") {
 		update_available = true
 		return true
 	}
-	if !has_arg("-y") && !confirm(fmt.tprintf("Update to %s? [Y/n] ", remote_version)) {
+	if !forced && !has_arg("-y") && !confirm(fmt.tprintf("Update to %s? [Y/n] ", remote_version)) {
 		return true
 	}
 
@@ -260,6 +265,15 @@ confirm :: proc(prompt: string) -> bool {
 	n, _ := os.read(os.stdin, buf[:])
 	answer := strings.trim_space(string(buf[:n]))
 	return answer == "" || answer == "y" || answer == "Y"
+}
+
+// Like confirm, but defaults to No.
+confirm_no :: proc(prompt: string) -> bool {
+	fmt.print(prompt)
+	buf: [16]byte
+	n, _ := os.read(os.stdin, buf[:])
+	answer := strings.trim_space(string(buf[:n]))
+	return answer == "y" || answer == "Y"
 }
 
 join :: proc(a, b: string) -> string {

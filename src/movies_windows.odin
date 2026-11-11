@@ -224,3 +224,8 @@ movie_player :: proc() -> (exe, args_prefix, name: string, ok: bool) {
 	}
 	return "", "", "", false
 }
+
+// Worker threads that call shell_image (fileexplorer.odin thumbnails) need their own COM apartment.
+thumbs_com_init :: proc() {
+	win.CoInitializeEx(nil, .APARTMENTTHREADED)
+}

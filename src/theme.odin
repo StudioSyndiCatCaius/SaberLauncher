@@ -348,7 +348,7 @@ hover_enter :: proc(id: string) -> bool {
 }
 
 theme_update :: proc() {
-	if theme.has_music {
+	if theme.has_music && !explorer.has_music {
 		rl.UpdateMusicStream(theme.music)
 		if !rl.IsMusicStreamPlaying(theme.music) {
 			rl.PlayMusicStream(theme.music)

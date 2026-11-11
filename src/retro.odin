@@ -45,6 +45,7 @@ Retro_Platform :: enum {
 	A2600,
 	GC,  // GameCube / Wii: image files only (.iso/.gcm/.ciso/.rvz/.wbfs...), no drive reading
 	WII,
+	PS3, // decrypted disc images (.iso), played by RPCS3
 }
 
 RETRO_PLATFORM_NAME := [Retro_Platform]string {
@@ -67,6 +68,7 @@ RETRO_PLATFORM_NAME := [Retro_Platform]string {
 	.A2600 = "Atari 2600",
 	.GC    = "GameCube",
 	.WII   = "Wii",
+	.PS3   = "PlayStation 3",
 }
 RETRO_PLATFORM_DIR := [Retro_Platform]string {
 	.None  = "",
@@ -88,6 +90,7 @@ RETRO_PLATFORM_DIR := [Retro_Platform]string {
 	.A2600 = "a2600",
 	.GC    = "gc",
 	.WII   = "wii",
+	.PS3   = "ps3",
 }
 
 // First core found wins.
@@ -111,11 +114,16 @@ RETRO_CORES := [Retro_Platform][]string {
 	.A2600 = {"stella_libretro.dll", "stella2014_libretro.dll"},
 	.GC    = {"dolphin_libretro.dll"},
 	.WII   = {"dolphin_libretro.dll"},
+	.PS3   = {"rpcs3_libretro.dll"},
 }
 
 // Saber only presents software frames, so make cores pick their software renderer.
+// Dual-screen cores default to side-by-side (Saber is always landscape).
 RETRO_OPTION_DEFAULTS := [?][2]string {
 	{"swanstation_GPU_Renderer", "Software"},
+	{"melonds_screen_layout1", "left-right"}, // melonDS DS: "Left and Right"
+	{"melonds_screen_layout", "Left/Right"},  // melonDS
+	{"desmume_screens_layout", "left/right"},
 }
 
 Retro_Option :: struct {
@@ -504,6 +512,11 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	os.make_directory(retro_dir("saves"))
 	os.make_directory(saves)
 	os.make_directory(retro_dir("system"))
+	if g.platform == .PS3 {
+		// RPCS3 installs the PS3 firmware from system/rpcs3/firmware/PS3UPDAT.PUP on first start
+		os.make_directory(retro_dir("system", "rpcs3"))
+		os.make_directory(retro_dir("system", "rpcs3", "firmware"))
+	}
 	retro.system_dir_c = strings.clone_to_cstring(retro_dir("system"))
 	retro.saves_dir_c = strings.clone_to_cstring(saves)
 	retro.assets_dir_c = strings.clone_to_cstring(retro_dir())
@@ -557,6 +570,7 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	if !retro.core.load_game(&info) {
 		retro.core.deinit()
 		cd_close()
+		if g.platform == .PS3 do return false, "RPCS3 couldn't load this game (needs PS3UPDAT.PUP in APP\\libretro\\system\\rpcs3\\firmware)"
 		if is_rom do return false, "The emulator couldn't load this game (missing BIOS in APP\\libretro\\system?)"
 		bios_dir := g.platform == .PS2 ? "system\\pcsx2\\bios" : "system"
 		return false, fmt.tprintf("The emulator couldn't boot this disc (missing BIOS in APP\\libretro\\%s?)", bios_dir)

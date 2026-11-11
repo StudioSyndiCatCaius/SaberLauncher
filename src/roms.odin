@@ -66,6 +66,13 @@ scan_rom_dir :: proc(out: ^[dynamic]Game, dir, label: string, found: ^int) {
 			}
 			continue
 		}
+		if ext == ".iso" {
+			if g, ok := ps3_iso_game(fi, label); ok {
+				append(out, g)
+				found^ += 1
+				continue
+			}
+		}
 		if is_dolphin_ext(ext) {
 			if platform, id, ok := dolphin_image_id(fi.fullpath, ext); ok {
 				// the game ID is the serial; set before plugins_apply runs inside rom_game
@@ -130,6 +137,28 @@ dolphin_image_id :: proc(path, ext: string) -> (platform: Retro_Platform, id: st
 	}
 	for c in disc[:6] do if !(c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') do return platform, "", true
 	return platform, strings.clone(string(disc[:6]), context.temp_allocator), true
+}
+
+// A decrypted PS3 disc image: PS3_DISC.SFB in the ISO9660 root, title + serial from
+// PS3_GAME/PARAM.SFO (TITLE, TITLE_ID "BLUS31426" -> "BLUS-31426"). Played by RPCS3.
+ps3_iso_game :: proc(fi: os.File_Info, label: string) -> (Game, bool) {
+	f, err := os.open(fi.fullpath)
+	if err != nil do return {}, false
+	defer os.close(f)
+	read :: proc(ctx: rawptr, lba: u32, buf: []byte) -> bool {
+		n, e := os.read_at((^os.File)(ctx), buf, i64(lba) * ISO_SECTOR)
+		return e == nil && n == len(buf)
+	}
+	if _, ok := iso_find_file(read, f, "PS3_DISC.SFB", 64 * 1024, context.temp_allocator); !ok do return {}, false
+	sfo, _ := iso_find_file(read, f, "PS3_GAME/PARAM.SFO", 256 * 1024, context.temp_allocator)
+	serial := sfo_string(sfo, "TITLE_ID")
+	if len(serial) == 9 do serial = fmt.tprintf("%s-%s", serial[:4], serial[4:])
+	g := rom_game(fi, label, .PS3, serial)
+	if t := sfo_string(sfo, "TITLE"); t != "" {
+		delete(g.title)
+		g.title = strings.clone(t)
+	}
+	return g, true
 }
 
 // Mega Drive ROMs carry "SEGA" at 0x100 (some pad it with a space); Markdown files never do.

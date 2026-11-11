@@ -11,6 +11,8 @@ import "core:os"
 import "core:path/filepath"
 import "core:slice"
 import "core:strings"
+import "core:sync"
+import "core:thread"
 import rl "vendor:raylib"
 
 Bios_Known :: struct {
@@ -20,7 +22,7 @@ Bios_Known :: struct {
 }
 
 // File names the cores in RETRO_CORES load (swanstation / mednafen, flycast, mGBA / gambatte /
-// SameBoy, melonDS, Genesis Plus GX, Mesen, Snes9x, mednafen PCE). PS2 BIOSes have no fixed
+// SameBoy, melonDS, RPCS3, Genesis Plus GX, Mesen, Snes9x, mednafen PCE). PS2 BIOSes have no fixed
 // name: see bios_is_ps2.
 BIOS_KNOWN := [?]Bios_Known {
 	{"scph5500.bin", .PS1, ""}, {"scph5501.bin", .PS1, ""}, {"scph5502.bin", .PS1, ""},
@@ -71,6 +73,17 @@ bios_is_ps2 :: proc(path, name: string, size: i64) -> bool {
 	return strings.contains(string(buf[:max(n, 0)]), "RESET\x00\x00\x00\x00\x00")
 }
 
+// A PS3 system update (.pup, "SCEUF" header), whatever it's called.
+bios_is_ps3 :: proc(path, name: string) -> bool {
+	if !strings.equal_fold(filepath.ext(name), ".pup") do return false
+	f, err := os.open(path)
+	if err != nil do return false
+	defer os.close(f)
+	head: [5]byte
+	n, _ := os.read(f, head[:])
+	return n == 5 && string(head[:]) == "SCEUF"
+}
+
 // The "bios" folder at a drive's root, any case ("" = none).
 bios_folder :: proc(root: string) -> string {
 	fis, err := os.read_all_directory_by_path(root, context.temp_allocator)
@@ -113,6 +126,11 @@ bios_walk :: proc(out: ^[dynamic]Bios_File, dir: string, depth: int) {
 			f.name, f.platform = fi.name, .PS2
 			f.dest = retro_dir("system", "pcsx2", "bios", fi.name)
 		}
+		if f.platform == .None && bios_is_ps3(fi.fullpath, fi.name) {
+			// any name (PS3UPDAT493.PUP...): RPCS3 installs system/rpcs3/firmware/PS3UPDAT.PUP on first start
+			f.name, f.platform = "PS3UPDAT.PUP", .PS3
+			f.dest = retro_dir("system", "rpcs3", "firmware", "PS3UPDAT.PUP")
+		}
 		if f.platform == .None do continue
 		// the same file twice (say bios/ and bios/ps1/): keep the first
 		dup := false
@@ -138,12 +156,31 @@ bios_ps2_companions :: proc(out: ^[dynamic]Bios_File, fis: []os.File_Info, bin: 
 	}
 }
 
-bios_same :: proc(a, b: string) -> bool {
-	da, ea := os.read_entire_file(a, context.temp_allocator)
+// Full compare is only done for small files on the main thread; big ones (PS3 firmware)
+// match by size there and are verified byte for byte by the install worker.
+BIOS_QUICK_LIMIT :: 16 * 1024 * 1024
+
+bios_same :: proc(a, b: string, quick := false) -> bool {
+	fa, ea := os.open(a)
 	if ea != nil do return false
-	db, eb := os.read_entire_file(b, context.temp_allocator)
+	defer os.close(fa)
+	fb, eb := os.open(b)
 	if eb != nil do return false
-	return string(da) == string(db)
+	defer os.close(fb)
+	sa, _ := os.file_size(fa)
+	sb, _ := os.file_size(fb)
+	if sa != sb do return false
+	if quick && sa > BIOS_QUICK_LIMIT do return true
+	// streamed: the PS3 firmware (PS3UPDAT.PUP) is ~200 MB
+	CHUNK :: 1024 * 1024
+	ba := make([]byte, CHUNK, context.temp_allocator)
+	bb := make([]byte, CHUNK, context.temp_allocator)
+	for off: i64 = 0; off < sa; off += CHUNK {
+		na, _ := os.read_at(fa, ba, off)
+		nb, _ := os.read_at(fb, bb, off)
+		if na <= 0 || na != nb || string(ba[:na]) != string(bb[:nb]) do return false
+	}
+	return true
 }
 
 // Drive scan (worker thread): the "Install BIOS" card for a drive whose bios folder holds any.
@@ -217,7 +254,7 @@ bios_menu_refresh :: proc() {
 		c.src = strings.clone(f.src)
 		c.name = filepath.base(c.src) if f.platform == .PS2 else f.name
 		c.dest = strings.clone(f.dest)
-		c.installed = bios_same(f.src, f.dest)
+		c.installed = bios_same(f.src, f.dest, quick = true)
 		append(&bios_menu.files, c)
 		if n := len(bios_menu.groups); n == 0 || bios_menu.groups[n - 1].platform != c.platform {
 			append(&bios_menu.groups, Bios_Group{platform = c.platform})
@@ -254,23 +291,137 @@ bios_menu_row :: proc(row: int) -> (Bios_Row_Kind, int) {
 }
 
 bios_menu_sub :: proc() -> string {
+	if bios_job_running() {
+		text, _ := bios_job_progress()
+		return text
+	}
 	if bios_menu.note != "" do return bios_menu.note
 	return fmt.tprintf("Your own dumps from %s  ·  copied into APP\\libretro\\system", bios_menu.label)
 }
 
+// Install job: copies run on a worker thread (the PS3 firmware is ~200 MB), each file
+// written as <dest>.part, verified, then renamed. The menu polls it every frame.
+Bios_Copy :: struct {
+	src, dest: string,
+	failed:    bool, // set by the worker, logged on the main thread
+}
+
+Bios_Job :: struct {
+	thread:   ^thread.Thread,
+	platform: Retro_Platform,
+	copies:   [dynamic]Bios_Copy,
+	total:    i64,
+	copied:   i64,  // atomic
+	current:  int,  // atomic: index of the file being copied
+	cancel:   bool, // atomic
+	finished: bool, // atomic
+	done:     int,
+	failed:   int,
+}
+
+bios_job: Bios_Job
+
+bios_job_running :: proc() -> bool {
+	return bios_job.thread != nil
+}
+
 // Copies every missing file of `platform` (.None = every console).
 bios_install :: proc(platform: Retro_Platform) {
-	done, failed := 0, 0
-	for &f in bios_menu.files {
+	if bios_job_running() do return
+	bios_job = {platform = platform}
+	for f in bios_menu.files {
 		if (platform != .None && f.platform != platform) || f.installed do continue
-		os.make_directory_all(filepath.dir(f.dest))
-		if os.copy_file(f.dest, f.src) == nil && bios_same(f.src, f.dest) {
-			done += 1
+		append(&bios_job.copies, Bios_Copy{src = strings.clone(f.src), dest = strings.clone(f.dest)})
+		bios_job.total += f.size
+	}
+	if len(bios_job.copies) == 0 {
+		delete(bios_job.copies)
+		bios_install_report(platform, 0, 0)
+		return
+	}
+	sfx_click()
+	bios_job.thread = thread.create_and_start(bios_job_run)
+}
+
+bios_job_run :: proc() {
+	buf := make([]byte, 1024 * 1024)
+	defer delete(buf)
+	for &c, i in bios_job.copies {
+		if sync.atomic_load(&bios_job.cancel) do break
+		sync.atomic_store(&bios_job.current, i)
+		if bios_copy_file(c.src, c.dest, buf) {
+			bios_job.done += 1
 		} else {
-			failed += 1
-			plugin_logf("BIOS: couldn't copy %s to %s", f.src, f.dest)
+			bios_job.failed += 1
+			c.failed = !sync.atomic_load(&bios_job.cancel)
+		}
+		free_all(context.temp_allocator)
+	}
+	sync.atomic_store(&bios_job.finished, true)
+}
+
+bios_copy_file :: proc(src, dest: string, buf: []byte) -> bool {
+	os.make_directory_all(filepath.dir(dest))
+	part := fmt.tprintf("%s.part", dest)
+	ok := false
+	{
+		in_f, e1 := os.open(src)
+		if e1 != nil do return false
+		defer os.close(in_f)
+		out_f, e2 := os.open(part, {.Write, .Create, .Trunc})
+		if e2 != nil do return false
+		defer os.close(out_f)
+		for {
+			if sync.atomic_load(&bios_job.cancel) do break
+			n, _ := os.read(in_f, buf)
+			if n <= 0 {
+				ok = true
+				break
+			}
+			if w, e := os.write(out_f, buf[:n]); e != nil || w != n do break
+			sync.atomic_add(&bios_job.copied, i64(n))
 		}
 	}
+	if ok do ok = bios_same(src, part)
+	if ok {
+		os.remove(dest)
+		ok = os.rename(part, dest) == nil
+	}
+	if !ok do os.remove(part)
+	return ok
+}
+
+// Main thread, every frame: finishes a completed job.
+bios_job_poll :: proc() {
+	if !bios_job_running() || !sync.atomic_load(&bios_job.finished) do return
+	thread.join(bios_job.thread)
+	thread.destroy(bios_job.thread)
+	cancelled := sync.atomic_load(&bios_job.cancel)
+	platform, done, failed := bios_job.platform, bios_job.done, bios_job.failed
+	for c in bios_job.copies {
+		if c.failed do plugin_logf("BIOS: couldn't copy %s to %s", c.src, c.dest)
+		delete(c.src)
+		delete(c.dest)
+	}
+	delete(bios_job.copies)
+	bios_job = {}
+	if cancelled {
+		bios_menu.note = fmt.bprintf(bios_menu.note_buf[:], "BIOS install stopped")
+		set_status("%s", bios_menu.note)
+	} else {
+		bios_install_report(platform, done, failed)
+	}
+	if bios_menu.open || bios_menu_card_present() do bios_menu_refresh()
+}
+
+// The progress line shown as the menu subtitle while copying.
+bios_job_progress :: proc() -> (text: string, frac: f32) {
+	i := clamp(sync.atomic_load(&bios_job.current), 0, len(bios_job.copies) - 1)
+	frac = f32(f64(sync.atomic_load(&bios_job.copied)) / f64(max(bios_job.total, 1)))
+	return fmt.tprintf("Copying %s  ·  %d%%  (%d/%d)", filepath.base(bios_job.copies[i].dest), int(frac * 100), i + 1, len(bios_job.copies)), frac
+}
+
+bios_install_report :: proc(platform: Retro_Platform, done, failed: int) {
 	what := platform == .None ? "BIOS" : fmt.tprintf("%s BIOS", RETRO_PLATFORM_NAME[platform])
 	switch {
 	case failed > 0:
@@ -284,10 +435,22 @@ bios_install :: proc(platform: Retro_Platform) {
 		sfx_click()
 	}
 	set_status("%s", bios_menu.note)
-	bios_menu_refresh()
+}
+
+// Stops a running copy (drive pulled, Saber quitting) and waits for the worker.
+bios_job_cancel :: proc() {
+	if !bios_job_running() do return
+	sync.atomic_store(&bios_job.cancel, true)
+	for !sync.atomic_load(&bios_job.finished) do sleep_ms(5)
+	bios_job_poll()
 }
 
 bios_menu_choose :: proc(row: int) {
+	if bios_job_running() {
+		kind, _ := bios_menu_row(row)
+		if kind == .Close do bios_menu_close()
+		return
+	}
 	switch kind, gi := bios_menu_row(row); kind {
 	case .All:
 		bios_install(.None)
@@ -310,6 +473,7 @@ bios_menu_card_present :: proc() -> bool {
 
 bios_menu_input :: proc() {
 	if !bios_menu_card_present() {
+		bios_job_cancel()
 		bios_menu.open = false // the drive was pulled
 		return
 	}
@@ -354,13 +518,16 @@ draw_bios_menu :: proc(w, h: f32) {
 	}
 	draw_bios_tile(BIOS_STYLE[.None], {r.x + 26, r.y + 24, 60, 60})
 	draw_t_fit("Install BIOS", r.x + 102, r.y + 26, r.width - 360, 28, COL_TEXT, true)
-	draw_t_fit(bios_menu_sub(), r.x + 102, r.y + 64, r.width - 360, 15, bios_menu.note != "" ? COL_ACCENT : COL_MUTED, true)
+	draw_t_fit(bios_menu_sub(), r.x + 102, r.y + 64, r.width - 360, 15, bios_menu.note != "" || bios_job_running() ? COL_ACCENT : COL_MUTED, true)
 	{
 		right := r.x + r.width - 30
 		label := missing == 0 ? "All installed" : fmt.tprintf("%d of %d installed", total - missing, total)
 		lw := measure_t(label, 17)
 		draw_t_right(label, right, r.y + 42, 17, missing == 0 ? BIOS_OK : COL_MUTED)
-		if missing == 0 {
+		if bios_job_running() {
+			_, frac := bios_job_progress()
+			draw_bios_progress({right - 180, r.y + 70, 180, 5}, frac)
+		} else if missing == 0 {
 			draw_bios_check(right - lw - 18, r.y + 52, 11)
 		} else {
 			draw_bios_progress({right - 180, r.y + 70, 180, 5}, f32(total - missing) / f32(max(total, 1)))
@@ -444,6 +611,7 @@ BIOS_STYLE := [Retro_Platform]Bios_Style {
 	.A2600 = {.Cartridge, {208, 148, 78, 255}, "2600"},
 	.GC    = {.Disc, {122, 100, 202, 255}, "GC"},
 	.WII   = {.Disc, {188, 208, 228, 255}, "Wii"},
+	.PS3   = {.Disc, {150, 150, 160, 255}, "PS3"},
 }
 
 // A rounded tile tinted with the console's colour, its device drawn inside.

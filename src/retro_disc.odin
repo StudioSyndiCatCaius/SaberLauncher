@@ -591,35 +591,48 @@ iso_read_root_file :: proc(letter: u8, name: string, max_size := 64 * 1024, allo
 
 // Walks the ISO9660 root directory; `read` fetches whole 2048-byte user sectors starting at lba.
 iso_find_root_file :: proc(read: proc(ctx: rawptr, lba: u32, buf: []byte) -> bool, h: rawptr, name: string, max_size: int, allocator := context.allocator) -> (data: []byte, ok: bool) {
+	return iso_find_file(read, h, name, max_size, allocator)
+}
+
+// Like iso_find_root_file, but `path` may name subfolders: "PS3_GAME/PARAM.SFO".
+iso_find_file :: proc(read: proc(ctx: rawptr, lba: u32, buf: []byte) -> bool, h: rawptr, path: string, max_size: int, allocator := context.allocator) -> (data: []byte, ok: bool) {
 	le32 :: proc(b: []byte) -> u32 {return u32(b[0]) | u32(b[1]) << 8 | u32(b[2]) << 16 | u32(b[3]) << 24}
 
 	pvd: [ISO_SECTOR]byte
 	if !read(h, 16, pvd[:]) || string(pvd[1:6]) != "CD001" do return
 	root := pvd[156:]
 	dir_lba, dir_len := le32(root[2:]), le32(root[10:])
-	if dir_len == 0 || dir_len > 1024 * 1024 do return
-	dir := make([]byte, (int(dir_len) + ISO_SECTOR - 1) / ISO_SECTOR * ISO_SECTOR, context.temp_allocator)
-	if !read(h, dir_lba, dir) do return
-
-	for i := 0; i < int(dir_len); {
-		n := int(dir[i])
-		if n == 0 { // records never cross a sector boundary
-			i = (i / ISO_SECTOR + 1) * ISO_SECTOR
-			continue
+	rest := path
+	for part in strings.split_iterator(&rest, "/") {
+		last := len(rest) == 0
+		if dir_len == 0 || dir_len > 1024 * 1024 do return
+		dir := make([]byte, (int(dir_len) + ISO_SECTOR - 1) / ISO_SECTOR * ISO_SECTOR, context.temp_allocator)
+		if !read(h, dir_lba, dir) do return
+		found := false
+		for i := 0; i < int(dir_len); {
+			n := int(dir[i])
+			if n == 0 { // records never cross a sector boundary
+				i = (i / ISO_SECTOR + 1) * ISO_SECTOR
+				continue
+			}
+			if i + 33 > len(dir) do break
+			id := string(dir[i + 33:][:min(int(dir[i + 32]), len(dir) - i - 33)])
+			if semi := strings.index_byte(id, ';'); semi >= 0 do id = id[:semi]
+			is_dir := dir[i + 25] & 2 != 0
+			if strings.equal_fold(id, part) && is_dir != last {
+				dir_lba, dir_len = le32(dir[i + 2:]), le32(dir[i + 10:])
+				found = true
+				break
+			}
+			i += n
 		}
-		if i + 33 > len(dir) do break
-		id := string(dir[i + 33:][:min(int(dir[i + 32]), len(dir) - i - 33)])
-		if semi := strings.index_byte(id, ';'); semi >= 0 do id = id[:semi]
-		if strings.equal_fold(id, name) {
-			lba, size := le32(dir[i + 2:]), int(le32(dir[i + 10:]))
-			if size > max_size do return
-			buf := make([]byte, (size + ISO_SECTOR - 1) / ISO_SECTOR * ISO_SECTOR, context.temp_allocator)
-			if size > 0 && !read(h, lba, buf) do return
-			return slice.clone(buf[:size], allocator), true
-		}
-		i += n
+		if !found do return
 	}
-	return
+	size := int(dir_len)
+	if size > max_size do return
+	buf := make([]byte, (size + ISO_SECTOR - 1) / ISO_SECTOR * ISO_SECTOR, context.temp_allocator)
+	if size > 0 && !read(h, dir_lba, buf) do return
+	return slice.clone(buf[:size], allocator), true
 }
 
 // ---------------------------------------------------------------------------

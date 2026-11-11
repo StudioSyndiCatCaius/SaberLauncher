@@ -44,6 +44,10 @@ local CORES = {
     -- Dolphin needs its Sys folder (fonts, game settings, shaders) in APP/libretro/system/dolphin-emu
     { platform = "gc", system = "GameCube / Wii", file = "dolphin_libretro.dll",
       extra = { url = "https://buildbot.libretro.com/assets/system/Dolphin.zip", dest = SYSTEM_DIR, check = "dolphin-emu", label = "Dolphin assets" } },
+    -- experimental cores outside the buildbot (GitHub releases); skipped by Missing / Update All.
+    -- RPCS3 needs the PS3 firmware: PS3UPDAT.PUP in APP/libretro/system/rpcs3/firmware (not downloaded)
+    { platform = "ps3", system = "PlayStation 3 (experimental)", file = "rpcs3_libretro.dll", experimental = true,
+      url = "https://github.com/danprice142/RPCS3-UWP/releases/latest/download/rpcs3_libretro.zip" },
 }
 
 local busy = false
@@ -79,7 +83,7 @@ local function download(cores)
         -- systems can share a core (Game Boy / Color, Mega Drive / Master System)
         if queued[c.file] then goto continue end
         queued[c.file] = true
-        table.insert(jobs, { name = c.file, url = BUILDBOT .. c.file .. ".zip", dest = CORES_DIR })
+        table.insert(jobs, { name = c.file, url = c.url or (BUILDBOT .. c.file .. ".zip"), dest = CORES_DIR })
         if c.extra then
             table.insert(jobs, { name = c.system .. " assets", url = c.extra.url, dest = c.extra.dest })
         end
@@ -127,7 +131,7 @@ end
 local function missing()
     local list = {}
     for _, c in ipairs(CORES) do
-        if not installed(c) then table.insert(list, c) end
+        if not installed(c) and not c.experimental then table.insert(list, c) end
     end
     return list
 end
@@ -139,7 +143,7 @@ local function choose_core()
         table.insert(items, {
             name = c.system .. (installed(c) and "  (installed)" or ""),
             description = c.file .. (c.extra and (" + " .. c.extra.label) or "") ..
-                (installed(c) and " - re-downloads the latest nightly" or ""),
+                (installed(c) and (c.experimental and " - re-downloads the latest release" or " - re-downloads the latest nightly") or ""),
             Do = function()
                 if busy then return "A download is already running" end
                 if not Online() then return "Turn on Online Mode to download cores" end
@@ -152,7 +156,7 @@ end
 
 return {
     name = "RetroarchExtras",
-    version = "1.3",
+    version = "1.4",
     description = "Downloads the libretro cores Saber plays PlayStation, PS2, PSP and Dreamcast discs, GameCube / Wii images, and NES to Nintendo DS ROMs with. " ..
         "Cores are open source (GPL) from buildbot.libretro.com. BIOS files are not included: put your own in APP/libretro/system.",
 
@@ -184,7 +188,11 @@ return {
             online = true,
             Do = function()
                 if busy then return "A download is already running" end
-                download(CORES)
+                local list = {}
+                for _, c in ipairs(CORES) do
+                    if not c.experimental then table.insert(list, c) end
+                end
+                download(list)
             end,
         },
         choose = {
