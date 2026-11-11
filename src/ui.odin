@@ -288,7 +288,7 @@ draw_footer :: proc(w, h: f32) {
 	switch {
 	case plugin_dialog_open():
 		// the dialog draws its own hints
-	case app.power_open, game_menu.open:
+	case app.power_open, game_menu.open, bios_menu.open:
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Back"}})
 	case drives_menu.open:
 		draw_hints(w, h, []Hint{{"A", "Toggle"}, {"B", "Done"}})
@@ -352,6 +352,7 @@ CARD_KIND_COL := [Card_Kind]rl.Color {
 }
 
 game_kind :: proc(g: ^Game) -> (Card_Kind, string) {
+	if g.bios_dir != "" do return .Other, "BIOS"
 	if g.platform == .None do return .Pc, "PC"
 	return .Emulated, strings.to_upper(RETRO_PLATFORM_DIR[g.platform], context.temp_allocator)
 }
@@ -376,6 +377,7 @@ card_for :: proc(s: Screen, i: int) -> Card {
 
 game_card :: proc(g: ^Game) -> Card {
 	kind, tag := game_kind(g)
+	if g.bios_dir != "" do return {tex = bios_art, has_tex = bios_art_ok, title = g.title, placeholder = "BIOS", contain = true, badge = g.drive_label, kind = kind, tag = tag}
 	return {g.box, g.has_box, g.title, "NO ART", true, g.mod_name != "" ? fmt.tprintf("Modded : %s", g.mod_name) : "", game_suspended(g) ? "Suspended" : "", kind, tag}
 }
 

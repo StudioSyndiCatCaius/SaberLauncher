@@ -179,6 +179,7 @@ main :: proc() {
 		draw_install_card(w, h)
 		draw_power_dialog(w, h)
 		draw_game_menu(w, h)
+		draw_bios_menu(w, h)
 		draw_plugin_dialog(w, h)
 		emu_menu_draw(w, h)
 		glass.source = .Wall
@@ -189,6 +190,7 @@ main :: proc() {
 
 	install_shutdown()
 	drive_scan_shutdown()
+	bios_art_unload()
 	drive_ghosts_clear()
 	unload_all_games()
 	unload_all_apps()
@@ -373,7 +375,7 @@ draw_menus :: proc(w, h: f32) {
 
 // A modal is on screen (fading in or out included).
 dialog_visible :: proc() -> bool {
-	return app.power_open || app.power_t >= 0.02 || plugin_dialog_open() || emu_menu.open || emu_menu.t >= 0.02 || game_menu.open || game_menu.t >= 0.02
+	return app.power_open || app.power_t >= 0.02 || plugin_dialog_open() || emu_menu.open || emu_menu.t >= 0.02 || game_menu.open || game_menu.t >= 0.02 || bios_menu.open || bios_menu.t >= 0.02
 }
 
 input_locked :: proc() -> bool {
@@ -420,6 +422,12 @@ handle_app_input :: proc() {
 	}
 	if game_menu.open {
 		game_menu_input()
+		eat_input()
+		input.mouse_eaten = true
+		return
+	}
+	if bios_menu.open {
+		bios_menu_input()
 		eat_input()
 		input.mouse_eaten = true
 		return
@@ -886,6 +894,10 @@ activate_item :: proc(s: Screen, i: int) {
 }
 
 play_game :: proc(g: ^Game) {
+	if g.bios_dir != "" {
+		bios_menu_open(g)
+		return
+	}
 	if install_busy_with(g) {
 		set_status("Installing %s  ·  wait for it to finish, or cancel it from the actions menu (X)", g.title)
 		sfx_back()

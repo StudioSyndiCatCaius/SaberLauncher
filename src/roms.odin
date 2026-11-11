@@ -66,12 +66,70 @@ scan_rom_dir :: proc(out: ^[dynamic]Game, dir, label: string, found: ^int) {
 			}
 			continue
 		}
+		if is_dolphin_ext(ext) {
+			if platform, id, ok := dolphin_image_id(fi.fullpath, ext); ok {
+				// the game ID is the serial; set before plugins_apply runs inside rom_game
+				append(out, rom_game(fi, label, platform, id))
+				found^ += 1
+			}
+			continue
+		}
 		platform, ok := rom_platform(ext)
 		if !ok do continue
 		if ext == ".md" && !md_has_sega_header(fi.fullpath) do continue // README.md etc.
 		append(out, rom_game(fi, label, platform))
 		found^ += 1
 	}
+}
+
+// GameCube / Wii images, played by Dolphin. .iso is shared with PS2 / PSP and .ciso with
+// PSP's CSO, so every one is only taken when the disc header's magic says GameCube or Wii.
+is_dolphin_ext :: proc(ext: string) -> bool {
+	switch ext {
+	case ".iso", ".gcm", ".ciso", ".rvz", ".wia", ".wbfs", ".gcz": return true
+	}
+	return false
+}
+
+GC_MAGIC  :: 0xC2339F3D // big-endian u32 at 0x1C of the disc header
+WII_MAGIC :: 0x5D1C9EA3 // big-endian u32 at 0x18
+
+// Platform and 6-character game ID (e.g. "GALE01", "" when unknown) of a GameCube / Wii image.
+dolphin_image_id :: proc(path, ext: string) -> (platform: Retro_Platform, id: string, ok: bool) {
+	f, err := os.open(path)
+	if err != nil do return
+	defer os.close(f)
+	be32 :: proc(b: []byte) -> u32 { return u32(b[0]) << 24 | u32(b[1]) << 16 | u32(b[2]) << 8 | u32(b[3]) }
+
+	head: [0x60]byte
+	if n, _ := os.read_at(f, head[:], 0); n < 0x20 do return
+	hdr_off: i64 // where the plain disc header lives in the file
+	switch ext {
+	case ".iso", ".gcm": hdr_off = 0
+	case ".ciso": // "CISO" + block size + block map, data from 0x8000
+		if string(head[:4]) != "CISO" do return
+		hdr_off = 0x8000
+	case ".rvz", ".wia": // header 1 (0x48) + header 2, whose disc header copy starts 0x10 in
+		if string(head[:3]) != "RVZ" && string(head[:3]) != "WIA" do return
+		hdr_off = 0x58
+	case ".wbfs": // "WBFS"; the first disc's header copy sits one HD sector in
+		if string(head[:4]) != "WBFS" do return
+		hdr_off = i64(1) << head[8]
+	case ".gcz": // compressed: only the magic word, no readable header -> name it by file name
+		if be32(head[:4]) != 0x01C00BB1 do return // 0xB10BC001, little-endian
+		// GCZ is GameCube or Wii; Wii games are usually far bigger than a GC disc (1.4 GB)
+		fi, _ := os.stat(path, context.temp_allocator)
+		return fi.size > 1_500_000_000 ? .WII : .GC, "", true
+	}
+	disc: [0x20]byte
+	if n, _ := os.read_at(f, disc[:], hdr_off); n != len(disc) do return
+	switch {
+	case be32(disc[0x1C:]) == GC_MAGIC:  platform = .GC
+	case be32(disc[0x18:]) == WII_MAGIC: platform = .WII
+	case: return
+	}
+	for c in disc[:6] do if !(c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') do return platform, "", true
+	return platform, strings.clone(string(disc[:6]), context.temp_allocator), true
 }
 
 // Mega Drive ROMs carry "SEGA" at 0x100 (some pad it with a space); Markdown files never do.
@@ -84,7 +142,8 @@ md_has_sega_header :: proc(path: string) -> bool {
 	return n == len(buf) && strings.contains(string(buf[:]), "SEGA")
 }
 
-rom_game :: proc(fi: os.File_Info, label: string, platform: Retro_Platform) -> Game {
+// serial: the image's own ID (GameCube / Wii), else the ROM's CRC32 or file name.
+rom_game :: proc(fi: os.File_Info, label: string, platform: Retro_Platform, serial := "") -> Game {
 	g: Game
 	g.rom_path = strings.clone(fi.fullpath)
 	g.rom_name = strings.clone(filepath.stem(fi.name))
@@ -94,7 +153,7 @@ rom_game :: proc(fi: os.File_Info, label: string, platform: Retro_Platform) -> G
 	g.from_drive = true
 	g.platform = platform
 	g.meta_platform = platform
-	g.disc_serial = strings.clone(g.rom_crc != "" ? g.rom_crc : g.rom_name)
+	g.disc_serial = strings.clone(serial != "" ? serial : g.rom_crc != "" ? g.rom_crc : g.rom_name)
 	g.title = strings.clone(rom_display_title(g.rom_name))
 	plugins_apply(&g)
 	return g

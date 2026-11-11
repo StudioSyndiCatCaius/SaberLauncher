@@ -106,7 +106,7 @@ settings_load :: proc(path: string) -> Settings {
 
 settings_save :: proc(path: string, s: Settings) {
 	text := fmt.tprintf(
-		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\nonline=%d\nplugins_off=%s\nplugin_dirs=%s\nignore_drives=%s\n",
+		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\nonline=%d\nplugins_off=%s\nplugin_dirs=%s\nignore_drives=%s\nsave_states=%s\n",
 		LAUNCH_MODE_KEYS[s.launch_mode],
 		s.ui_theme,
 		s.bkg,

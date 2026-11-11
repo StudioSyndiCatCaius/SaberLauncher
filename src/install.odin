@@ -618,7 +618,13 @@ Game_Menu_Row :: enum {
 	Play,
 	Install,
 	Cancel_Install,
+	Plugin, // a plugin's game_actions row (Game_Menu_Item.action)
 	Close,
+}
+
+Game_Menu_Item :: struct {
+	row:    Game_Menu_Row,
+	action: int, // .Plugin: index into plugin_game_actions
 }
 
 Game_Menu :: struct {
@@ -647,6 +653,7 @@ game_menu_open :: proc(s: Screen, i: int) {
 	game_menu.armed = false
 	kind, can, _ := install_kind(g)
 	game_menu.installed = can && install_exists(g, kind)
+	plugins_game_actions_collect(g)
 	game_menu.open = true
 	sfx_click()
 }
@@ -657,21 +664,21 @@ game_menu_game :: proc() -> ^Game {
 	return nil
 }
 
-game_menu_rows :: proc(g: ^Game) -> []Game_Menu_Row {
-	@(static) rows: [len(Game_Menu_Row)]Game_Menu_Row
-	n := 0
-	rows[n] = .Play; n += 1
+game_menu_rows :: proc(g: ^Game) -> []Game_Menu_Item {
+	rows := make([dynamic]Game_Menu_Item, context.temp_allocator)
+	append(&rows, Game_Menu_Item{row = .Play})
 	if install_is(g) {
-		rows[n] = .Cancel_Install; n += 1
+		append(&rows, Game_Menu_Item{row = .Cancel_Install})
 	} else if _, can, why := install_kind(g); can || why != "" {
-		rows[n] = .Install; n += 1
+		append(&rows, Game_Menu_Item{row = .Install})
 	}
-	rows[n] = .Close; n += 1
-	return rows[:n]
+	for _, i in plugin_game_actions do append(&rows, Game_Menu_Item{row = .Plugin, action = i})
+	append(&rows, Game_Menu_Item{row = .Close})
+	return rows[:]
 }
 
-game_menu_label :: proc(g: ^Game, row: Game_Menu_Row) -> string {
-	switch row {
+game_menu_label :: proc(g: ^Game, item: Game_Menu_Item) -> string {
+	switch item.row {
 	case .Play:
 		return "Play"
 	case .Install:
@@ -681,6 +688,8 @@ game_menu_label :: proc(g: ^Game, row: Game_Menu_Row) -> string {
 		total := sync.atomic_load(&install.total_bytes)
 		if total <= 0 do return "Cancel Install"
 		return fmt.tprintf("Cancel Install (%d%%)", int(f64(sync.atomic_load(&install.done_bytes)) * 100 / f64(total)))
+	case .Plugin:
+		return plugin_game_actions[item.action].name
 	case .Close:
 		return "Close"
 	}
@@ -739,8 +748,8 @@ game_menu_input :: proc() {
 	if input.confirm do game_menu_choose(g, rows[game_menu.sel])
 }
 
-game_menu_choose :: proc(g: ^Game, row: Game_Menu_Row) {
-	switch row {
+game_menu_choose :: proc(g: ^Game, item: Game_Menu_Item) {
+	switch item.row {
 	case .Play:
 		game_menu.open = false
 		game_menu.play = true
@@ -772,6 +781,10 @@ game_menu_choose :: proc(g: ^Game, row: Game_Menu_Row) {
 		install_cancel()
 		set_status("Cancelling the install of %s…", install.title)
 		game_menu_close()
+	case .Plugin:
+		game_menu.open = false
+		sfx_click()
+		if msg := plugins_game_action_run(item.action); msg != "" do set_status("%s", msg)
 	case .Close:
 		game_menu_close()
 	}

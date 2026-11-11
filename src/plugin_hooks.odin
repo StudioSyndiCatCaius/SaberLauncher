@@ -360,3 +360,81 @@ lua_unzip :: proc "c" (L: ^lua_State) -> c.int {
 	lua_pushboolean(L, 1)
 	return 1
 }
+
+// ---------------------------------------------------------------------------
+// Per-game actions: rows a plugin adds to a card's actions menu (X / right-click).
+//
+//   game_actions = function(game)          -- game: same table as Disc_Games() entries
+//       return { { name = "Download Box Art", description = "...", Do = function() ... end } }
+//   end
+//
+// Asked again every time the menu opens, so a plugin can name the row after the game's state
+// ("Download" / "Re-download"). Do may return a string, shown as the status message.
+
+Plugin_Game_Action :: struct {
+	plugin: int,   // index into plugins
+	ref:    c.int, // Do, held in the plugin state's registry
+	name:   string,
+}
+
+plugin_game_actions: [dynamic]Plugin_Game_Action
+
+plugins_game_actions_clear :: proc() {
+	for a in plugin_game_actions {
+		if a.plugin < len(plugins) && plugins[a.plugin].L != nil do luaL_unref(plugins[a.plugin].L, LUA_REGISTRYINDEX, a.ref)
+		delete(a.name)
+	}
+	clear(&plugin_game_actions)
+}
+
+plugins_game_actions_collect :: proc(g: ^Game) {
+	plugins_game_actions_clear()
+	if !game_identified(g) do return
+	for &p, pi in plugins {
+		L := p.L
+		if L == nil do continue
+		top := lua_gettop(L)
+		defer lua_settop(L, top)
+		lua_getglobal(L, "PLUGIN")
+		if lua_type(L, -1) != LUA_TTABLE || lua_getfield(L, -1, "game_actions") != LUA_TFUNCTION do continue
+		push_game_table(L, g)
+		if lua_pcall(L, 1, 1, 0) != LUA_OK {
+			plugin_logf("%s: game_actions: %s", p.name, lua_string(L, -1))
+			continue
+		}
+		if lua_type(L, -1) != LUA_TTABLE do continue
+		list := lua_gettop(L)
+		for i in 1 ..= i64(lua_rawlen(L, list)) {
+			lua_rawgeti(L, list, i)
+			if lua_type(L, -1) == LUA_TTABLE {
+				name := lua_field_string(L, -1, "name")
+				if name != "" && lua_getfield(L, -1, "Do") == LUA_TFUNCTION {
+					ref := luaL_ref(L, LUA_REGISTRYINDEX) // pops Do
+					append(&plugin_game_actions, Plugin_Game_Action{plugin = pi, ref = ref, name = strings.clone(name)})
+				} else {
+					lua_pop(L, 1)
+				}
+			}
+			lua_pop(L, 1)
+		}
+	}
+}
+
+// Runs a collected action; returns the status message ("" = the plugin opened a dialog).
+plugins_game_action_run :: proc(i: int) -> string {
+	if i < 0 || i >= len(plugin_game_actions) do return ""
+	a := plugin_game_actions[i]
+	p := &plugins[a.plugin]
+	L := p.L
+	if L == nil do return ""
+	top := lua_gettop(L)
+	defer lua_settop(L, top)
+	lua_rawgeti(L, LUA_REGISTRYINDEX, i64(a.ref))
+	if lua_pcall(L, 0, 1, 0) != LUA_OK {
+		msg := lua_string(L, -1)
+		plugin_logf("%s: %s: %s", p.name, a.name, msg)
+		return fmt.tprintf("%s failed: %s", a.name, msg)
+	}
+	if lua_type(L, -1) == LUA_TSTRING do return strings.clone(lua_string(L, -1), context.temp_allocator)
+	return ""
+}

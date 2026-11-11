@@ -31,6 +31,8 @@ GetWindowLongPtrW: proc "system" (hWnd: win.HWND, nIndex: i32) -> win.LONG_PTR
 PostMessageW: proc "system" (hWnd: win.HWND, Msg: win.UINT, wParam: win.WPARAM, lParam: win.LPARAM) -> win.BOOL
 GetDC: proc "system" (hWnd: win.HWND) -> win.HDC
 ReleaseDC: proc "system" (hWnd: win.HWND, hDC: win.HDC) -> i32
+CreateWindowExW: proc "system" (dwExStyle: win.DWORD, lpClassName, lpWindowName: win.LPCWSTR, dwStyle: win.DWORD, X, Y, nWidth, nHeight: i32, hWndParent: win.HWND, hMenu: win.HMENU, hInstance: win.HINSTANCE, lpParam: win.LPVOID) -> win.HWND
+DestroyWindow: proc "system" (hWnd: win.HWND) -> win.BOOL
 
 @(init)
 load_user32 :: proc "contextless" () {
@@ -64,6 +66,8 @@ load_user32 :: proc "contextless" () {
 	PostMessageW = auto_cast win.GetProcAddress(mod, "PostMessageW")
 	GetDC = auto_cast win.GetProcAddress(mod, "GetDC")
 	ReleaseDC = auto_cast win.GetProcAddress(mod, "ReleaseDC")
+	CreateWindowExW = auto_cast win.GetProcAddress(mod, "CreateWindowExW")
+	DestroyWindow = auto_cast win.GetProcAddress(mod, "DestroyWindow")
 }
 
 MONITOR_DEFAULTTONEAREST :: 2

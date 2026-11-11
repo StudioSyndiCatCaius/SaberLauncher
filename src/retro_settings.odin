@@ -47,27 +47,12 @@ Emu_Settings :: struct {
 	speed:         int, // index into EMU_SPEEDS
 	volume:        int, // percent
 	latency:       int, // index into EMU_LATENCIES
-	deadzone:      int, // percent
-	swap_ab:       bool, // Nintendo layout: A/B and X/Y trade places
-	pad:           [16]rl.GamepadButton, // by libretro joypad id; .UNKNOWN = unbound
-	keys:          [16][2]rl.KeyboardKey, // player 1 keyboard, two slots per id
+	ctl:           Emu_Controls, // global controls (retro_controls.odin); a game may have its own
 	cores:         map[string]string, // platform dir -> preferred core dll
 	core_opts:     map[string]string, // core option key -> value chosen in the menu
 }
 
 emu: Emu_Settings
-
-emu_set_default_controls :: proc() {
-	emu.pad = {}
-	emu.keys = {}
-	for b in RETRO_PAD_BINDS do emu.pad[b.id] = b.button
-	emu.pad[RETRO_DEVICE_ID_JOYPAD_L2] = .LEFT_TRIGGER_2
-	emu.pad[RETRO_DEVICE_ID_JOYPAD_R2] = .RIGHT_TRIGGER_2
-	for k in RETRO_KEY_BINDS {
-		slot := emu.keys[k.id][0] == .KEY_NULL ? 0 : 1
-		emu.keys[k.id][slot] = k.key
-	}
-}
 
 emu_init :: proc() {
 	if emu.loaded do return
@@ -75,8 +60,7 @@ emu_init :: proc() {
 	emu.volume = 70
 	emu.speed = EMU_SPEED_DEFAULT
 	emu.latency = EMU_LATENCY_DEFAULT
-	emu.deadzone = 15
-	emu_set_default_controls()
+	emu.ctl = emu_default_controls()
 
 	if data, err := os.read_entire_file(retro_dir("emulation.ini"), context.temp_allocator); err == nil {
 		text := string(data)
@@ -94,18 +78,7 @@ emu_init :: proc() {
 		emu.speed = clamp(geti(text, "speed", EMU_SPEED_DEFAULT), 0, len(EMU_SPEEDS) - 1)
 		emu.volume = clamp(geti(text, "volume", 70), 0, 100)
 		emu.latency = clamp(geti(text, "latency", EMU_LATENCY_DEFAULT), 0, len(EMU_LATENCIES) - 1)
-		emu.deadzone = clamp(geti(text, "deadzone", 15), 0, 50)
-		emu.swap_ab = geti(text, "swap_ab", 0) != 0
-		for id in 0 ..< 16 {
-			if n := geti(text, fmt.tprintf("pad.%d", id), -1); n >= 0 && n <= int(rl.GamepadButton.RIGHT_THUMB) {
-				emu.pad[id] = rl.GamepadButton(n)
-			}
-			for slot in 0 ..< 2 {
-				if n := geti(text, fmt.tprintf("key.%d.%d", id, slot), -1); n >= 0 && n < 512 {
-					emu.keys[id][slot] = rl.KeyboardKey(n)
-				}
-			}
-		}
+		emu_controls_read(text, &emu.ctl)
 		for p in Retro_Platform {
 			if p == .None do continue
 			if v, found := ini_get(text, fmt.tprintf("core.%s", RETRO_PLATFORM_DIR[p])); found && v != "" {
@@ -118,16 +91,14 @@ emu_init :: proc() {
 
 emu_save :: proc() {
 	b := strings.builder_make(context.temp_allocator)
-	fmt.sbprintf(&b, "[emulation]\naspect=%d\ninteger=%d\nsmooth=%d\nscanlines=%d\nfps=%d\nspeed=%d\nvolume=%d\nlatency=%d\ndeadzone=%d\nswap_ab=%d\n",
+	fmt.sbprintf(&b, "[emulation]\naspect=%d\ninteger=%d\nsmooth=%d\nscanlines=%d\nfps=%d\nspeed=%d\nvolume=%d\nlatency=%d\n",
 		int(emu.aspect), int(emu.integer_scale), int(emu.smooth), emu.scanlines, int(emu.show_fps),
-		emu.speed, emu.volume, emu.latency, emu.deadzone, int(emu.swap_ab))
-	for id in 0 ..< 16 {
-		fmt.sbprintf(&b, "pad.%d=%d\n", id, int(emu.pad[id]))
-		for slot in 0 ..< 2 do fmt.sbprintf(&b, "key.%d.%d=%d\n", id, slot, int(emu.keys[id][slot]))
-	}
+		emu.speed, emu.volume, emu.latency)
+	emu_controls_write(&b, &emu.ctl)
 	for dir, core in emu.cores do fmt.sbprintf(&b, "core.%s=%s\n", dir, core)
 	os.make_directory(retro_dir())
 	_ = os.write_entire_file(retro_dir("emulation.ini"), strings.to_string(b))
+	emu_game_save()
 }
 
 // --- core options chosen in the menu -----------------------------------------------------
@@ -177,7 +148,7 @@ emu_reset_core_options :: proc() {
 
 // Nintendo layout swaps the south/east and west/north buttons.
 emu_joy_id :: proc(id: u8) -> u8 {
-	if !emu.swap_ab do return id
+	if !emu_controls().swap_ab do return id
 	switch id {
 	case RETRO_DEVICE_ID_JOYPAD_B: return RETRO_DEVICE_ID_JOYPAD_A
 	case RETRO_DEVICE_ID_JOYPAD_A: return RETRO_DEVICE_ID_JOYPAD_B
@@ -248,8 +219,6 @@ Emu_Menu :: struct {
 	sel:      int,
 	first:    int, // first visible row
 	t:        f32,
-	capture:  bool, // waiting for a button/key to bind to `sel`
-	wait:     bool, // skip the frame that started the capture
 }
 
 emu_menu: Emu_Menu
@@ -302,7 +271,7 @@ emu_open :: proc(in_game: bool) {
 
 emu_close :: proc() {
 	emu_menu.open = false
-	emu_menu.capture = false
+	emu_capture.on = false
 	emu_save()
 	sfx_back()
 }
@@ -365,15 +334,21 @@ emu_rows :: proc(page: Emu_Page) -> [dynamic]Emu_Row {
 		append(&rows, Emu_Row{label = "Game volume", value = emu_percent(emu.volume), help = "Loudness of emulated games."})
 		append(&rows, Emu_Row{label = "Audio latency", value = fmt.tprintf("%d ms", EMU_LATENCIES[emu.latency]), help = "Lower reacts faster; raise it if the sound crackles."})
 	case .Controls:
-		append(&rows, Emu_Row{label = "Stick deadzone", value = emu_percent(emu.deadzone), help = "How far a stick must move before it counts."})
-		append(&rows, Emu_Row{label = "Nintendo button layout", value = emu_on_off(emu.swap_ab), help = "Swaps A/B and X/Y so the face buttons match Nintendo pads."})
+		c := emu_controls()
+		if emu_bind_row0() == 4 {
+			append(&rows, Emu_Row{label = "Controls for", value = emu_game.has ? "This game only" : "All games",
+				help = emu_game.has ? "This game keeps its own controls. Switch back to use the global ones." : "Switch to give this game its own controls, starting from the global ones."})
+		}
+		append(&rows, Emu_Row{label = "Stick deadzone", value = emu_percent(c.deadzone), help = "How far a stick must move before it counts."})
+		append(&rows, Emu_Row{label = "Nintendo button layout", value = emu_on_off(c.swap_ab), help = "Swaps A/B and X/Y so the face buttons match Nintendo pads."})
 		append(&rows, Emu_Row{label = "Reset controls", value = "", action = true, help = "Restores the default pad and keyboard bindings."})
 		for id in 0 ..< 16 {
-			slot0, slot1 := emu_key_name(emu.keys[id][0]), emu_key_name(emu.keys[id][1])
-			keys := emu.keys[id][1] == .KEY_NULL ? slot0 : fmt.tprintf("%s / %s", slot0, slot1)
-			value := fmt.tprintf("Pad %s   Key %s", emu_pad_name(emu.pad[id]), keys)
-			if emu_menu.capture && emu_menu.sel == 3 + id do value = "Press a button or key…"
-			append(&rows, Emu_Row{label = EMU_BUTTON_NAMES[id], value = value, action = true, help = "A to rebind (player 1 keyboard, all pads). Esc cancels."})
+			value := emu_binds_label(c, id)
+			if emu_capture.on && emu_capture.id == id {
+				value = emu_capture.armed ? fmt.tprintf("Press a key or button...  (%ds, Esc cancels)", emu_capture_left()) : "Release everything..."
+			}
+			append(&rows, Emu_Row{label = EMU_BUTTON_NAMES[id], value = value, action = true,
+				help = "A adds a key or button (up to 4; keys are player 1, pad inputs every player). X clears this button."})
 		}
 	case .Cores:
 		for p in emu_platforms() {
@@ -437,20 +412,23 @@ emu_change :: proc(row: int, delta: int) {
 		}
 		sfx_click()
 	case .Controls:
-		switch row {
-		case 0: emu.deadzone = clamp(emu.deadzone + (delta == 0 ? 5 : delta * 5), 0, 50)
-		case 1: emu.swap_ab = !emu.swap_ab
+		c := emu_controls()
+		r := row
+		if emu_bind_row0() == 4 {
+			if r == 0 {
+				emu_game_set_own(!emu_game.has)
+				sfx_click()
+				return
+			}
+			r -= 1
+		}
+		switch r {
+		case 0: c.deadzone = clamp(c.deadzone + (delta == 0 ? 5 : delta * 5), 0, 50)
+		case 1: c.swap_ab = !c.swap_ab
 		case 2:
-			if delta == 0 {
-				emu_set_default_controls()
-				emu.deadzone = 15
-				emu.swap_ab = false
-			}
+			if delta == 0 do c^ = emu_default_controls()
 		case:
-			if delta == 0 {
-				emu_menu.capture = true
-				emu_menu.wait = true
-			}
+			if delta == 0 do emu_capture_start(r - 3)
 		}
 		sfx_click()
 	case .Cores:
@@ -470,33 +448,14 @@ emu_change :: proc(row: int, delta: int) {
 	}
 }
 
-emu_capture_step :: proc() {
-	if emu_menu.wait {
-		emu_menu.wait = false
-		return
-	}
-	id := emu_menu.sel - 3
-	if rl.IsKeyPressed(.ESCAPE) {
-		emu_menu.capture = false
-		sfx_back()
-		return
-	}
-	if b := rl.GetGamepadButtonPressed(); b != .UNKNOWN {
-		emu.pad[id] = b
-		emu_menu.capture = false
-		sfx_click()
-		return
-	}
-	if k := rl.GetKeyPressed(); k != .KEY_NULL {
-		emu.keys[id] = {k, .KEY_NULL}
-		emu_menu.capture = false
-		sfx_click()
-	}
+// First row of the Controls page that binds a button (the profile row comes first in-game).
+emu_bind_row0 :: proc() -> int {
+	return emu_menu.in_game && emu_game.active ? 4 : 3
 }
 
 emu_menu_input :: proc() {
-	if emu_menu.capture {
-		emu_capture_step()
+	if emu_capture.on {
+		if emu_capture_step(emu_controls()) do eat_input()
 		return
 	}
 	pages := emu_pages()
@@ -531,6 +490,10 @@ emu_menu_input :: proc() {
 	if input.left && !row.action do emu_change(emu_menu.sel, -1)
 	if input.right && !row.action do emu_change(emu_menu.sel, 1)
 	if input.confirm do emu_change(emu_menu.sel, 0)
+	if input.action && emu_menu.page == .Controls && emu_menu.sel >= emu_bind_row0() {
+		emu_controls().binds[emu_menu.sel - emu_bind_row0()] = {}
+		sfx_back()
+	}
 }
 
 EMU_ROW_H :: 50
@@ -558,7 +521,7 @@ emu_menu_draw :: proc(w, h: f32) {
 		tw := measure_t(label, 18) + 28
 		tr := rl.Rectangle{tx, ty, tw, 34}
 		active := p == emu_menu.page
-		hovered := !emu_menu.capture && mouse_over(tr, true)
+		hovered := !emu_capture.on && mouse_over(tr, true)
 		if active || hovered {
 			rl.DrawRectangleRounded(tr, 1, 8, with_alpha(COL_ACCENT, active ? 60 : 30))
 		}
@@ -587,7 +550,7 @@ emu_menu_draw :: proc(w, h: f32) {
 	for i in emu_menu.first ..< min(len(rows), emu_menu.first + vis) {
 		row := rows[i]
 		r := rl.Rectangle{list.x, list.y + f32(i - emu_menu.first) * (EMU_ROW_H + EMU_ROW_GAP), list.width, EMU_ROW_H}
-		if !emu_menu.capture && !input.using_pad && mouse_over(r, true) && rl.GetMouseDelta() != {} && emu_menu.sel != i {
+		if !emu_capture.on && !input.using_pad && mouse_over(r, true) && rl.GetMouseDelta() != {} && emu_menu.sel != i {
 			emu_menu.sel = i
 			hover_enter(fmt.tprintf("emu-%d", i))
 		}
@@ -599,12 +562,12 @@ emu_menu_draw :: proc(w, h: f32) {
 		if row.action {
 			draw_t_fit(row.value, val.x + 8, r.y + 15, val.width - 50, 18, focused ? COL_TEXT : COL_MUTED, false)
 			draw_glyph("A", val.x + val.width - 30, r.y + r.height * 0.5)
-			if focused && mouse_over(r, true) && rl.IsMouseButtonPressed(.LEFT) do emu_change(i, 0)
-		} else if d := emu_stepper(val, row.value, focused); d != 0 {
+			if !emu_capture.on && focused && mouse_over(r, true) && rl.IsMouseButtonPressed(.LEFT) do emu_change(i, 0)
+		} else if d := emu_stepper(val, row.value, focused); d != 0 && !emu_capture.on {
 			emu_menu.sel = i
 			emu_change(i, d)
 		}
-		if !row.action && focused && mouse_over(rl.Rectangle{r.x, r.y, r.width * 0.42, r.height}, true) && rl.IsMouseButtonPressed(.LEFT) {
+		if !emu_capture.on && !row.action && focused && mouse_over(rl.Rectangle{r.x, r.y, r.width * 0.42, r.height}, true) && rl.IsMouseButtonPressed(.LEFT) {
 			emu_change(i, 0)
 		}
 	}
@@ -617,8 +580,14 @@ emu_menu_draw :: proc(w, h: f32) {
 	}
 	draw_t_fit(rows[emu_menu.sel].help, pr.x + 28, pr.y + pr.height - 38, pr.width - 56, 16, COL_MUTED, false)
 
-	hints := [?]Hint{{"B", "Back"}, {"LB/RB", "Page"}, {"A", "Select"}}
-	draw_hints(w, h, hints[:])
+	if emu_capture.on {
+		draw_hints(w, h, []Hint{{"Esc", "Cancel"}})
+	} else if emu_menu.page == .Controls && emu_menu.sel >= emu_bind_row0() {
+		draw_hints(w, h, []Hint{{"B", "Back"}, {"LB/RB", "Page"}, {"A", "Add"}, {"X", "Clear"}})
+	} else {
+		hints := [?]Hint{{"B", "Back"}, {"LB/RB", "Page"}, {"A", "Select"}}
+		draw_hints(w, h, hints[:])
+	}
 }
 
 // "<  value  >" with clickable arrows; returns -1 / +1 for a click.

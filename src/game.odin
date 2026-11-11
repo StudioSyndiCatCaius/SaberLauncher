@@ -38,6 +38,7 @@ Game :: struct {
 	rom_name:         string,         // its file name without extension, e.g. "Super Mario World (USA)"
 	rom_crc:          string,         // CRC32 of the ROM as hex ("" when too big to hash on scan)
 	gdrom:            bool,           // a pressed Dreamcast GD-ROM: listed, but unplayable from a PC drive
+	bios_dir:         string,         // != "": the "Install BIOS" card of a drive's bios folder (bios.odin)
 	suspended:        bool,           // cached game_suspended
 	suspend_checked:  f64,
 	// filled by a drive scan on the worker thread, finished on the main thread (game_finish_scan)

@@ -1,6 +1,7 @@
 -- RetroarchExtras: downloads the libretro cores Saber plays discs and ROMs with, from the libretro buildbot
 --   https://buildbot.libretro.com/nightly/windows/x86_64/latest/
--- Cores go to APP/libretro/cores (PSP also gets PPSSPP's assets in APP/libretro/system/PPSSPP).
+-- Cores go to APP/libretro/cores (PSP also gets PPSSPP's assets in APP/libretro/system/PPSSPP,
+-- GameCube / Wii gets Dolphin's Sys folder in APP/libretro/system/dolphin-emu).
 -- Cores are GPL software by their authors (sources: https://github.com/libretro); never BIOS files.
 -- Needs Online Mode (Settings).
 
@@ -14,7 +15,7 @@ local CORES = {
       alts = { "mednafen_psx_hw_libretro.dll", "mednafen_psx_libretro.dll", "pcsx_rearmed_libretro.dll" } },
     { platform = "ps2", system = "PlayStation 2", file = "pcsx2_libretro.dll" },
     { platform = "psp", system = "PlayStation Portable", file = "ppsspp_libretro.dll",
-      extra = { url = "https://buildbot.libretro.com/assets/system/PPSSPP.zip", dest = SYSTEM_DIR, check = "PPSSPP" } },
+      extra = { url = "https://buildbot.libretro.com/assets/system/PPSSPP.zip", dest = SYSTEM_DIR, check = "PPSSPP", label = "PPSSPP assets" } },
     { platform = "dc", system = "Dreamcast", file = "flycast_libretro.dll" },
     -- cartridge systems (ROM files on a drive)
     { platform = "nes", system = "NES", file = "mesen_libretro.dll",
@@ -40,6 +41,9 @@ local CORES = {
       alts = { "mednafen_pce_libretro.dll" } },
     { platform = "a2600", system = "Atari 2600", file = "stella_libretro.dll",
       alts = { "stella2014_libretro.dll" } },
+    -- Dolphin needs its Sys folder (fonts, game settings, shaders) in APP/libretro/system/dolphin-emu
+    { platform = "gc", system = "GameCube / Wii", file = "dolphin_libretro.dll",
+      extra = { url = "https://buildbot.libretro.com/assets/system/Dolphin.zip", dest = SYSTEM_DIR, check = "dolphin-emu", label = "Dolphin assets" } },
 }
 
 local busy = false
@@ -60,6 +64,7 @@ local function installed(core)
 end
 
 local function core_for(platform)
+    if platform == "wii" then platform = "gc" end -- one Dolphin core plays both
     for _, c in ipairs(CORES) do
         if c.platform == platform then return c end
     end
@@ -133,7 +138,7 @@ local function choose_core()
     for _, c in ipairs(CORES) do
         table.insert(items, {
             name = c.system .. (installed(c) and "  (installed)" or ""),
-            description = c.file .. (c.extra and " + PPSSPP assets" or "") ..
+            description = c.file .. (c.extra and (" + " .. c.extra.label) or "") ..
                 (installed(c) and " - re-downloads the latest nightly" or ""),
             Do = function()
                 if busy then return "A download is already running" end
@@ -147,8 +152,8 @@ end
 
 return {
     name = "RetroarchExtras",
-    version = "1.1",
-    description = "Downloads the libretro cores Saber plays PlayStation, PS2, PSP and Dreamcast discs, and NES to Nintendo DS ROMs with. " ..
+    version = "1.3",
+    description = "Downloads the libretro cores Saber plays PlayStation, PS2, PSP and Dreamcast discs, GameCube / Wii images, and NES to Nintendo DS ROMs with. " ..
         "Cores are open source (GPL) from buildbot.libretro.com. BIOS files are not included: put your own in APP/libretro/system.",
 
     settings = {
@@ -192,6 +197,22 @@ return {
             end,
         },
     },
+
+    -- Game actions menu (X / right-click on a card): get or update the core that plays it.
+    game_actions = function(game)
+        local c = core_for(game.platform)
+        if not c then return {} end
+        local have = installed(c)
+        return { {
+            name = (have and "Update " or "Download ") .. c.system .. " Core",
+            description = c.file .. (c.extra and (" + " .. c.extra.label) or ""),
+            Do = function()
+                if busy then return "A download is already running" end
+                if not Online() then return "Turn on Online Mode (Settings) to download cores" end
+                download({ c })
+            end,
+        } }
+    end,
 
     on_disc = function(game)
         if (game.kind ~= "disc" and game.kind ~= "rom") or busy or offered[game.platform] then return end

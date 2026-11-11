@@ -88,6 +88,7 @@ scan_portable_drives :: proc(out: ^[dynamic]Game) {
 		}
 		if has_files {
 			scan_roms(out, root_str, label)
+			if g, ok := bios_game(root_str, label); ok do append(out, g)
 		}
 	}
 }

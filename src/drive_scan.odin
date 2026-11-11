@@ -79,6 +79,10 @@ drive_scan_label :: proc() -> string {
 
 // Main loop: picks up a finished scan.
 drive_scan_update :: proc() {
+	if !bios_art_ok do for g in app.drive_games do if g.bios_dir != "" {
+		bios_art_ensure() // outside the frame's drawing; the startup scan doesn't come through here
+		break
+	}
 	if !drive_scan.running || !sync.atomic_load(&drive_scan.done) do return
 	thread.join(drive_scan.worker)
 	thread.destroy(drive_scan.worker)

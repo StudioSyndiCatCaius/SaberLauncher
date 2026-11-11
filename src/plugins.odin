@@ -9,6 +9,7 @@ package saber
 //     games    = { ["SLUS-00892"] = { title=, year=, developer=, publisher=, genre=, disc=, discs= } },
 //     on_game  = function(game) return { ...same fields as a games entry... } end,  -- optional
 //     actions  = { id = { name=, description=, online=, Do=function() end } },  -- Plugins tab
+//     game_actions = function(game) return { { name=, Do=function() end } } end,  -- a card's actions menu (plugin_hooks.odin)
 //     settings = { ... }, on_disc = function(game) end   -- see plugin_hooks.odin
 //   on_game / games entries may also return box = "<image path>" (cover art).
 //   }

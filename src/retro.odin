@@ -43,6 +43,8 @@ Retro_Platform :: enum {
 	NDS,
 	PCE,
 	A2600,
+	GC,  // GameCube / Wii: image files only (.iso/.gcm/.ciso/.rvz/.wbfs...), no drive reading
+	WII,
 }
 
 RETRO_PLATFORM_NAME := [Retro_Platform]string {
@@ -63,6 +65,8 @@ RETRO_PLATFORM_NAME := [Retro_Platform]string {
 	.NDS   = "Nintendo DS",
 	.PCE   = "PC Engine / TurboGrafx-16",
 	.A2600 = "Atari 2600",
+	.GC    = "GameCube",
+	.WII   = "Wii",
 }
 RETRO_PLATFORM_DIR := [Retro_Platform]string {
 	.None  = "",
@@ -82,6 +86,8 @@ RETRO_PLATFORM_DIR := [Retro_Platform]string {
 	.NDS   = "nds",
 	.PCE   = "pce",
 	.A2600 = "a2600",
+	.GC    = "gc",
+	.WII   = "wii",
 }
 
 // First core found wins.
@@ -103,6 +109,8 @@ RETRO_CORES := [Retro_Platform][]string {
 	.NDS   = {"melondsds_libretro.dll", "melonds_libretro.dll", "desmume_libretro.dll"},
 	.PCE   = {"mednafen_pce_fast_libretro.dll", "mednafen_pce_libretro.dll"},
 	.A2600 = {"stella_libretro.dll", "stella2014_libretro.dll"},
+	.GC    = {"dolphin_libretro.dll"},
+	.WII   = {"dolphin_libretro.dll"},
 }
 
 // Saber only presents software frames, so make cores pick their software renderer.
@@ -152,7 +160,12 @@ Retro :: struct {
 	joy:             [4]u16,
 	analog:          [4][2][2]i16, // port, stick, axis
 	trigger:         [4][2]i16,
-	block_input:     bool, // after the overlay closes, until every button is released
+	// After the overlay closes, whatever the game would see as held is hidden from it until
+	// that very input is released (judged with the game's own bindings and thresholds).
+	hold_capture:    bool,
+	hold_joy:        [4]u16,
+	hold_analog:     [4][2]bool,
+	hold_trigger:    [4][2]bool,
 	single_samples:  [dynamic]i16,
 	controller_ports: int,
 	controller_dev:  u32,
@@ -496,6 +509,8 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 	retro.assets_dir_c = strings.clone_to_cstring(retro_dir())
 	retro.core_path_c = strings.clone_to_cstring(core_path)
 	save_key, cart := retro_save_key(g)
+	emu_game_begin(g, save_key)
+	defer emu_game_end()
 	switch {
 	case cart:             retro.sram_path = path_join({saves, fmt.tprintf("%s.srm", save_key)})
 	case g.mod_name != "": retro.sram_path = path_join({saves, fmt.tprintf("Memory Card-%s.srm", save_key)})
@@ -655,7 +670,8 @@ retro_run_loop :: proc(g: ^Game) {
 			rl.PauseAudioStream(raudio.stream)
 			retro_pause_menu(g)
 			rl.ResumeAudioStream(raudio.stream)
-			retro.block_input = true
+			retro.hold_capture = true
+			combo_guard_reset()
 			retro.has_run = false
 			next_frame = time.tick_now()
 			if retro.quit do break
@@ -979,6 +995,11 @@ retro_pause_pressed :: proc() -> bool {
 }
 
 retro_pause_menu :: proc(g: ^Game) {
+	// Overlay owns the pad: drop the last in-game snapshot so a core that
+	// samples input while we are paused cannot see the A/B that closes us.
+	retro.joy = {}
+	retro.analog = {}
+	retro.trigger = {}
 	sfx_click()
 	app.pause_sel = 0
 	app.pause_t = 0
@@ -1306,7 +1327,7 @@ RETRO_KEY_BINDS := [?]Retro_Key_Bind {
 }
 
 stick_axis :: proc(v: f32) -> i16 {
-	if abs(v) < f32(emu.deadzone) / 100 do return 0
+	if abs(v) < f32(emu_controls().deadzone) / 100 do return 0
 	return i16(clamp(v, -1, 1) * 32767)
 }
 
@@ -1319,30 +1340,15 @@ retro_update_input :: proc() {
 	retro.analog = {}
 	retro.trigger = {}
 
-	if retro.block_input {
-		any_down := rl.GetKeyPressed() != .KEY_NULL
-		for keys in emu.keys do for k in keys do if k != .KEY_NULL && rl.IsKeyDown(k) do any_down = true
-		for p in 0 ..< i32(MAX_PADS) {
-			if !rl.IsGamepadAvailable(p) do continue
-			for b in emu.pad do if b != .UNKNOWN && rl.IsGamepadButtonDown(p, b) do any_down = true
-		}
-		if any_down do return
-		retro.block_input = false
-	}
-
 	// Connected pads fill ports in order, whatever index raylib gave them.
 	port := 0
 	for p in 0 ..< i32(MAX_PADS) {
 		if !rl.IsGamepadAvailable(p) do continue
-		bits: u16
-		for button, id in emu.pad {
-			if button != .UNKNOWN && rl.IsGamepadButtonDown(p, button) do bits |= 1 << emu_joy_id(u8(id))
-		}
 		lt := trigger_axis(rl.GetGamepadAxisMovement(p, .LEFT_TRIGGER))
 		rt := trigger_axis(rl.GetGamepadAxisMovement(p, .RIGHT_TRIGGER))
-		if lt > 4000 do bits |= 1 << RETRO_DEVICE_ID_JOYPAD_L2
-		if rt > 4000 do bits |= 1 << RETRO_DEVICE_ID_JOYPAD_R2
-		retro.joy[port] = bits
+		combo_guard_step(p)
+		retro.joy[port] = emu_pad_bits(emu_controls(), p)
+		combo_override = {}
 		retro.trigger[port] = {lt, rt}
 		retro.analog[port] = {
 			{stick_axis(rl.GetGamepadAxisMovement(p, .LEFT_X)), stick_axis(rl.GetGamepadAxisMovement(p, .LEFT_Y))},
@@ -1351,8 +1357,101 @@ retro_update_input :: proc() {
 		port += 1
 		if port >= 4 do break
 	}
-	for keys, id in emu.keys {
-		for k in keys do if k != .KEY_NULL && rl.IsKeyDown(k) do retro.joy[0] |= 1 << emu_joy_id(u8(id))
+	retro.joy[0] |= emu_key_bits(emu_controls())
+	retro_hide_held()
+}
+
+// Menu A/B/Start are edge-triggered but the game reads level, so the press that closed the
+// overlay (or anything else still down) used to land in-game. Snapshot exactly what the game
+// would see on the first frame back, and keep each input hidden until it is let go.
+TRIGGER_RELEASED :: 0x1000 // analog triggers rarely settle at exactly 0
+
+retro_hide_held :: proc() {
+	if retro.hold_capture {
+		retro.hold_capture = false
+		retro.hold_joy = retro.joy
+		for port in 0 ..< 4 {
+			for s in 0 ..< 2 {
+				retro.hold_analog[port][s] = retro.analog[port][s] != {}
+				retro.hold_trigger[port][s] = retro.trigger[port][s] >= TRIGGER_RELEASED
+			}
+		}
+	}
+	for port in 0 ..< 4 {
+		retro.hold_joy[port] &= retro.joy[port]
+		retro.joy[port] &~= retro.hold_joy[port]
+		for s in 0 ..< 2 {
+			if retro.hold_analog[port][s] {
+				if retro.analog[port][s] == {} {
+					retro.hold_analog[port][s] = false
+				} else {
+					retro.analog[port][s] = {}
+				}
+			}
+			if retro.hold_trigger[port][s] {
+				if retro.trigger[port][s] < TRIGGER_RELEASED {
+					retro.hold_trigger[port][s] = false
+				} else {
+					retro.trigger[port][s] = 0
+				}
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Back + Start opens the overlay on pads without a usable guide button. Whichever half went
+// down first used to reach the game before the combo completed, so a lone Back or Start is
+// held back for COMBO_WAIT; a tap shorter than that is delivered afterwards as a short pulse.
+
+COMBO_WAIT :: 0.12
+COMBO_PULSE_FRAMES :: 4
+COMBO_BUTTONS := [2]rl.GamepadButton{.MIDDLE_LEFT, .MIDDLE_RIGHT}
+
+Combo_Guard :: struct {
+	down_at: [2]f64,
+	pulse:   [2]int,
+	eaten:   bool, // both went down together: neither reaches the game until both are up
+}
+
+combo_guard: [MAX_PADS]Combo_Guard
+combo_override: [2]i8 // for the pad being read: -1 forced up, 1 forced down (emu_pad_bits)
+
+combo_guard_reset :: proc() {
+	for p in 0 ..< i32(MAX_PADS) {
+		g := &combo_guard[p]
+		g^ = {}
+		if rl.IsGamepadAvailable(p) {
+			g.eaten = rl.IsGamepadButtonDown(p, .MIDDLE_LEFT) || rl.IsGamepadButtonDown(p, .MIDDLE_RIGHT)
+		}
+	}
+}
+
+combo_guard_step :: proc(p: i32) {
+	g := &combo_guard[p]
+	now := rl.GetTime()
+	down: [2]bool
+	for b, i in COMBO_BUTTONS do down[i] = rl.IsGamepadButtonDown(p, b)
+	if down[0] && down[1] do g.eaten = true
+	if g.eaten {
+		if !down[0] && !down[1] do g.eaten = false
+		g.down_at, g.pulse = {}, {}
+		combo_override = {-1, -1}
+		return
+	}
+	combo_override = {}
+	for i in 0 ..< 2 {
+		if down[i] {
+			if g.down_at[i] == 0 do g.down_at[i] = now
+			if now - g.down_at[i] < COMBO_WAIT do combo_override[i] = -1
+		} else if g.down_at[i] != 0 {
+			if now - g.down_at[i] < COMBO_WAIT do g.pulse[i] = COMBO_PULSE_FRAMES
+			g.down_at[i] = 0
+		}
+		if g.pulse[i] > 0 {
+			g.pulse[i] -= 1
+			combo_override[i] = 1
+		}
 	}
 }
 

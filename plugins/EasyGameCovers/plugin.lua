@@ -3,10 +3,13 @@
 --   PSP: libretro's serial list names the game, its box art comes from thumbnails.libretro.com
 --   ROMs (GB, GBA, NES, SNES...): the ROM's CRC32 is looked up in libretro's No-Intro list,
 --   falling back to the file name; box art from thumbnails.libretro.com
+--   GameCube / Wii: by the disc's 6-character game ID from https://www.gametdb.com (flat or 3D,
+--   region picked from the ID); images without an ID (.gcz) by file name from thumbnails.libretro.com
 -- Covers are downloaded on demand (never bundled) into this plugin's covers/ folder.
 -- Needs Online Mode (Settings) to download; covers already on disk are always shown.
 
 local LIBRETRO_THUMBS = "https://thumbnails.libretro.com/"
+local GAMETDB = "https://art.gametdb.com/wii/"
 local LIBRETRO_DB = "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/"
 
 -- Saber platform -> libretro system name, for ROM games
@@ -34,11 +37,38 @@ local SOURCES = {
     ps2 = "https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/",
     psp = LIBRETRO_THUMBS .. "Sony%20-%20PlayStation%20Portable/Named_Boxarts/",
     dc = LIBRETRO_THUMBS .. "Sega%20-%20Dreamcast/Named_Boxarts/",
+    gc = GAMETDB,
+    wii = GAMETDB,
 }
+-- GameCube / Wii images without a game ID fall back to libretro's thumbnails, by file name
+local DOLPHIN_NAMED = {
+    gc = LIBRETRO_THUMBS .. "Nintendo%20-%20GameCube/Named_Boxarts/",
+    wii = LIBRETRO_THUMBS .. "Nintendo%20-%20Wii/Named_Boxarts/",
+}
+
+local function is_game_id(serial)
+    return #serial == 6 and serial:match("^[%u%d]+$") ~= nil
+end
+
+-- 4th character of a game ID = region; GameTDB folder to try first, then the common ones
+local GAMETDB_REGION = {
+    E = "US", J = "JA", K = "KO", W = "ZH", D = "DE", F = "FR", S = "ES", I = "IT",
+    H = "NL", U = "AU", R = "RU", P = "EN", X = "EN", Y = "EN", Z = "EN", L = "EN", M = "EN",
+}
+
+local function gametdb_regions(id)
+    local list, seen = {}, {}
+    for _, r in ipairs({ GAMETDB_REGION[id:sub(4, 4)] or "EN", "EN", "US", "JA" }) do
+        if not seen[r] then seen[r] = true list[#list + 1] = r end
+    end
+    return list
+end
 -- serial (or ROM CRC) -> No-Intro / redump name, for sources that name covers by title
 local NAME_LISTS = {
     psp = LIBRETRO_DB .. "serial/Sony%20-%20PlayStation%20Portable.dat",
     dc = LIBRETRO_DB .. "redump/Sega%20-%20Dreamcast.dat",
+    gc = LIBRETRO_DB .. "redump/Nintendo%20-%20GameCube.dat",
+    wii = LIBRETRO_DB .. "redump/Nintendo%20-%20Wii.dat",
 }
 for plat, sys in pairs(ROM_SYSTEMS) do
     SOURCES[plat] = LIBRETRO_THUMBS .. url_encode(sys) .. "/Named_Boxarts/"
@@ -50,13 +80,14 @@ local function style()
     return Setting("style") == "3D" and "3d" or "default"
 end
 
--- libretro only has flat PSP covers (png); 3D falls back to flat
+-- libretro only has flat covers (png); 3D falls back to flat
 local function style_for(game, st)
+    if DOLPHIN_NAMED[game.platform] then return is_game_id(game.serial) and st or "default" end
     return NAME_LISTS[game.platform] and "default" or st
 end
 
 local function ext(game, st)
-    if NAME_LISTS[game.platform] then return ".png" end
+    if NAME_LISTS[game.platform] or DOLPHIN_NAMED[game.platform] then return ".png" end
     return st == "3d" and ".png" or ".jpg"
 end
 
@@ -96,6 +127,25 @@ local function load_names(plat)
             local c = line:match('^%s*rom%s*%(.-%scrc%s+(%x+)')
             if c and last then map[c:upper()] = last end
         end
+    elseif DOLPHIN_NAMED[plat] then
+        -- redump: game ( name "Super Mario Galaxy (USA, Canada) (En,Fr,Es)" serial "RVL-RMGE-USA" ...
+        -- the serial's 4-character code is the start of the disc's game ID (RMGE01)
+        -- Several releases can share a code (Korean discs reuse US IDs): prefer the one whose
+        -- serial region matches the code's region letter
+        local SUFFIX = { E = "USA", P = "EUR", J = "JPN", K = "KOR", D = "GER", F = "FRA", S = "SPA", I = "ITA", U = "AUS" }
+        local exact = {}
+        for line in text:gmatch("[^\r\n]+") do
+            local n = line:match('^%s*name%s+"(.*)"')
+            if n then last = n end
+            local code, suffix = line:match('^%s*serial%s+"[^"]-%-(%w%w%w%w)%-(%u+)"')
+            if code and last and not exact[code] then
+                if SUFFIX[code:sub(4, 4)] == suffix then
+                    map[code], exact[code] = last, true
+                else
+                    map[code] = map[code] or last
+                end
+            end
+        end
     elseif plat == "dc" then
         -- redump: game ( name "Crazy Taxi (USA) (En,Ja)" serial "51035" ... ). Discs carry
         -- "MK-51035" in IP.BIN, and libretro's thumbnails drop the language tag.
@@ -129,8 +179,51 @@ local function load_names(plat)
     return true
 end
 
+-- libretro's thumbnail names don't always match redump's: "Super Mario Galaxy (USA, Canada)
+-- (En,Fr,Es)" is filed as "Super Mario Galaxy (USA)". Full name first, then without the
+-- language tag, then with only the first region.
+local function name_variants(name)
+    local out, seen = {}, {}
+    local function add(n)
+        if not seen[n] then seen[n] = true out[#out + 1] = n end
+    end
+    local function first_region(n) return (n:gsub("%((%a+), [^)]*%)", "(%1)", 1)) end
+    -- "(En,Fr)" / "(Ja)": two-letter codes only, so "(Europe)" stays
+    local nolang = name:gsub("%s*(%b())", function(g)
+        if g:match("^%(%u%l[%u%l,]*%)$") and not g:find("%l%l") then return "" end
+    end)
+    add(name)
+    add(nolang)
+    add(first_region(nolang))
+    add(first_region(name))
+    return out
+end
+
 -- nil while the name list isn't loaded, false when the serial isn't known
 local function cover_url(game, st)
+    if DOLPHIN_NAMED[game.platform] then
+        -- best first: libretro's 512x729 scan by redump name, then GameTDB's (160x224 flat,
+        -- 176x248 3D) by game ID, region by region
+        local map = names[game.platform]
+        if not map then return nil end
+        local id = is_game_id(game.serial)
+        local urls = {}
+        local name = id and map[game.serial:sub(1, 4)] or game.file
+        if name and name ~= "" and style_for(game, st) ~= "3d" then
+            for _, n in ipairs(name_variants(name)) do
+                n = n:gsub('[&%*/:`<>%?\\|"]', "_")
+                urls[#urls + 1] = DOLPHIN_NAMED[game.platform] .. url_encode(n) .. ".png"
+            end
+        end
+        if id then
+            local kind = style_for(game, st) == "3d" and "cover3D/" or "cover/"
+            for _, r in ipairs(gametdb_regions(game.serial)) do
+                urls[#urls + 1] = GAMETDB .. kind .. r .. "/" .. game.serial .. ".png"
+            end
+        end
+        if #urls == 0 then return false end
+        return urls
+    end
     if NAME_LISTS[game.platform] then
         local map = names[game.platform]
         if not map then return nil end
@@ -194,7 +287,18 @@ local function run_queue(quiet)
                 missing[#missing + 1] = g.serial .. " (not in the name list)"
                 finished, current = finished + 1, nil
             else
-                Http_Download(cover_url(g, st), cover_rel(g, st), function(ok, result)
+                local urls = cover_url(g, st)
+                if type(urls) == "string" then urls = { urls } end
+                local try = (g._try or 0) + 1
+                Http_Download(urls[try], cover_rel(g, st), function(ok, result)
+                    if not ok and urls[try + 1] then
+                        -- another region / source to try: back to the front of the queue
+                        g._try = try
+                        table.insert(queue, 1, g)
+                        current = nil
+                        return
+                    end
+                    g._try = nil
                     pending[g.serial] = nil
                     if ok then
                         got = got + 1
@@ -260,8 +364,8 @@ end
 
 return {
     name = "EasyGameCovers",
-    version = "1.0",
-    description = "Downloads box art for inserted PlayStation, PS2, PSP and Dreamcast discs, and ROMs on inserted drives.",
+    version = "1.2",
+    description = "Downloads box art for inserted PlayStation, PS2, PSP and Dreamcast discs, GameCube / Wii images, and ROMs on inserted drives.",
 
     settings = {
         style = { name = "Cover Style", description = "Flat box scans or 3D case renders", type = 'enum', options = { 'Flat', '3D' }, default = 1, order = 1 },
@@ -313,6 +417,27 @@ return {
             end,
         },
     },
+
+    -- Game actions menu (X / right-click on a card): fetch or replace this game's cover.
+    game_actions = function(game)
+        if not SOURCES[game.platform] or game.serial == "" then return {} end
+        local rel = cover_rel(game, style())
+        local have = exists(rel)
+        return { {
+            name = have and "Re-download Box Art" or "Download Box Art",
+            description = "Fetch this game's cover from the web",
+            Do = function()
+                if not Online() then return "Turn on Online Mode (Settings) to download box art" end
+                if busy then return "Covers are already downloading" end
+                if have then
+                    os.remove(abs(rel))
+                    Set_Art(game.serial, nil)
+                end
+                failed[game.serial], pending[game.serial] = nil, nil
+                if ensure_covers({ game }, false, true) == 0 then return "No cover source for this game" end
+            end,
+        } }
+    end,
 
     -- Every scan: point Saber at a cover that's already on disk.
     on_game = function(game)
