@@ -290,7 +290,7 @@ draw_footer :: proc(w, h: f32) {
 		// the dialog draws its own hints
 	case explorer.open:
 		explorer_hints(w, h)
-	case app.power_open, game_menu.open, bios_menu.open:
+	case app.power_open, game_menu.open, bios_menu.open, app_menu.open:
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Back"}})
 	case drives_menu.open:
 		draw_hints(w, h, []Hint{{"A", "Toggle"}, {"B", "Done"}})
@@ -324,7 +324,7 @@ draw_footer :: proc(w, h: f32) {
 	case app.screen == .Library:
 		draw_hints(w, h, []Hint{{"A", "Play"}, {"X", "Actions"}, {"B", "Home"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}})
 	case app.screen == .Apps:
-		draw_hints(w, h, []Hint{{"A", "Open"}, {"X", "Autostart"}, {"B", "Home"}, {"Y", "Get Apps"}, {"LB / RB", "Menus"}})
+		draw_hints(w, h, []Hint{{"A", "Open"}, {"X", "Actions"}, {"B", "Home"}, {"Y", "Get Apps"}, {"LB / RB", "Menus"}})
 	case:
 		draw_hints(w, h, []Hint{{"A", app.screen == .Apps ? "Open" : "Play"}, {"B", "Home"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}})
 	}
@@ -452,6 +452,11 @@ card_mouse :: proc(s: Screen, i: int, r: rl.Rectangle) {
 	if (s == .Main || s == .Library) && rl.IsMouseButtonPressed(.RIGHT) {
 		grid_selection(s)^ = i
 		game_menu_open(s, i)
+		return
+	}
+	if s == .Apps && rl.IsMouseButtonPressed(.RIGHT) {
+		grid_selection(s)^ = i
+		app_menu_open(i)
 		return
 	}
 	if rl.IsMouseButtonPressed(.LEFT) {

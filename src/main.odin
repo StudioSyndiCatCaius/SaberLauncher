@@ -188,6 +188,7 @@ main :: proc() {
 		draw_install_card(w, h)
 		draw_power_dialog(w, h)
 		draw_game_menu(w, h)
+		draw_app_menu(w, h)
 		draw_bios_menu(w, h)
 		draw_file_explorer(w, h)
 		draw_plugin_dialog(w, h)
@@ -388,7 +389,7 @@ draw_menus :: proc(w, h: f32) {
 
 // A modal is on screen (fading in or out included).
 dialog_visible :: proc() -> bool {
-	return app.power_open || app.power_t >= 0.02 || plugin_dialog_open() || emu_menu.open || emu_menu.t >= 0.02 || game_menu.open || game_menu.t >= 0.02 || bios_menu.open || bios_menu.t >= 0.02 || explorer.open || explorer.t >= 0.02
+	return app.power_open || app.power_t >= 0.02 || plugin_dialog_open() || emu_menu.open || emu_menu.t >= 0.02 || game_menu.open || game_menu.t >= 0.02 || app_menu.open || app_menu.t >= 0.02 || bios_menu.open || bios_menu.t >= 0.02 || explorer.open || explorer.t >= 0.02
 }
 
 input_locked :: proc() -> bool {
@@ -435,6 +436,12 @@ handle_app_input :: proc() {
 	}
 	if game_menu.open {
 		game_menu_input()
+		eat_input()
+		input.mouse_eaten = true
+		return
+	}
+	if app_menu.open {
+		app_menu_input()
 		eat_input()
 		input.mouse_eaten = true
 		return
@@ -530,7 +537,7 @@ handle_app_input :: proc() {
 		} else if input.action && app.screen == .Library {
 			game_menu_open(.Library, sel^)
 		} else if input.action && app.screen == .Apps && len(app.shell_apps) > 0 {
-			toggle_autostart_app(&app.shell_apps[sel^])
+			app_menu_open(sel^)
 		}
 	case .Plugins:
 		handle_plugins_input()

@@ -269,3 +269,135 @@ draw_apps :: proc(w, h: f32) {
 	}
 	draw_grid_page(.Apps, "APPS", "No apps yet. Press Y to get some, or add a .toml (name, exe, exe_args) to APP/apps.", w, h)
 }
+
+// ---------------------------------------------------------------------------
+// Actions menu (X / right-click on an APPS card): Open, Autostart, Delete, [Uninstall], Close.
+// Delete (press twice) = app_delete_toml without the uninstaller: store installs lose their app/
+// folder, linked / hand-made apps only lose the card (.toml + art). Uninstall (press twice, only for
+// store installs with an `uninstall=` command) runs that uninstaller first, then deletes the same.
+
+App_Menu_Row :: enum {
+	Open,
+	Autostart,
+	Delete,
+	Uninstall,
+	Close,
+}
+
+app_menu: struct {
+	open:     bool,
+	t:        f32,
+	sel:      int,
+	toml_buf: [512]u8,
+	toml:     string, // the card's .toml: a rescan replaces the list, so it is looked up again
+	armed:    bool,   // Delete / Uninstall pressed once (the selected row)
+}
+
+app_menu_open :: proc(i: int) {
+	if input_locked() || i < 0 || i >= len(app.shell_apps) do return
+	app_menu.toml = fmt.bprint(app_menu.toml_buf[:], app.shell_apps[i].toml_file)
+	app_menu.sel = 0
+	app_menu.armed = false
+	app_menu.open = true
+	sfx_click()
+}
+
+app_menu_index :: proc() -> int {
+	for &a, i in app.shell_apps do if a.toml_file == app_menu.toml do return i
+	return -1
+}
+
+app_menu_rows :: proc(a: ^Shell_App) -> []App_Menu_Row {
+	rows := make([dynamic]App_Menu_Row, context.temp_allocator)
+	append(&rows, App_Menu_Row.Open, App_Menu_Row.Autostart, App_Menu_Row.Delete)
+	if plan := app_delete_plan(a.toml_file); plan.program != "" && plan.uninstall != "" do append(&rows, App_Menu_Row.Uninstall)
+	append(&rows, App_Menu_Row.Close)
+	return rows[:]
+}
+
+app_menu_input :: proc() {
+	i := app_menu_index()
+	if i < 0 {
+		app_menu.open = false
+		return
+	}
+	rows := app_menu_rows(&app.shell_apps[i])
+	n := len(rows)
+	app_menu.sel = clamp(app_menu.sel, 0, n - 1)
+	if input.up || input.down {
+		app_menu.sel = (app_menu.sel + (input.up ? n - 1 : 1)) % n
+		app_menu.armed = false
+		sfx_click()
+	}
+	if input.cancel || input.action || input.power {
+		app_menu.open = false
+		sfx_back()
+		return
+	}
+	if input.confirm do app_menu_choose(i, rows[app_menu.sel])
+}
+
+app_menu_choose :: proc(i: int, row: App_Menu_Row) {
+	a := &app.shell_apps[i]
+	switch row {
+	case .Open:
+		app_menu.open = false
+		app.pending_open = [2]int{int(Screen.Apps), i}
+	case .Autostart:
+		toggle_autostart_app(a)
+	case .Delete, .Uninstall:
+		if !app_menu.armed {
+			app_menu.armed = true
+			sfx_click()
+			return
+		}
+		app_menu.open = false
+		name := strings.clone(a.title, context.temp_allocator)
+		ok := app_delete_toml(strings.clone(a.toml_file, context.temp_allocator), name, uninstall = row == .Uninstall) // a is gone after this
+		set_status(ok ? "%s deleted" : "%s deleted, but some files couldn't be removed (is it running?)", name)
+		sfx_back()
+	case .Close:
+		app_menu.open = false
+		sfx_back()
+	}
+}
+
+app_menu_label :: proc(a: ^Shell_App, row: App_Menu_Row, selected: bool) -> string {
+	armed := app_menu.armed && selected
+	switch row {
+	case .Open:      return "Open"
+	case .Autostart: return app_is_autostart(a) ? "Don't Autostart" : "Autostart at Sign-in"
+	case .Delete:
+		if !armed do return "Delete"
+		return app_delete_plan(a.toml_file).program != "" ? "Press Again: Delete Card and App Folder" : "Press Again: Remove Card"
+	case .Uninstall: return armed ? "Press Again: Run Uninstaller and Delete" : "Uninstall"
+	case .Close:     return "Close"
+	}
+	return ""
+}
+
+draw_app_menu :: proc(w, h: f32) {
+	app_menu.t = smooth_to(app_menu.t, app_menu.open ? 1 : 0, 16)
+	if app_menu.t < 0.02 && !app_menu.open do return
+	i := app_menu_index()
+	if i < 0 {
+		app_menu.open = false
+		return
+	}
+	a := &app.shell_apps[i]
+	rows := app_menu_rows(a)
+	app_menu.sel = clamp(app_menu.sel, 0, len(rows) - 1)
+	labels := make([]string, len(rows), context.temp_allocator)
+	for row, k in rows do labels[k] = app_menu_label(a, row, k == app_menu.sel)
+	plan := app_delete_plan(a.toml_file)
+	sub := "Delete removes the card; the program itself stays installed"
+	switch {
+	case plan.program != "" && plan.uninstall != "": sub = "Delete: just Saber's copy  ·  Uninstall: also runs its uninstaller"
+	case plan.program != "":                         sub = "Installed by Saber: Delete removes its folder too"
+	}
+	if clicked := draw_modal_menu(a.title, sub, labels, app_menu.sel, app_menu.t, w, h, app_menu.open); clicked >= 0 {
+		if clicked != app_menu.sel do app_menu.armed = false
+		app_menu.sel = clicked
+		app_menu_choose(i, rows[clicked])
+	}
+}

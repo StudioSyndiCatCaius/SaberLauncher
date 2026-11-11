@@ -352,7 +352,29 @@ app_store_finish :: proc(idx: int) {
 	repo := &store.repos[p.repo]
 	dest := app_store_dest(p)
 	_ = os.write_entire_file(path_join({dest, STORE_MARKER}), transmute([]u8)fmt.tprintf("%s/%s\n", repo.owner, repo.name))
-	app_store_register(idx, fmt.tprintf("%s/%s", APP_PROGRAM_DIR, p.spec.exe), false)
+	exe := p.spec.exe
+	if !os.is_file(path_join({dest, exe})) {
+		// recipe names the wrong exe: use the only real program in the folder if there's exactly one
+		found := make([dynamic]string, context.temp_allocator)
+		programs := make([dynamic]string, context.temp_allocator)
+		if fis, err := os.read_all_directory_by_path(dest, context.temp_allocator); err == nil {
+			for fi in fis {
+				if fi.type == .Directory || !strings.equal_fold(filepath.ext(fi.name), ".exe") do continue
+				append(&found, fi.name)
+				l := strings.to_lower(fi.name, context.temp_allocator)
+				if !strings.contains(l, "unins") && !strings.contains(l, "update") && !strings.contains(l, "crash") && !strings.contains(l, "helper") {
+					append(&programs, fi.name)
+				}
+			}
+		}
+		if len(programs) != 1 {
+			app_store_fail(p, fmt.tprintf("%s not found after install (found: %s)", exe, len(found) > 0 ? strings.join(found[:], ", ", context.temp_allocator) : "no .exe"))
+			return
+		}
+		plugin_logf("store: app %s: recipe exe %s missing, using %s", p.folder, exe, programs[0])
+		exe = programs[0]
+	}
+	app_store_register(idx, fmt.tprintf("%s/%s", APP_PROGRAM_DIR, exe), false)
 }
 
 // Found an existing install: only the .toml (absolute exe) and the card art.
@@ -457,22 +479,66 @@ app_store_remove_press :: proc(idx: int) {
 		return
 	}
 	store.armed = -1
-	dir := app_store_dest(p)
-	if !os.exists(path_join({dir, STORE_MARKER})) do dir = "" // linked app / not ours: never delete it
-	if dir != "" do app_run_uninstaller(p, dir)
-	ok := app_remove_files(p.folder, dir)
+	ok := app_delete_toml(app_store_toml(p), p.name)
 	p.state = .Available
 	set_status(ok ? "%s removed" : "%s removed, but some files couldn't be deleted (is it running?)", p.name)
 	plugin_logf("store: removed app %s", p.folder)
 	sfx_back()
 }
 
-// Runs the recipe's uninstall command (from the installed .toml's `uninstall=`) and waits.
-app_run_uninstaller :: proc(p: ^Store_Plugin, dir: string) {
-	cmd := app_store_toml_get(p, "uninstall")
-	if cmd == "" do return
-	cmd, _ = strings.replace_all(cmd, "{dir}", win_path(dir), context.temp_allocator)
-	// "uninstall.exe /S ..." -> exe + args (exe is relative to the install folder)
+// What deleting an app (by its .toml) removes. Program files only when the store installed them
+// (`store=` + the `app/.saber_store` marker), never a linked / hand-registered app's own folder.
+App_Delete_Plan :: struct {
+	program:   string, // install folder to delete ("" = leave the program alone)
+	uninstall: string, // command to run first (`uninstall=`), relative to program
+}
+
+app_delete_plan :: proc(toml_path: string) -> (plan: App_Delete_Plan) {
+	data, err := os.read_entire_file(toml_path, context.temp_allocator)
+	if err != nil do return
+	text := string(data)
+	dir := filepath.dir(toml_path)
+	prog := path_join({dir, APP_PROGRAM_DIR})
+	store, _ := ini_get(text, "store")
+	if store != "" && !strings.equal_fold(dir, app.apps_dir) && os.exists(path_join({prog, STORE_MARKER})) {
+		plan.program = prog
+		plan.uninstall, _ = ini_get(text, "uninstall")
+	}
+	return
+}
+
+// Deletes an app: optionally runs its uninstaller first (`uninstall=`, only when asked: by default the
+// program folder is just deleted, leaving e.g. the Windows "Apps" entry), its program folder (store installs), the
+// .toml, the card art next to it (<stem>.png/.jpg/...), then its APP/apps/<Name>/ folder if that
+// is left empty. Clears autostart, rescans APPS. false = some files couldn't be deleted.
+app_delete_toml :: proc(toml_path, name: string, uninstall := false) -> bool {
+	plan := app_delete_plan(toml_path)
+	dir := filepath.dir(toml_path)
+	stem := filepath.stem(toml_path)
+	if uninstall && plan.uninstall != "" do app_run_uninstaller(plan.uninstall, plan.program, name)
+	if strings.equal_fold(app.settings.autostart_app, filepath.base(toml_path)) {
+		app.settings.autostart_app = ""
+		save_settings()
+	}
+	unload_all_apps() // textures of the art we're about to delete
+	ok := true
+	if os.remove(toml_path) != nil && os.exists(toml_path) do ok = false
+	for ext in ([]string{".png", ".jpg", ".jpeg", ".webp"}) {
+		os.remove(path_join({dir, fmt.tprintf("%s%s", stem, ext)}))
+	}
+	if plan.program != "" && os.remove_all(plan.program) != nil do ok = false
+	if !strings.equal_fold(dir, app.apps_dir) do os.remove(dir) // only succeeds when empty
+	for &sp in store.plugins {
+		if sp.kind == .App && sp.state == .Installed && strings.equal_fold(app_store_toml(&sp), toml_path) do sp.state = .Available
+	}
+	apps_rescan()
+	plugin_logf("apps: deleted %s (%s)", name, toml_path)
+	return ok
+}
+
+// Runs an uninstall command ("uninstall.exe /S _?={dir}", exe relative to dir) and waits.
+app_run_uninstaller :: proc(cmd, dir, name: string) {
+	cmd, _ := strings.replace_all(cmd, "{dir}", win_path(dir), context.temp_allocator)
 	exe, args := cmd, ""
 	if i := strings.index(strings.to_lower(cmd, context.temp_allocator), ".exe"); i >= 0 {
 		exe, args = cmd[:i + 4], strings.trim_space(cmd[i + 4:])
@@ -480,39 +546,14 @@ app_run_uninstaller :: proc(p: ^Store_Plugin, dir: string) {
 	exe = strings.trim(exe, "\"")
 	if !filepath.is_abs(exe) do exe = path_join({dir, exe})
 	if !os.exists(exe) do return
-	draw_splash(fmt.tprintf("Uninstalling %s", p.name))
+	draw_splash(fmt.tprintf("Uninstalling %s", name))
 	code, ran := run_and_wait(exe, args, dir, 2 * 60 * 1000)
-	plugin_logf("store: uninstall %s: ran=%v code=%d", p.folder, ran, code)
+	plugin_logf("apps: uninstall %s: ran=%v code=%d", name, ran, code)
 }
 
 win_path :: proc(p: string) -> string {
 	out, _ := strings.replace_all(p, "/", "\\", context.temp_allocator)
 	return out
-}
-
-// Deletes APP/apps/<id>/<id>.toml + its art (if the store made it) and (if given) the program
-// folder, then APP/apps/<id>/ when nothing else is left in it; rescans.
-app_remove_files :: proc(id: string, dir := "") -> bool {
-	toml := fmt.tprintf("%s.toml", id)
-	folder := app_dir_of(id)
-	if strings.equal_fold(app.settings.autostart_app, toml) {
-		app.settings.autostart_app = ""
-		save_settings()
-	}
-	unload_all_apps() // textures of the art we're about to delete
-	ok := true
-	toml_path := path_join({folder, toml})
-	ours := false
-	if data, err := os.read_entire_file(toml_path, context.temp_allocator); err == nil {
-		v, _ := ini_get(string(data), "store_art")
-		ours = v != ""
-	}
-	os.remove(toml_path)
-	if ours do os.remove(path_join({folder, fmt.tprintf("%s.png", id)}))
-	if dir != "" && os.remove_all(dir) != nil do ok = false
-	os.remove(folder) // only succeeds when empty: the user's own files there stay
-	apps_rescan()
-	return ok
 }
 
 // ---------------------------------------------------------------------------
@@ -571,7 +612,7 @@ lua_unregister_app :: proc "c" (L: ^lua_State) -> c.int {
 		lua_pushboolean(L, 0)
 		return 1
 	}
-	app_remove_files(id)
+	app_delete_toml(path_join({app_dir_of(id), fmt.tprintf("%s.toml", id)}), id)
 	lua_pushboolean(L, 1)
 	return 1
 }

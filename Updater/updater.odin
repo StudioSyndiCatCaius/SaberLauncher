@@ -1,8 +1,11 @@
 package updater
 
-// SaberUpdater: pulls the latest GitHub release of Saber into the folder it lives in (APP/).
-// The release needs one asset named SaberLauncher-*.zip (built by make_release_zip.bat);
-// the release tag is the version. GitHub supplies the zip's sha256 through its API.
+// SaberUpdater: pulls Saber's rolling public release into the folder it lives in (APP/).
+// The release is the one tagged `latest` (RELEASE_TAG; ReleaseLatest.py overwrites it), with an asset
+// SaberLauncher_<platform>.zip (any SaberLauncher*.zip as a fallback). The tag isn't a version: the
+// version is the `Version: x.y.z` line of the release notes (else a version in the release name).
+// GitHub supplies the zip's sha256 through its API; it is kept in version.ini (sha256=), so a
+// re-published build of the same version still counts as an update.
 // Only the exes in UPDATABLE are ever taken from the zip; nothing else is touched.
 
 import "core:crypto/hash"
@@ -17,11 +20,15 @@ import "core:strings"
 import win "core:sys/windows"
 
 DEFAULT_REPO :: "StudioSyndiCatCaius/SaberLauncher" // override with repo= in SaberUpdater.ini
+RELEASE_TAG :: "latest" // override with tag= in SaberUpdater.ini
+PLATFORM :: "Windows"   // asset SaberLauncher_<PLATFORM>.zip
 SELF_NAME :: "SaberUpdater.exe"
 UPDATABLE :: [?]string{"Saber.exe", "SaberFlasher.exe", SELF_NAME}
 
 Release :: struct {
 	tag_name: string,
+	name:     string,
+	body:     string,
 	assets:   []struct {
 		name:                 string,
 		browser_download_url: string,
@@ -61,37 +68,59 @@ run :: proc() -> bool {
 	cleanup_old(dir)
 
 	repo := DEFAULT_REPO
+	tag := RELEASE_TAG
 	if cfg, ok := read_kv(join(dir, "SaberUpdater.ini")); ok {
 		if r, has := cfg["repo"]; has && r != "" do repo = r
+		if t, has := cfg["tag"]; has && t != "" do tag = t
 	}
-	local_version := "0"
+	local_version, local_digest := "0", ""
 	if v, ok := read_kv(join(dir, "version.ini")); ok {
 		if s, has := v["version"]; has do local_version = s
+		if s, has := v["sha256"]; has do local_digest = s
 	}
 
-	fmt.printfln("Checking github.com/%s ...", repo)
-	release_json, rok := http_get("api.github.com", fmt.tprintf("/repos/%s/releases/latest", repo))
+	fmt.printfln("Checking github.com/%s (release %s) ...", repo, tag)
+	release_json, rok := http_get("api.github.com", fmt.tprintf("/repos/%s/releases/tags/%s", repo, tag))
 	release: Release
 	if !rok || json.unmarshal(release_json, &release) != nil {
-		fmt.eprintln("Could not read the latest release (no release yet, or offline?)")
+		fmt.eprintfln("Could not read release '%s' (not published yet, or offline?)", tag)
 		return false
 	}
 	url, digest: string
+	want := fmt.tprintf("SaberLauncher_%s.zip", PLATFORM)
 	for a in release.assets {
-		if strings.has_prefix(a.name, "SaberLauncher") && strings.has_suffix(a.name, ".zip") {
+		if strings.equal_fold(a.name, want) {
 			url, digest = a.browser_download_url, a.digest
 			break
 		}
+		if url == "" && strings.has_prefix(a.name, "SaberLauncher") && strings.has_suffix(a.name, ".zip") {
+			url, digest = a.browser_download_url, a.digest
+		}
 	}
 	if url == "" {
-		fmt.eprintln("Latest release has no SaberLauncher-*.zip asset")
+		fmt.eprintfln("Release '%s' has no %s asset", tag, want)
 		return false
 	}
-	remote_version := strings.trim_prefix(release.tag_name, "v")
+	remote_version := release_version(&release)
+	remote_digest := strings.trim_prefix(digest, "sha256:")
 
-	fmt.printfln("Installed: %s   Latest: %s", local_version, remote_version)
 	forced := has_arg("--force")
-	if compare_versions(remote_version, local_version) <= 0 && !forced {
+	cmp := compare_versions(remote_version, local_version)
+	// same version re-published (a new build): it's newer when the zip's checksum changed
+	rebuilt := cmp == 0 && local_digest != "" && remote_digest != "" && !strings.equal_fold(local_digest, remote_digest)
+	if !looks_like_version(remote_version) {
+		// release without a version: only the checksum can tell (unknown local build = update)
+		cmp = 0
+		rebuilt = remote_digest != "" && !strings.equal_fold(local_digest, remote_digest)
+		remote_version = local_version
+	}
+	if looks_like_version(release_version(&release)) {
+		fmt.printfln("Installed: %s   Latest: %s", local_version, remote_version)
+	} else {
+		fmt.printfln("Installed: %s   Latest: (release has no version, comparing checksums)", local_version)
+	}
+	if rebuilt do fmt.println("The release was rebuilt since this install.")
+	if (cmp < 0 || (cmp == 0 && !rebuilt)) && !forced {
 		fmt.println("Saber is up to date.")
 		// Interactive runs may still reinstall the same (or older) release.
 		if has_arg("--check") || has_arg("-y") || !confirm_no(fmt.tprintf("Reinstall %s anyway? [y/N] ", remote_version)) {
@@ -185,7 +214,7 @@ run :: proc() -> bool {
 		append(&swapped, name)
 	}
 
-	_ = os.write_entire_file(join(dir, "version.ini"), fmt.tprintf("version=%s\n", remote_version))
+	_ = os.write_entire_file(join(dir, "version.ini"), fmt.tprintf("version=%s\nsha256=%s\n", remote_version, remote_digest))
 	cleanup_old(dir) // SaberUpdater.exe.old stays until next run if we replaced ourselves
 	fmt.printfln("Updated to %s.", remote_version)
 	return true
@@ -224,6 +253,31 @@ is_locked :: proc(path: string) -> bool {
 	}
 	win.CloseHandle(h)
 	return false
+}
+
+// Version of a release: a "Version: 0.3.6" / "version=0.3.6" line in the notes, else the first
+// version-looking word of the name ("Latest-Public v0.3.6"), else the tag (older numbered releases).
+release_version :: proc(r: ^Release) -> string {
+	it := r.body
+	for line in strings.split_lines_iterator(&it) {
+		l := strings.trim_left(strings.trim_space(line), "*_# ")
+		if len(l) < 8 || !strings.equal_fold(l[:7], "version") do continue
+		words := strings.fields(strings.trim_left(l[7:], ":=*_ \t"))
+		if len(words) == 0 do continue
+		v := strings.trim_prefix(words[0], "v")
+		if looks_like_version(v) do return v
+	}
+	for word in strings.fields(r.name) {
+		v := strings.trim_prefix(strings.trim_prefix(word, "v"), "V")
+		if looks_like_version(v) do return v
+	}
+	return strings.trim_prefix(r.tag_name, "v")
+}
+
+looks_like_version :: proc(s: string) -> bool {
+	if s == "" || s[0] < '0' || s[0] > '9' do return false
+	for c in s do if !(c == '.' || (c >= '0' && c <= '9')) do return false
+	return true
 }
 
 // "1.10.0" > "1.9.2"; missing parts count as 0.
