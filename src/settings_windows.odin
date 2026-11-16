@@ -35,20 +35,14 @@ RUN_VALUE :: "Saber"
 exe_full_path :: proc() -> string {
 	buf: [win.MAX_PATH]u16
 	n := win.GetModuleFileNameW(nil, raw_data(buf[:]), u32(len(buf)))
-	if n == 0 {
-		return ""
-	}
+	if n == 0 do return ""
 	return wide_to_utf8(raw_data(buf[:]), int(n))
 }
 
 detect_launch_mode :: proc() -> Launch_Mode {
 	mine := exe_full_path()
-	if paths_equal(reg_read_sz(WINLOGON_SUBKEY, "Shell"), mine) || paths_equal(reg_read_sz(POLICIES_SUBKEY, "Shell"), mine) {
-		return .Shell
-	}
-	if paths_equal(reg_read_sz(RUN_SUBKEY, RUN_VALUE), mine) {
-		return .Autorun
-	}
+	if paths_equal(reg_read_sz(WINLOGON_SUBKEY, "Shell"), mine) || paths_equal(reg_read_sz(POLICIES_SUBKEY, "Shell"), mine) do return .Shell
+	if paths_equal(reg_read_sz(RUN_SUBKEY, RUN_VALUE), mine) do return .Autorun
 	return .Standalone
 }
 
@@ -73,13 +67,9 @@ reg_read_sz :: proc(subkey, name: string) -> string {
 		raw_data(buf[:]),
 		&size,
 	)
-	if status != 0 {
-		return ""
-	}
+	if status != 0 do return ""
 	n := int(size / 2)
-	if n > 0 && buf[n - 1] == 0 {
-		n -= 1
-	}
+	if n > 0 && buf[n - 1] == 0 do n -= 1
 	return wide_to_utf8(raw_data(buf[:]), n)
 }
 
@@ -87,9 +77,7 @@ reg_write_sz :: proc(subkey, name, data: string) -> bool {
 	key: win.HKEY
 	disp: u32
 	status := win.RegCreateKeyExW(win.HKEY_CURRENT_USER, win.utf8_to_wstring(subkey), 0, nil, 0, win.KEY_SET_VALUE, nil, &key, &disp)
-	if status != 0 {
-		return false
-	}
+	if status != 0 do return false
 	defer win.RegCloseKey(key)
 	wdata := win.utf8_to_utf16(data, context.temp_allocator)
 	cb := u32((len(wdata) + 1) * size_of(u16))
@@ -99,9 +87,7 @@ reg_write_sz :: proc(subkey, name, data: string) -> bool {
 
 reg_delete :: proc(subkey, name: string) -> bool {
 	key: win.HKEY
-	if win.RegOpenKeyExW(win.HKEY_CURRENT_USER, win.utf8_to_wstring(subkey), 0, win.KEY_SET_VALUE, &key) != 0 {
-		return true
-	}
+	if win.RegOpenKeyExW(win.HKEY_CURRENT_USER, win.utf8_to_wstring(subkey), 0, win.KEY_SET_VALUE, &key) != 0 do return true
 	defer win.RegCloseKey(key)
 	status := RegDeleteValueW(key, win.utf8_to_wstring(name))
 	return status == 0 || status == win.LSTATUS(win.ERROR_FILE_NOT_FOUND)
@@ -109,30 +95,22 @@ reg_delete :: proc(subkey, name: string) -> bool {
 
 apply_launch_mode :: proc(mode: Launch_Mode) -> (ok: bool, err: string) {
 	path := exe_full_path()
-	if path == "" {
-		return false, "Could not resolve Saber.exe path"
-	}
+	if path == "" do return false, "Could not resolve Saber.exe path"
 	want_shell := mode == .Shell
 	want_run := mode == .Autorun
 
 	if want_shell {
 		ok1 := reg_write_sz(WINLOGON_SUBKEY, "Shell", path)
 		ok2 := reg_write_sz(POLICIES_SUBKEY, "Shell", path)
-		if !ok1 && !ok2 {
-			return false, "Could not set Shell (Winlogon / Policies)"
-		}
+		if !ok1 && !ok2 do return false, "Could not set Shell (Winlogon / Policies)"
 	} else {
 		ok1 := reg_delete(WINLOGON_SUBKEY, "Shell")
 		ok2 := reg_delete(POLICIES_SUBKEY, "Shell")
-		if !ok1 && !ok2 {
-			return false, "Could not remove Shell values"
-		}
+		if !ok1 && !ok2 do return false, "Could not remove Shell values"
 	}
 
 	if want_run {
-		if !reg_write_sz(RUN_SUBKEY, RUN_VALUE, fmt.tprintf("\"%s\"", path)) {
-			return false, "Could not add Saber to startup (Run key)"
-		}
+		if !reg_write_sz(RUN_SUBKEY, RUN_VALUE, fmt.tprintf("\"%s\"", path)) do return false, "Could not add Saber to startup (Run key)"
 	} else if !reg_delete(RUN_SUBKEY, RUN_VALUE) {
 		return false, "Could not remove Saber from startup"
 	}
@@ -155,14 +133,10 @@ Shutdown_Token_Privileges :: struct {
 
 enable_shutdown_privilege :: proc() -> bool {
 	tok: win.HANDLE
-	if !win.OpenProcessToken(win.GetCurrentProcess(), win.TOKEN_ADJUST_PRIVILEGES | win.TOKEN_QUERY, &tok) {
-		return false
-	}
+	if !win.OpenProcessToken(win.GetCurrentProcess(), win.TOKEN_ADJUST_PRIVILEGES | win.TOKEN_QUERY, &tok) do return false
 	defer win.CloseHandle(tok)
 	luid: win.LUID
-	if !LookupPrivilegeValueW(nil, win.utf8_to_wstring(SE_SHUTDOWN_NAME), &luid) {
-		return false
-	}
+	if !LookupPrivilegeValueW(nil, win.utf8_to_wstring(SE_SHUTDOWN_NAME), &luid) do return false
 	tp := Shutdown_Token_Privileges{PrivilegeCount = 1, Luid = luid, Attributes = SE_PRIVILEGE_ENABLED}
 	return bool(AdjustTokenPrivileges(tok, false, &tp, 0, nil, nil))
 }

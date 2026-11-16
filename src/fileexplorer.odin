@@ -69,19 +69,13 @@ explorer: File_Explorer
 EXPLORER_SKIP :: []string{"$RECYCLE.BIN", "System Volume Information"}
 
 explorer_type :: proc(name: string) -> EFileType {
-	ext := strings.to_lower(filepath.ext(name), context.temp_allocator)
-	has :: proc(list: []string, e: string) -> bool {
-		for x in list do if x == e do return true
-		return false
-	}
 	switch {
-	case has(MUS_EXTS, ext):   return .File_Sound
-	case has(IMG_EXTS, ext):   return .File_Image
-	case has(VIDEO_EXTS, ext): return .File_Video
-	case ext == ".cue" || ext == ".iso" || ext == ".chd" || ext == ".m3u":
-		return .File_Rom
+	case has_ext(name, ..MUS_EXTS):   return .File_Sound
+	case has_ext(name, ..IMG_EXTS):   return .File_Image
+	case has_ext(name, ..VIDEO_EXTS): return .File_Video
+	case has_ext(name, ".cue", ".iso", ".chd", ".m3u"): return .File_Rom
 	}
-	if _, ok := rom_platform(ext); ok do return .File_Rom
+	if _, ok := rom_platform(ext_lower(name)); ok do return .File_Rom
 	return .File_Other
 }
 
@@ -136,21 +130,20 @@ explorer_cd :: proc(dir: string, focus: string) {
 	explorer.follow = true
 	explorer.err = ""
 
-	fis, err := os.read_all_directory_by_path(explorer.dir, context.allocator)
-	if err != nil {
+	fis, ok := list_dir(explorer.dir)
+	if !ok {
 		explorer.err = "Couldn't read this folder"
 		return
 	}
-	defer os.file_info_slice_delete(fis, context.allocator)
 	outer: for fi in fis {
-		for s in EXPLORER_SKIP do if strings.equal_fold(fi.name, s) do continue outer
+		for s in EXPLORER_SKIP do if eq_fold(fi.name, s) do continue outer
 		type := fi.type == .Directory ? EFileType.Directory : explorer_type(fi.name)
 		append(&explorer.entries, Explorer_Entry{name = strings.clone(fi.name), type = type, size = fi.size})
 	}
 	slice.sort_by(explorer.entries[:], proc(a, b: Explorer_Entry) -> bool {
 		da, db := a.type == .Directory, b.type == .Directory
 		if da != db do return da
-		return strings.to_lower(a.name, context.temp_allocator) < strings.to_lower(b.name, context.temp_allocator)
+		return ascii_lower(a.name, context.temp_allocator) < ascii_lower(b.name, context.temp_allocator)
 	})
 	// first row of every subfolder: back up one level
 	if !explorer_at_root() do inject_at(&explorer.entries, 0, Explorer_Entry{name = strings.clone(".."), type = .Directory})
@@ -166,18 +159,17 @@ explorer_up :: proc() {
 		explorer_close()
 		return
 	}
+	// copies: base / dir are views into explorer.dir, which explorer_cd frees
 	trimmed := strings.trim_right(explorer.dir, "\\/")
 	child := strings.clone(filepath.base(trimmed), context.temp_allocator)
-	up := filepath.dir(trimmed)
-	defer delete(up)
-	parent := up
+	parent := strings.clone(filepath.dir(trimmed), context.temp_allocator)
 	if len(parent) < len(explorer.root) do parent = explorer.root
 	explorer_cd(parent, child)
 	sfx_back()
 }
 
 explorer_path :: proc(i: int) -> string {
-	return path_join({explorer.dir, explorer.entries[i].name})
+	return tjoin({explorer.dir, explorer.entries[i].name})
 }
 
 explorer_drive_present :: proc() -> bool {
@@ -206,8 +198,7 @@ explorer_activate :: proc(i: int) {
 		} else {
 			explorer_play_sound(i)
 		}
-	case .File_Image:
-		explorer_view(i)
+	case .File_Image: explorer_view(i)
 	case .File_Video, .File_Rom, .File_Other:
 		set_status("%s  ·  nothing to preview", e.name)
 		sfx_back()
@@ -256,7 +247,7 @@ explorer_add :: proc(i: int) {
 		sfx_back()
 		return
 	}
-	dst := path_join({dir, e.name})
+	dst := tjoin({dir, e.name})
 	if os.exists(dst) {
 		set_status("%s is already in Saber's %s", e.name, what)
 		sfx_back()
@@ -282,10 +273,7 @@ explorer_can_add :: proc(i: int) -> bool {
 // Picture viewer
 
 explorer_unload_tex :: proc() {
-	if explorer.has_tex {
-		rl.UnloadTexture(explorer.view_tex)
-		explorer.has_tex = false
-	}
+	unload_tex(&explorer.view_tex, &explorer.has_tex)
 }
 
 explorer_view :: proc(i: int) {
@@ -308,7 +296,7 @@ explorer_view_close :: proc() {
 explorer_view_step :: proc(delta: int) {
 	n := len(explorer.entries)
 	for k in 1 ..< n {
-		j := ((explorer.view_idx + delta * k) % n + n) % n
+		j := cycle(explorer.view_idx, delta * k, n)
 		if explorer.entries[j].type == .File_Image {
 			explorer_view(j)
 			return
@@ -335,8 +323,7 @@ explorer_input :: proc() {
 		case input.cancel, input.confirm:
 			explorer_view_close()
 			sfx_back()
-		case input.action, input.power:
-			explorer_close()
+		case input.action, input.power: explorer_close()
 		}
 		return
 	}
@@ -350,7 +337,7 @@ explorer_input :: proc() {
 		if input.right do step = page
 		if step != 0 {
 			if abs(step) == 1 {
-				explorer.sel = (explorer.sel + step + n) % n
+				explorer.sel = cycle(explorer.sel, step, n)
 			} else {
 				explorer.sel = clamp(explorer.sel + step, 0, n - 1)
 			}
@@ -362,12 +349,9 @@ explorer_input :: proc() {
 		}
 	}
 	switch {
-	case input.cancel:
-		explorer_up()
-	case input.action, input.power:
-		explorer_close()
-	case input.confirm:
-		explorer_activate(explorer.sel)
+	case input.cancel: explorer_up()
+	case input.action, input.power: explorer_close()
+	case input.confirm: explorer_activate(explorer.sel)
 	case input.extra:
 		if explorer_can_add(explorer.sel) do explorer_add(explorer.sel)
 	}
@@ -400,8 +384,7 @@ explorer_hints :: proc(w, h: f32) {
 
 draw_file_explorer :: proc(w, h: f32) {
 	if explorer.has_music do rl.UpdateMusicStream(explorer.music)
-	explorer.t = smooth_to(explorer.t, explorer.open ? 1 : 0, 16)
-	if explorer.t < 0.02 && !explorer.open do return
+	if !modal_fade(&explorer.t, explorer.open) do return
 	t := explorer.t
 	interactive := explorer.open && !explorer.viewing
 
@@ -409,13 +392,9 @@ draw_file_explorer :: proc(w, h: f32) {
 	ROW_H :: 56
 	GAP :: 6
 	HEAD :: 112
-	// dim only the page: the header and the footer (hints, status) stay readable
-	rl.DrawRectangle(0, HEADER_H, i32(w), i32(h - HEADER_H - FOOTER_H), with_alpha(COL_SHADE, u8(150 * t)))
-	pw := min(f32(1000), w - 48)
-	ph := min(h - HEADER_H - FOOTER_H - 32, f32(760))
-	s := 0.94 + 0.06 * t
-	r := rl.Rectangle{(w - pw * s) * 0.5, HEADER_H + (h - HEADER_H - FOOTER_H - ph * s) * 0.5, pw * s, ph * s}
-	draw_panel(r, false, with_alpha(COL_PANEL_SOLID, u8(244 * t)))
+	// dims only the page: the header and the footer (hints, status) stay readable
+	page := rl.Rectangle{0, HEADER_H, w, h - HEADER_H - FOOTER_H}
+	r := modal_panel(page, min(f32(1000), w - 48), min(page.height - 32, f32(760)), t)
 	if t < 0.5 do return
 
 	// header: drive icon, label, current path
@@ -439,8 +418,7 @@ draw_file_explorer :: proc(w, h: f32) {
 	explorer.sel = clamp(explorer.sel, 0, n - 1)
 	if explorer.follow {
 		explorer.follow = false
-		if explorer.sel < explorer.scroll do explorer.scroll = explorer.sel
-		if explorer.sel >= explorer.scroll + visible do explorer.scroll = explorer.sel - visible + 1
+		scroll_follow(&explorer.scroll, explorer.sel, visible, n)
 	}
 	explorer.scroll = clamp(explorer.scroll, 0, max(n - visible, 0))
 
@@ -448,11 +426,7 @@ draw_file_explorer :: proc(w, h: f32) {
 	for i in explorer.scroll ..< min(n, explorer.scroll + visible) {
 		e := explorer.entries[i]
 		br := rl.Rectangle{list.x, list.y + f32(i - explorer.scroll) * (ROW_H + GAP), list.width - (n > visible ? 14 : 0), ROW_H}
-		if interactive && mouse_over(br, true) {
-			hover_enter(fmt.tprintf("explorer-%d", i))
-			explorer.sel = i
-			if rl.IsMouseButtonPressed(.LEFT) do clicked = i
-		}
+		if interactive && list_row_mouse("explorer", i, br, &explorer.sel) do clicked = i
 		focused := i == explorer.sel
 		if focused {
 			rl.DrawRectangleRounded(br, 0.3, 8, COL_ACCENT_SOFT)
@@ -478,13 +452,7 @@ draw_file_explorer :: proc(w, h: f32) {
 		}
 		draw_t_fit(e.name, br.x + 68, br.y + 17, br.width - 68 - size_w - 18, 19, playing ? COL_ACCENT : COL_TEXT, focused)
 	}
-	if n > visible {
-		track := rl.Rectangle{list.x + list.width - 5, list.y, 5, f32(visible) * (ROW_H + GAP) - GAP}
-		rl.DrawRectangleRounded(track, 1, 4, COL_FAINT)
-		th := track.height * f32(visible) / f32(n)
-		ty := track.y + (track.height - th) * f32(explorer.scroll) / f32(n - visible)
-		rl.DrawRectangleRounded({track.x, ty, track.width, th}, 1, 4, with_alpha(COL_ACCENT, 200))
-	}
+	draw_scrollbar({list.x + list.width - 5, list.y, 5, f32(visible) * (ROW_H + GAP) - GAP}, f32(explorer.scroll), visible, n, with_alpha(COL_ACCENT, 200))
 	if clicked >= 0 do explorer_activate(clicked)
 
 	draw_explorer_viewer(w, h)
@@ -533,8 +501,7 @@ draw_file_icon :: proc(type: EFileType, c: rl.Vector2, active: bool) {
 	case .File_Video:
 		rl.DrawRectangleRoundedLinesEx({c.x - 14, c.y - 11, 28, 22}, 0.2, 4, 2, col)
 		rl.DrawTriangle({c.x - 4, c.y - 6}, {c.x - 4, c.y + 6}, {c.x + 6, c.y}, col)
-	case .File_Rom:
-		draw_spinning_disc(c, 13, 0)
+	case .File_Rom: draw_spinning_disc(c, 13, 0)
 	case .File_Other:
 		rl.DrawRectangleRoundedLinesEx({c.x - 10, c.y - 13, 20, 26}, 0.15, 4, 2, col)
 		for k in 0 ..< 3 do rl.DrawRectangleV({c.x - 5, c.y - 6 + f32(k) * 5}, {10, 2}, col)
@@ -576,9 +543,7 @@ Thumbs :: struct {
 thumbs: Thumbs
 
 thumbs_request :: proc(i: int) {
-	if thumbs.worker == nil {
-		thumbs.worker = thread.create_and_start_with_data(&thumbs, thumbs_worker)
-	}
+	if thumbs.worker == nil do thumbs.worker = thread.create_and_start_with_data(&thumbs, thumbs_worker)
 	explorer.entries[i].thumb = .Queued
 	sync.mutex_lock(&thumbs.lock)
 	append(&thumbs.jobs, Thumb_Job{gen = thumbs.gen, idx = i, path = path_join({explorer.dir, explorer.entries[i].name}), video = explorer.entries[i].type == .File_Video})
@@ -631,9 +596,7 @@ thumbs_shutdown :: proc() {
 	thumbs.stop = true
 	sync.mutex_unlock(&thumbs.lock)
 	sync.sema_post(&thumbs.sema)
-	thread.join(thumbs.worker)
-	thread.destroy(thumbs.worker)
-	thumbs.worker = nil
+	thread_end(&thumbs.worker)
 	thumbs_reset()
 	delete(thumbs.jobs)
 	delete(thumbs.done)
@@ -673,9 +636,7 @@ thumbs_worker :: proc(data: rawptr) {
 thumb_decode :: proc(path: string, video: bool) -> (rl.Image, bool) {
 	// the shell's thumbnail cache first: fast, small, and it handles every format Explorer does
 	img, ok := shell_image(path, THUMB_PX, THUMB_PX, still = !video)
-	if !ok && !video {
-		img, ok = load_image_smooth(path, THUMB_PX)
-	}
+	if !ok && !video do img, ok = load_image_smooth(path, THUMB_PX)
 	if !ok do return {}, false
 	if img.width > THUMB_PX || img.height > THUMB_PX {
 		sc := f32(THUMB_PX) / f32(max(img.width, img.height))
@@ -684,18 +645,9 @@ thumb_decode :: proc(path: string, video: bool) -> (rl.Image, bool) {
 	return img, true
 }
 
-// Thumbnail cropped to fill `r`, with rounded-looking corners from a thin frame.
+// Thumbnail cropped to fill `r`, in a thin frame.
 draw_thumb :: proc(tex: rl.Texture2D, r: rl.Rectangle) {
-	tw, th := f32(tex.width), f32(tex.height)
-	src := rl.Rectangle{0, 0, tw, th}
-	if tw / th > r.width / r.height {
-		src.width = th * r.width / r.height
-		src.x = (tw - src.width) * 0.5
-	} else {
-		src.height = tw * r.height / r.width
-		src.y = (th - src.height) * 0.5
-	}
-	rl.DrawTexturePro(tex, src, r, {}, 0, rl.WHITE)
+	draw_texture_cover(tex, r)
 	rl.DrawRectangleLinesEx(r, 1, COL_FAINT)
 }
 

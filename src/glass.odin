@@ -121,9 +121,7 @@ glass_init :: proc() {
 	glass.blur = rl.LoadShaderFromMemory(nil, GLASS_BLUR_FS)
 	def := rlgl.GetShaderIdDefault()
 	glass.ok = glass.shader.id != def && glass.blur.id != def
-	if !glass.ok {
-		return
-	}
+	if !glass.ok do return
 	glass.loc_backdrop = rl.GetShaderLocation(glass.shader, "backdrop")
 	glass.loc_screen = rl.GetShaderLocation(glass.shader, "screen")
 	glass.loc_rect = rl.GetShaderLocation(glass.shader, "rect")
@@ -134,16 +132,12 @@ glass_init :: proc() {
 }
 
 glass_unload_targets :: proc() {
-	if glass.w == 0 {
-		return
-	}
+	if glass.w == 0 do return
 	rl.UnloadRenderTexture(glass.scene)
 	rl.UnloadRenderTexture(glass.half)
 	rl.UnloadRenderTexture(glass.ping)
 	rl.UnloadRenderTexture(glass.pong)
-	for l in glass.layers {
-		rl.UnloadRenderTexture(l)
-	}
+	for l in glass.layers do rl.UnloadRenderTexture(l)
 	glass.w, glass.h = 0, 0
 }
 
@@ -165,22 +159,16 @@ glass_target :: proc(w, h: i32) -> rl.RenderTexture2D {
 
 // Loads the shaders once and (re)sizes the targets to the window.
 glass_ready :: proc(w, h: f32) -> bool {
-	if !glass.tried {
-		glass_init()
-	}
+	if !glass.tried do glass_init()
 	iw, ih := i32(w), i32(h)
-	if !glass.ok || iw <= 0 || ih <= 0 {
-		return false
-	}
+	if !glass.ok || iw <= 0 || ih <= 0 do return false
 	if iw != glass.w || ih != glass.h {
 		glass_unload_targets()
 		glass.scene = glass_target(iw, ih)
 		glass.half = glass_target(iw / 2, ih / 2)
 		glass.ping = glass_target(iw / 4, ih / 4)
 		glass.pong = glass_target(iw / 4, ih / 4)
-		for &l in glass.layers {
-			l = glass_target(iw / 4, ih / 4)
-		}
+		for &l in glass.layers do l = glass_target(iw / 4, ih / 4)
 		glass.w, glass.h = iw, ih
 	}
 	return true
@@ -188,9 +176,7 @@ glass_ready :: proc(w, h: f32) -> bool {
 
 // Everything drawn between begin and end becomes the backdrop for `layer`.
 glass_capture_begin :: proc(w, h: f32) -> bool {
-	if !glass_ready(w, h) {
-		return false
-	}
+	if !glass_ready(w, h) do return false
 	rl.BeginTextureMode(glass.scene)
 	return true
 }
@@ -250,9 +236,7 @@ draw_soft_shadow :: proc(r: rl.Rectangle, radius: f32, alpha: f32) {
 // One glass pane. `tint_amt` is how much of `tint` covers the backdrop (frost),
 // `glow_amt` lights the rim and bezel with `glow` (focus).
 draw_glass :: proc(r: rl.Rectangle, radius: f32, tint: rl.Color, tint_amt: f32, glow := rl.Color{}, glow_amt: f32 = 0, alpha: f32 = 1, refract: f32 = 14) {
-	if r.width <= 0 || r.height <= 0 || alpha <= 0.004 {
-		return
-	}
+	if r.width <= 0 || r.height <= 0 || alpha <= 0.004 do return
 	radius := min(radius, min(r.width, r.height) * 0.5)
 	if !glass.ok || glass.w == 0 {
 		rr := roundness(r, radius)

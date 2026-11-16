@@ -43,6 +43,7 @@ Plugin :: struct {
 	settings:    [dynamic]Plugin_Setting,
 	L:           ^lua_State, // nil = turned off (not loaded this run)
 	enabled:     bool,       // the saved choice; differs from L != nil until Saber restarts
+	downloaded:  bool,       // installed by the plugin store (plugin_is_downloaded)
 }
 
 // An entry of the plugin's `actions` table: id = { name=, description=, Do=function() }.
@@ -69,9 +70,7 @@ plugin_log: ^os.File
 plugins_init :: proc() {
 	dir := path_join({app.exe_dir, "plugins"})
 	os.make_directory_all(dir)
-	if f, ferr := os.open(path_join({dir, "plugins.log"}), {.Write, .Create, .Trunc}); ferr == nil {
-		plugin_log = f
-	}
+	if f, ferr := os.open(tjoin({dir, "plugins.log"}), {.Write, .Create, .Trunc}); ferr == nil do plugin_log = f
 	dirs := plugin_dir_list()
 	loaded := make(map[string]bool, allocator = context.temp_allocator)
 	for d in dirs {
@@ -81,12 +80,12 @@ plugins_init :: proc() {
 			continue
 		}
 		defer os.file_info_slice_delete(fis, context.allocator)
-		slice.sort_by(fis, proc(a, b: os.File_Info) -> bool { return strings.to_lower(a.name, context.temp_allocator) < strings.to_lower(b.name, context.temp_allocator) })
+		slice.sort_by(fis, proc(a, b: os.File_Info) -> bool { return ascii_lower(a.name, context.temp_allocator) < ascii_lower(b.name, context.temp_allocator) })
 		for fi in fis {
 			if fi.type != .Directory do continue
 			main := path_join({fi.fullpath, "plugin.lua"})
 			if !os.exists(main) do continue
-			key := strings.to_lower(fi.name, context.temp_allocator)
+			key := ascii_lower(fi.name, context.temp_allocator)
 			if loaded[key] {
 				plugin_logf("%s: skipped, a plugin named %s is already loaded", fi.fullpath, fi.name)
 				continue
@@ -94,7 +93,8 @@ plugins_init :: proc() {
 			loaded[key] = true
 			if plugin_disabled(fi.name) {
 				p := Plugin{name = strings.clone(fi.name), file = strings.clone(fi.name), dir = strings.clone(fi.fullpath)}
-				p.icon, p.has_icon = load_texture_smooth(path_join({fi.fullpath, "icon.png"}), 256)
+				p.icon, p.has_icon = load_texture_smooth(tjoin({fi.fullpath, "icon.png"}), 256)
+				plugin_check_downloaded(&p)
 				append(&plugins, p)
 				plugin_logf("%s: turned off", fi.name)
 				continue
@@ -119,7 +119,7 @@ plugin_dir_list :: proc() -> []string {
 
 plugin_disabled :: proc(file: string) -> bool {
 	for name in strings.split(app.settings.plugins_off, ";", context.temp_allocator) {
-		if strings.equal_fold(strings.trim_space(name), file) do return true
+		if eq_fold(strings.trim_space(name), file) do return true
 	}
 	return false
 }
@@ -156,35 +156,44 @@ plugin_logf :: proc(format: string, args: ..any) {
 	fmt.fprintfln(plugin_log, format, ..args)
 }
 
+// The globals Saber gives every plugin (besides `saber`, PLUGIN_DIR and SABER_DIR).
+PLUGIN_API := [?]struct {
+	name: cstring,
+	fn:   lua_CFunction,
+} {
+	{"Dialog_Info", lua_dialog_info},
+	{"Dialog_Process", lua_dialog_process},
+	{"Dialog_Menu", lua_dialog_menu},
+	{"Setting", lua_setting},
+	{"Plugins_GetSetting", lua_plugins_get_setting},
+	{"Set_Art", lua_set_art},
+	{"Disc_Games", lua_disc_games},
+	{"List_Dir", lua_list_dir},
+	{"Unzip", lua_unzip},
+	{"Online", lua_online},
+	{"Http_Get", lua_http_get},
+	{"Http_Download", lua_http_download},
+	{"Http_Pending", lua_http_pending},
+	{"Register_App", lua_register_app},
+	{"Unregister_App", lua_unregister_app},
+}
+
+lua_set_global_string :: proc(L: ^lua_State, name: cstring, value: string) {
+	lua_pushstring(L, strings.clone_to_cstring(value, context.temp_allocator))
+	lua_setglobal(L, name)
+}
+
 plugin_load :: proc(path, file, dir: string) {
 	L := luaL_newstate()
 	luaL_openlibs(L)
 	lua_createtable(L, 0, 4)
 	lua_pushcclosure(L, lua_saber_log, 0)
 	lua_setfield(L, -2, "log")
-
-	lua_pushstring(L, strings.clone_to_cstring(saber_version(), context.temp_allocator))
-	lua_setfield(L, -2, "version")
+	push_field(L, "version", saber_version())
 	lua_setglobal(L, "saber")
-	lua_register(L, "Dialog_Info", lua_dialog_info)
-	lua_register(L, "Dialog_Process", lua_dialog_process)
-	lua_register(L, "Dialog_Menu", lua_dialog_menu)
-	lua_pushstring(L, strings.clone_to_cstring(dir, context.temp_allocator))
-	lua_setglobal(L, "PLUGIN_DIR")
-	lua_pushstring(L, strings.clone_to_cstring(app.exe_dir, context.temp_allocator))
-	lua_setglobal(L, "SABER_DIR")
-	lua_register(L, "Setting", lua_setting)
-	lua_register(L, "Plugins_GetSetting", lua_plugins_get_setting)
-	lua_register(L, "Set_Art", lua_set_art)
-	lua_register(L, "Disc_Games", lua_disc_games)
-	lua_register(L, "List_Dir", lua_list_dir)
-	lua_register(L, "Unzip", lua_unzip)
-	lua_register(L, "Online", lua_online)
-	lua_register(L, "Http_Get", lua_http_get)
-	lua_register(L, "Http_Download", lua_http_download)
-	lua_register(L, "Http_Pending", lua_http_pending)
-	lua_register(L, "Register_App", lua_register_app)
-	lua_register(L, "Unregister_App", lua_unregister_app)
+	lua_set_global_string(L, "PLUGIN_DIR", dir)
+	lua_set_global_string(L, "SABER_DIR", app.exe_dir)
+	for f in PLUGIN_API do lua_register(L, f.name, f.fn)
 
 	cpath := strings.clone_to_cstring(path, context.temp_allocator)
 	if luaL_loadfilex(L, cpath, nil) != LUA_OK || lua_pcall(L, 0, 1, 0) != LUA_OK {
@@ -200,11 +209,11 @@ plugin_load :: proc(path, file, dir: string) {
 	lua_setglobal(L, "PLUGIN")
 
 	p := Plugin{L = L, enabled = true, file = strings.clone(file), dir = strings.clone(dir)}
-	p.icon, p.has_icon = load_texture_smooth(path_join({dir, "icon.png"}), 256)
+	p.icon, p.has_icon = load_texture_smooth(tjoin({dir, "icon.png"}), 256)
 	lua_getglobal(L, "PLUGIN")
 	p.name = strings.clone(lua_field_string(L, -1, "name"))
 	if p.name == "" do p.name = strings.clone(file)
-	p.platform = strings.to_lower(lua_field_string(L, -1, "platform"))
+	p.platform = ascii_lower(lua_field_string(L, -1, "platform"))
 	p.version = strings.clone(lua_field_string(L, -1, "version"))
 	p.author = strings.clone(lua_field_string(L, -1, "author"))
 	p.description = strings.clone(lua_field_string(L, -1, "description"))
@@ -249,6 +258,7 @@ plugin_load :: proc(path, file, dir: string) {
 	lua_pop(L, 1)
 	plugin_load_settings(&p)
 	lua_pop(L, 1)
+	plugin_check_downloaded(&p)
 	append(&plugins, p)
 	plugin_logf("loaded %s (%s)", p.name, file)
 }
@@ -293,7 +303,7 @@ lua_saber_log :: proc "c" (L: ^lua_State) -> c.int {
 }
 
 saber_version :: proc() -> string {
-	data, err := os.read_entire_file(path_join({app.exe_dir, "version.ini"}), context.temp_allocator)
+	data, err := os.read_entire_file(tjoin({app.exe_dir, "version.ini"}), context.temp_allocator)
 	if err != nil do return "dev"
 	if v, ok := ini_get(string(data), "version"); ok do return v
 	return strings.trim_space(string(data))

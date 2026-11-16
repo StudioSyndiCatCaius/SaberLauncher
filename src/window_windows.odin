@@ -37,9 +37,7 @@ DestroyWindow: proc "system" (hWnd: win.HWND) -> win.BOOL
 @(init)
 load_user32 :: proc "contextless" () {
 	mod := win.LoadLibraryW(win.L("user32.dll"))
-	if mod == nil {
-		return
-	}
+	if mod == nil do return
 	AttachThreadInput = auto_cast win.GetProcAddress(mod, "AttachThreadInput")
 	AllowSetForegroundWindow = auto_cast win.GetProcAddress(mod, "AllowSetForegroundWindow")
 	GetShellWindow = auto_cast win.GetProcAddress(mod, "GetShellWindow")
@@ -92,9 +90,7 @@ window_pid :: proc(hwnd: Window_Handle) -> u32 {
 
 // Lets a launched program take the foreground from us.
 allow_foreground :: proc() {
-	if AllowSetForegroundWindow != nil {
-		AllowSetForegroundWindow(ASFW_ANY)
-	}
+	if AllowSetForegroundWindow != nil do AllowSetForegroundWindow(ASFW_ANY)
 }
 
 wide_to_utf8 :: proc(p: [^]u16, n: int) -> string {
@@ -106,9 +102,7 @@ wide_to_utf8 :: proc(p: [^]u16, n: int) -> string {
 monitor_rect :: proc(hwnd: win.HWND) -> win.RECT {
 	mi := win.MONITORINFO{cbSize = size_of(win.MONITORINFO)}
 	mon := MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
-	if mon != nil && GetMonitorInfoW(mon, &mi) {
-		return mi.rcMonitor
-	}
+	if mon != nil && GetMonitorInfoW(mon, &mi) do return mi.rcMonitor
 	return {0, 0, GetSystemMetrics(win.SM_CXSCREEN), GetSystemMetrics(win.SM_CYSCREEN)}
 }
 
@@ -121,34 +115,24 @@ window_rect :: proc(hwnd: win.HWND) -> win.RECT {
 // SetForegroundWindow is refused unless we share input with the current foreground
 // thread; without Explorer (account shell) this is the only reliable way to take focus.
 force_foreground :: proc(hwnd: win.HWND) {
-	if hwnd == nil {
-		return
-	}
-	if IsIconic(hwnd) {
-		ShowWindow(hwnd, win.SW_RESTORE)
-	}
+	if hwnd == nil do return
+	if IsIconic(hwnd) do ShowWindow(hwnd, win.SW_RESTORE)
 	me := win.GetCurrentThreadId()
 	fg := GetForegroundWindow()
 	fg_thread: win.DWORD
-	if fg != nil && fg != hwnd {
-		fg_thread = GetWindowThreadProcessId(fg, nil)
-	}
+	if fg != nil && fg != hwnd do fg_thread = GetWindowThreadProcessId(fg, nil)
 	attached := fg_thread != 0 && fg_thread != me && AttachThreadInput != nil && bool(AttachThreadInput(me, fg_thread, true))
 	BringWindowToTop(hwnd)
 	SetForegroundWindow(hwnd)
 	SetFocus(hwnd)
-	if attached {
-		AttachThreadInput(me, fg_thread, false)
-	}
+	if attached do AttachThreadInput(me, fg_thread, false)
 }
 
 // Hide without resizing: shrinking the GL window to a stub (old behaviour) left
 // raylib's framebuffer and borderless state out of sync when we came back.
 hide_for_child :: proc() {
 	hwnd := native_hwnd()
-	if hwnd == nil || !IsWindowVisible(hwnd) {
-		return
-	}
+	if hwnd == nil || !IsWindowVisible(hwnd) do return
 	SetWindowPos(hwnd, win.HWND_NOTOPMOST, 0, 0, 0, 0, win.SWP_NOMOVE | win.SWP_NOSIZE | win.SWP_NOACTIVATE)
 	ShowWindow(hwnd, win.SW_HIDE)
 }
@@ -170,16 +154,10 @@ fit_to_monitor :: proc(hwnd: win.HWND, insert_after: win.HWND, flags: win.UINT) 
 
 show_window_on_top :: proc(topmost: bool) {
 	hwnd := native_hwnd()
-	if hwnd == nil {
-		return
-	}
-	if !rl.IsWindowState({.BORDERLESS_WINDOWED_MODE}) {
-		rl.ToggleBorderlessWindowed()
-	}
+	if hwnd == nil do return
+	if !rl.IsWindowState({.BORDERLESS_WINDOWED_MODE}) do rl.ToggleBorderlessWindowed()
 	fit_to_monitor(hwnd, topmost ? win.HWND_TOPMOST : win.HWND_TOP, win.SWP_SHOWWINDOW)
-	if !topmost {
-		SetWindowPos(hwnd, win.HWND_NOTOPMOST, 0, 0, 0, 0, win.SWP_NOMOVE | win.SWP_NOSIZE)
-	}
+	if !topmost do SetWindowPos(hwnd, win.HWND_NOTOPMOST, 0, 0, 0, 0, win.SWP_NOMOVE | win.SWP_NOSIZE)
 	ShowWindow(hwnd, win.SW_SHOW)
 	force_foreground(hwnd)
 }
@@ -195,17 +173,11 @@ FIT_INTERVAL :: 0.5
 
 keep_fullscreen :: proc() {
 	now := rl.GetTime()
-	if now < app.fit_check_at {
-		return
-	}
+	if now < app.fit_check_at do return
 	app.fit_check_at = now + FIT_INTERVAL
 	hwnd := native_hwnd()
-	if hwnd == nil || !rl.IsWindowState({.BORDERLESS_WINDOWED_MODE}) || !IsWindowVisible(hwnd) {
-		return
-	}
-	if window_rect(hwnd) != fullscreen_rect(hwnd) {
-		fit_to_monitor(hwnd, nil, win.SWP_NOZORDER | win.SWP_NOACTIVATE)
-	}
+	if hwnd == nil || !rl.IsWindowState({.BORDERLESS_WINDOWED_MODE}) || !IsWindowVisible(hwnd) do return
+	if window_rect(hwnd) != fullscreen_rect(hwnd) do fit_to_monitor(hwnd, nil, win.SWP_NOZORDER | win.SWP_NOACTIVATE)
 }
 
 pump_messages :: proc() {

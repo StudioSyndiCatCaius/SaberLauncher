@@ -100,9 +100,7 @@ crash_init :: proc() {
 }
 
 crash_filter :: proc "system" (info: ^win.EXCEPTION_POINTERS) -> win.LONG {
-	if crash_log_handle == nil || info == nil || info.ExceptionRecord == nil {
-		return win.EXCEPTION_CONTINUE_SEARCH
-	}
+	if crash_log_handle == nil || info == nil || info.ExceptionRecord == nil do return win.EXCEPTION_CONTINUE_SEARCH
 	rec := info.ExceptionRecord
 	addr := uintptr(rec.ExceptionAddress)
 

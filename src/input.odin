@@ -44,18 +44,14 @@ input_poll :: proc() {
 	eat_input()
 	input.mouse_eaten = false
 
-	if rl.GetMouseDelta() != {} || rl.IsMouseButtonPressed(.LEFT) {
-		input.using_pad = false
-	}
+	if rl.GetMouseDelta() != {} || rl.IsMouseButtonPressed(.LEFT) do input.using_pad = false
 
 	// Digital directions (d-pad, keys) win over the stick, so a drifting or resting
 	// stick can't cancel or hijack a deliberate press.
 	dx, dy: f32
 	ax, ay: f32
 	for p in 0 ..< i32(MAX_PADS) {
-		if !rl.IsGamepadAvailable(p) {
-			continue
-		}
+		if !rl.IsGamepadAvailable(p) do continue
 		if rl.IsGamepadButtonDown(p, .LEFT_FACE_LEFT) { dx -= 1 }
 		if rl.IsGamepadButtonDown(p, .LEFT_FACE_RIGHT) { dx += 1 }
 		if rl.IsGamepadButtonDown(p, .LEFT_FACE_UP) { dy -= 1 }
@@ -120,20 +116,24 @@ input_poll :: proc() {
 		case .None:
 		}
 	}
-	if input.confirm || input.cancel || input.menu_l || input.menu_r || input.power || input.action {
-		input.using_pad = true
-	}
+	if input.confirm || input.cancel || input.menu_l || input.menu_r || input.power || input.action do input.using_pad = true
+}
+
+// Up / Down through n rows with wrap-around; true (and a click) when it moved.
+nav_list :: proc(sel: ^int, n: int) -> bool {
+	if n <= 0 || input.up == input.down do return false
+	sel^ = cycle(sel^, input.up ? -1 : 1, n)
+	sfx_click()
+	return true
 }
 
 // Moves a grid/list selection; returns true when it changed.
 nav_grid :: proc(sel: ^int, count, cols: int) -> bool {
-	if count <= 0 {
-		return false
-	}
+	if count <= 0 do return false
 	old := sel^
 	i := clamp(sel^, 0, count - 1)
-	if input.left { i = (i - 1 + count) % count }
-	if input.right { i = (i + 1) % count }
+	if input.left { i = cycle(i, -1, count) }
+	if input.right { i = cycle(i, 1, count) }
 	if input.up && i - cols >= 0 { i -= cols }
 	if input.down {
 		if i + cols < count {
@@ -153,9 +153,7 @@ nav_grid :: proc(sel: ^int, count, cols: int) -> bool {
 SCREEN_ORDER :: [SCREEN_COUNT]Screen{.Main, .Library, .Movies, .Apps, .Plugins, .Settings}
 
 go_screen :: proc(next: Screen) {
-	if next == app.screen {
-		return
-	}
+	if next == app.screen do return
 	dir := int(next) - int(app.screen)
 	if dir > SCREEN_COUNT / 2 { dir -= SCREEN_COUNT }
 	if dir < -SCREEN_COUNT / 2 { dir += SCREEN_COUNT }
@@ -170,7 +168,7 @@ go_screen :: proc(next: Screen) {
 
 cycle_screen :: proc(delta: int) {
 	order := SCREEN_ORDER
-	go_screen(order[(int(app.screen) + delta + SCREEN_COUNT) % SCREEN_COUNT])
+	go_screen(order[cycle(int(app.screen), delta, SCREEN_COUNT)])
 }
 
 update_swipe :: proc() {
@@ -179,18 +177,12 @@ update_swipe :: proc() {
 
 draw_screen_body :: proc(s: Screen, w, h: f32) {
 	switch s {
-	case .Main:
-		draw_main(w, h)
-	case .Library:
-		draw_library(w, h)
-	case .Movies:
-		draw_movies(w, h)
-	case .Apps:
-		draw_apps(w, h)
-	case .Plugins:
-		draw_plugins(w, h)
-	case .Settings:
-		draw_settings(w, h)
+	case .Main:     draw_main(w, h)
+	case .Library:  draw_grid_page(.Library, "GAMES", "No games yet. Add a folder with a _Saber subfolder to APP/games.", w, h)
+	case .Movies:   draw_grid_page(.Movies, "MOVIES", "No movies yet. Drop .mp4 / .mkv / .avi files into APP/movies.", w, h)
+	case .Apps:     draw_apps(w, h)
+	case .Plugins:  draw_plugins(w, h)
+	case .Settings: draw_settings(w, h)
 	}
 }
 

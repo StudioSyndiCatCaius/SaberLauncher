@@ -115,12 +115,7 @@ emu_load_core_opts :: proc() {
 	data, err := os.read_entire_file(retro_dir("options.menu.ini"), context.temp_allocator)
 	if err != nil do return
 	it := string(data)
-	for line in strings.split_lines_iterator(&it) {
-		l := strings.trim_space(line)
-		if l == "" || l[0] == ';' || l[0] == '#' || l[0] == '[' do continue
-		k, _, v := strings.partition(l, "=")
-		if k = strings.trim_space(k); k != "" do emu_set_core_opt(k, strings.trim_space(v))
-	}
+	for k, v in ini_next(&it) do if k != "" do emu_set_core_opt(k, v)
 }
 
 emu_save_core_opts :: proc() {
@@ -254,7 +249,7 @@ emu_pad_name :: proc(b: rl.GamepadButton) -> string {
 
 emu_key_name :: proc(k: rl.KeyboardKey) -> string {
 	if k == .KEY_NULL do return "—"
-	return strings.to_lower(fmt.tprintf("%v", k), context.temp_allocator)
+	return ascii_lower(fmt.tprintf("%v", k), context.temp_allocator)
 }
 
 emu_pages :: proc() -> []Emu_Page {
@@ -355,18 +350,13 @@ emu_rows :: proc(page: Emu_Page) -> [dynamic]Emu_Row {
 			pref := emu.cores[RETRO_PLATFORM_DIR[p]]
 			choices := emu_core_choices(p)
 			value := "No core installed"
-			if len(choices) > 1 {
-				value = pref == "" ? fmt.tprintf("Auto (%s)", emu_core_label(choices[1])) : emu_core_label(pref)
-			}
+			if len(choices) > 1 do value = pref == "" ? fmt.tprintf("Auto (%s)", emu_core_label(choices[1])) : emu_core_label(pref)
 			append(&rows, Emu_Row{label = RETRO_PLATFORM_NAME[p], value = value, help = "Takes effect the next time a game starts. Cores go in APP\\libretro\\cores."})
 		}
 	}
 	return rows
 }
 
-cycle :: proc(v, delta, n: int) -> int {
-	return ((v + delta) % n + n) % n
-}
 
 // delta: -1 / +1 steps a value, 0 activates the row (steps forward for plain values).
 emu_change :: proc(row: int, delta: int) {
@@ -475,17 +465,8 @@ emu_menu_input :: proc() {
 	n := len(rows)
 	if n == 0 do return
 	emu_menu.sel = clamp(emu_menu.sel, 0, n - 1)
-	if input.up {
-		emu_menu.sel = (emu_menu.sel + n - 1) % n
-		sfx_click()
-	}
-	if input.down {
-		emu_menu.sel = (emu_menu.sel + 1) % n
-		sfx_click()
-	}
-	if wheel := rl.GetMouseWheelMove(); wheel != 0 && !input.using_pad {
-		emu_menu.sel = clamp(emu_menu.sel - int(wheel), 0, n - 1)
-	}
+	nav_list(&emu_menu.sel, n)
+	if wheel := rl.GetMouseWheelMove(); wheel != 0 && !input.using_pad do emu_menu.sel = clamp(emu_menu.sel - int(wheel), 0, n - 1)
 	row := rows[emu_menu.sel]
 	if input.left && !row.action do emu_change(emu_menu.sel, -1)
 	if input.right && !row.action do emu_change(emu_menu.sel, 1)
@@ -500,11 +481,9 @@ EMU_ROW_H :: 50
 EMU_ROW_GAP :: 6
 
 emu_menu_draw :: proc(w, h: f32) {
-	emu_menu.t = smooth_to(emu_menu.t, emu_menu.open ? 1 : 0, 16)
-	if !emu_menu.open && emu_menu.t < 0.02 do return
-	t := emu_menu.t
-	rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(190 * t)))
-	if t < 0.5 do return
+	if !modal_fade(&emu_menu.t, emu_menu.open) do return
+	dim_screen(w, h, 190 * emu_menu.t)
+	if emu_menu.t < 0.5 do return
 
 	pw := min(w - PAD * 2, 940)
 	ph := h - 2 * PAD - FOOTER_H
@@ -522,9 +501,7 @@ emu_menu_draw :: proc(w, h: f32) {
 		tr := rl.Rectangle{tx, ty, tw, 34}
 		active := p == emu_menu.page
 		hovered := !emu_capture.on && mouse_over(tr, true)
-		if active || hovered {
-			rl.DrawRectangleRounded(tr, 1, 8, with_alpha(COL_ACCENT, active ? 60 : 30))
-		}
+		if active || hovered do rl.DrawRectangleRounded(tr, 1, 8, with_alpha(COL_ACCENT, active ? 60 : 30))
 		draw_t_center(label, tr.x + tw * 0.5, tr.y + 7, 18, active ? COL_TEXT : COL_MUTED)
 		if hovered && !active && rl.IsMouseButtonPressed(.LEFT) {
 			emu_menu.page = p
@@ -543,9 +520,7 @@ emu_menu_draw :: proc(w, h: f32) {
 	}
 	emu_menu.sel = clamp(emu_menu.sel, 0, len(rows) - 1)
 	vis := max(1, int(list.height) / (EMU_ROW_H + EMU_ROW_GAP))
-	if emu_menu.sel < emu_menu.first do emu_menu.first = emu_menu.sel
-	if emu_menu.sel >= emu_menu.first + vis do emu_menu.first = emu_menu.sel - vis + 1
-	emu_menu.first = clamp(emu_menu.first, 0, max(0, len(rows) - vis))
+	scroll_follow(&emu_menu.first, emu_menu.sel, vis, len(rows))
 
 	for i in emu_menu.first ..< min(len(rows), emu_menu.first + vis) {
 		row := rows[i]
@@ -563,7 +538,7 @@ emu_menu_draw :: proc(w, h: f32) {
 			draw_t_fit(row.value, val.x + 8, r.y + 15, val.width - 50, 18, focused ? COL_TEXT : COL_MUTED, false)
 			draw_glyph("A", val.x + val.width - 30, r.y + r.height * 0.5)
 			if !emu_capture.on && focused && mouse_over(r, true) && rl.IsMouseButtonPressed(.LEFT) do emu_change(i, 0)
-		} else if d := emu_stepper(val, row.value, focused); d != 0 && !emu_capture.on {
+		} else if d := draw_stepper(val, row.value, 0, 0, focused, modal = true); d != 0 && !emu_capture.on {
 			emu_menu.sel = i
 			emu_change(i, d)
 		}
@@ -571,13 +546,7 @@ emu_menu_draw :: proc(w, h: f32) {
 			emu_change(i, 0)
 		}
 	}
-	if len(rows) > vis {
-		track := rl.Rectangle{list.x + list.width + 4, list.y, 4, list.height}
-		rl.DrawRectangleRounded(track, 1, 4, with_alpha(COL_TINT, 20))
-		th := track.height * f32(vis) / f32(len(rows))
-		ty := track.y + (track.height - th) * f32(emu_menu.first) / f32(len(rows) - vis)
-		rl.DrawRectangleRounded({track.x, ty, track.width, th}, 1, 4, COL_ACCENT_SOFT)
-	}
+	draw_scrollbar({list.x + list.width + 4, list.y, 4, list.height}, f32(emu_menu.first), vis, len(rows), COL_ACCENT_SOFT, with_alpha(COL_TINT, 20))
 	draw_t_fit(rows[emu_menu.sel].help, pr.x + 28, pr.y + pr.height - 38, pr.width - 56, 16, COL_MUTED, false)
 
 	if emu_capture.on {
@@ -590,44 +559,18 @@ emu_menu_draw :: proc(w, h: f32) {
 	}
 }
 
-// "<  value  >" with clickable arrows; returns -1 / +1 for a click.
-emu_stepper :: proc(r: rl.Rectangle, value: string, focused: bool) -> int {
-	arrow := focused ? COL_ACCENT : COL_MUTED
-	left := rl.Rectangle{r.x, r.y, 36, r.height}
-	right := rl.Rectangle{r.x + r.width - 36, r.y, 36, r.height}
-	draw_triangle_dir(left.x + 18, r.y + r.height * 0.5, 14, .Left, arrow)
-	draw_triangle_dir(right.x + 18, r.y + r.height * 0.5, 14, .Right, arrow)
-	draw_t_fit(value, left.x + 44, r.y + 11, r.width - 88, 18, focused ? COL_TEXT : COL_MUTED, focused)
-	if mouse_over(left, true) && rl.IsMouseButtonPressed(.LEFT) do return -1
-	if mouse_over(right, true) && rl.IsMouseButtonPressed(.LEFT) do return 1
-	return 0
-}
-
 // In-game: runs the menu over the paused picture until it closes.
 emu_menu_run_in_game :: proc() {
 	emu_open(true)
 	emu_menu.t = 1
-	first := true
-	for emu_menu.open {
-		if rl.WindowShouldClose() && !app.in_shell {
-			retro.quit = true
+	for first := true; emu_menu.open; first = false {
+		if !retro_overlay_input(first) {
 			emu_close()
 			return
 		}
-		input_poll()
-		if first {
-			eat_input()
-			first = false
-		}
 		emu_menu_input()
-		w := f32(rl.GetScreenWidth())
-		h := f32(rl.GetScreenHeight())
-		retro_capture_glass(w, h)
-		rl.BeginDrawing()
-		rl.ClearBackground(rl.BLACK)
-		retro_draw_frame(w, h, rl.WHITE)
+		w, h := retro_overlay_begin()
 		emu_menu_draw(w, h)
-		rl.EndDrawing()
-		free_all(context.temp_allocator)
+		retro_overlay_end()
 	}
 }

@@ -46,10 +46,7 @@ update_check_start :: proc() {
 		sync.atomic_store(cast(^i32)&update_state, i32(Update_State.Failed))
 		return
 	}
-	if update_worker != nil {
-		thread.join(update_worker)
-		thread.destroy(update_worker)
-	}
+	thread_end(&update_worker)
 	sync.atomic_store(cast(^i32)&update_state, i32(Update_State.Checking))
 	update_worker = thread.create_and_start(update_check_worker)
 }
@@ -70,10 +67,8 @@ update_poll :: proc() {
 	if s == last do return
 	last = s
 	#partial switch s {
-	case .Up_To_Date:
-		set_status("Saber is up to date")
-	case .Failed:
-		set_status("Update check failed (offline?)")
+	case .Up_To_Date: set_status("Saber is up to date")
+	case .Failed: set_status("Update check failed (offline?)")
 	case .Available:
 		if !start_updater("-y --wait --restart") {
 			set_status("Could not start %s", filepath.base(updater_path()))

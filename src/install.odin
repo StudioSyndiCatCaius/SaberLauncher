@@ -26,7 +26,7 @@ import rl "vendor:raylib"
 
 INSTALL_PART :: ".part"
 INSTALL_CHUNK :: 512 * 1024
-INSTALL_CANCELLED :: "Cancelled"
+INSTALL_CANCELLED :: COPY_CANCELLED
 INSTALL_CARD_SEC :: 5.0 // "Installed" / "Install Stopped" stays this long
 INSTALL_SPARE :: 64 * 1024 * 1024 // free space kept on top of the game's size
 
@@ -68,12 +68,6 @@ Install_Job :: struct {
 
 install: Install_Job
 
-// Temp-allocated path join (the worker joins a lot of paths).
-tjoin :: proc(parts: []string) -> string {
-	p, _ := filepath.join(parts, context.temp_allocator)
-	return p
-}
-
 // A folder / file name from a title: no Windows-reserved characters, no trailing dots or spaces.
 install_name :: proc(s: string) -> string {
 	n := strings.trim_right(safe_file_name(s), ". ")
@@ -84,15 +78,12 @@ install_name :: proc(s: string) -> string {
 install_kind :: proc(g: ^Game) -> (kind: Install_Kind, ok: bool, why: string) {
 	if !g.from_drive do return
 	switch {
-	case g.saber_dir != "":
-		return .Folder, true, ""
-	case g.rom_path != "":
-		return .Rom, true, ""
+	case g.saber_dir != "": return .Folder, true, ""
+	case g.rom_path != "": return .Rom, true, ""
 	case g.disc_letter != 0 && g.platform == .DC:
 		if g.gdrom do return .Dc, false, "Pressed Dreamcast GD-ROMs can't be read by PC drives"
 		return .Dc, true, ""
-	case g.disc_letter != 0 && g.platform != .None:
-		return .Disc, true, ""
+	case g.disc_letter != 0 && g.platform != .None: return .Disc, true, ""
 	}
 	return
 }
@@ -105,8 +96,7 @@ install_dest :: proc(g: ^Game, kind: Install_Kind) -> string {
 		// a burned (modded) disc never lands on top of the original's copy
 		if g.mod_name != "" do name = fmt.tprintf("%s (%s)", name, install_name(g.mod_name))
 		return tjoin({app.roms_dir, RETRO_PLATFORM_DIR[g.platform], name})
-	case .Rom:
-		return tjoin({app.roms_dir, RETRO_PLATFORM_DIR[g.platform]})
+	case .Rom: return tjoin({app.roms_dir, RETRO_PLATFORM_DIR[g.platform]})
 	case .Folder:
 		base := filepath.base(strings.trim_right(g.root, "\\/"))
 		if base == "" || base == "." || strings.has_suffix(base, ":") do base = g.title // a game in a drive's root
@@ -124,12 +114,9 @@ install_disc_image :: proc(serial: string, p: Retro_Platform) -> string {
 install_exists :: proc(g: ^Game, kind: Install_Kind) -> bool {
 	dest := install_dest(g, kind)
 	switch kind {
-	case .Disc:
-		return os.exists(tjoin({dest, install_disc_image(g.disc_serial, g.platform)}))
-	case .Rom:
-		return os.exists(tjoin({dest, filepath.base(g.rom_path)}))
-	case .Dc, .Folder:
-		return os.exists(dest)
+	case .Disc: return os.exists(tjoin({dest, install_disc_image(g.disc_serial, g.platform)}))
+	case .Rom: return os.exists(tjoin({dest, filepath.base(g.rom_path)}))
+	case .Dc, .Folder: return os.exists(dest)
 	}
 	return false
 }
@@ -199,9 +186,7 @@ install_update :: proc() {
 		}
 	}
 	if !sync.atomic_load(&install.done) do return
-	thread.join(install.worker)
-	thread.destroy(install.worker)
-	install.worker = nil
+	thread_end(&install.worker)
 	install.running = false
 	install.ended_at = rl.GetTime()
 	install.ended_ok = install.err == ""
@@ -228,9 +213,7 @@ install_update :: proc() {
 install_shutdown :: proc() {
 	if install.worker == nil do return
 	install_cancel() // the worker removes its partial files
-	thread.join(install.worker)
-	thread.destroy(install.worker)
-	install.worker = nil
+	thread_end(&install.worker)
 	install.running = false
 }
 
@@ -407,7 +390,7 @@ install_write_disc_ini :: proc(j: ^Install_Job, dir, entry: string) -> string {
 		if m3u, multi := install_write_m3u(j, dir); multi do rom = m3u
 	}
 	if j.box != "" {
-		ext := strings.to_lower(filepath.ext(j.box), context.temp_allocator)
+		ext := ascii_lower(filepath.ext(j.box), context.temp_allocator)
 		name := fmt.tprintf("box%s", ext != "" ? ext : ".png")
 		if os.copy_file(tjoin({saber, name}), j.box) == nil do box = name
 	}
@@ -424,13 +407,13 @@ install_write_disc_ini :: proc(j: ^Install_Job, dir, entry: string) -> string {
 install_write_m3u :: proc(j: ^Install_Job, dir: string) -> (name: string, multi: bool) {
 	cues := make([dynamic]string, context.temp_allocator)
 	if fis, err := os.read_all_directory_by_path(dir, context.temp_allocator); err == nil {
-		for fi in fis do if fi.type == .Regular && strings.equal_fold(filepath.ext(fi.name), ".cue") do append(&cues, fi.name)
+		for fi in fis do if fi.type == .Regular && eq_fold(filepath.ext(fi.name), ".cue") do append(&cues, fi.name)
 	}
 	if len(cues) < 2 do return "", false
 	name = fmt.tprintf("%s.m3u", install_name(j.title))
 	order := make([dynamic]string, context.temp_allocator)
 	has :: proc(list: []string, s: string) -> bool {
-		for v in list do if strings.equal_fold(v, s) do return true
+		for v in list do if eq_fold(v, s) do return true
 		return false
 	}
 	if old, e := os.read_entire_file(tjoin({dir, name}), context.temp_allocator); e == nil {
@@ -502,7 +485,7 @@ install_folder :: proc(j: ^Install_Job) -> string {
 install_skip :: proc(fi: os.File_Info, top, in_saber: bool) -> bool {
 	if top && (fi.name == "System Volume Information" || strings.has_prefix(fi.name, "$")) do return true
 	if fi.type == .Directory && fi.name != "_Saber" && os.exists(tjoin({fi.fullpath, "_Saber", "saber.ini"})) do return true
-	if in_saber && strings.equal_fold(fi.name, "records.ini") do return true
+	if in_saber && eq_fold(fi.name, "records.ini") do return true
 	return false
 }
 
@@ -538,36 +521,7 @@ install_copy_tree :: proc(j: ^Install_Job, src, dst: string, top: bool, in_saber
 
 // Copies one file through <dst>.part.
 install_copy_file :: proc(j: ^Install_Job, src, dst: string) -> string {
-	in_f, oerr := os.open(src)
-	if oerr != nil do return fmt.tprintf("Couldn't read %s", filepath.base(src))
-	defer os.close(in_f)
-	size, _ := os.file_size(in_f)
-	part := strings.concatenate({dst, INSTALL_PART}, context.temp_allocator)
-	out_f, cerr := os.open(part, {.Write, .Create, .Trunc})
-	if cerr != nil do return fmt.tprintf("Couldn't write %s", filepath.base(dst))
-	fail :: proc(out_f: ^os.File, part, msg: string) -> string {
-		os.close(out_f)
-		os.remove(part)
-		return msg
-	}
-	copied: i64
-	for copied < size {
-		if install_cancelled(j) do return fail(out_f, part, INSTALL_CANCELLED)
-		want := int(min(i64(len(j.buf)), size - copied))
-		n, rerr := os.read(in_f, j.buf[:want])
-		if n <= 0 {
-			if rerr != nil || n == 0 do return fail(out_f, part, fmt.tprintf("Couldn't read %s", filepath.base(src)))
-		}
-		if _, werr := os.write(out_f, j.buf[:n]); werr != nil do return fail(out_f, part, "Couldn't write the copy (disk full?)")
-		copied += i64(n)
-		install_add(j, n)
-	}
-	os.close(out_f)
-	if os.rename(part, dst) != nil {
-		os.remove(part)
-		return fmt.tprintf("Couldn't replace %s (is it in use?)", filepath.base(dst))
-	}
-	return ""
+	return copy_file_part(src, dst, j.buf, &j.cancel, &j.done_bytes)
 }
 
 // A ROM (or a .cue and the files it lists) into games_roms/<platform>/.
@@ -575,7 +529,7 @@ install_rom :: proc(j: ^Install_Job) -> string {
 	src_dir := filepath.dir(j.src)
 	names := make([dynamic]string, context.temp_allocator) // relative to src_dir
 	append(&names, filepath.base(j.src))
-	if strings.equal_fold(filepath.ext(j.src), ".cue") {
+	if eq_fold(filepath.ext(j.src), ".cue") {
 		if text, e := os.read_entire_file(j.src, context.temp_allocator); e == nil {
 			for n in cue_file_names(string(text)) do if !filepath.is_abs(n) && !strings.contains(n, "..") do append(&names, n)
 		}
@@ -600,15 +554,6 @@ install_rom :: proc(j: ^Install_Job) -> string {
 		if !existed do append(&created, out)
 	}
 	return ""
-}
-
-// "650 MB", "4.3 GB"
-fmt_bytes :: proc(n: i64) -> string {
-	switch {
-	case n >= 1024 * 1024 * 1024: return fmt.tprintf("%.1f GB", f64(n) / (1024 * 1024 * 1024))
-	case n >= 1024 * 1024:        return fmt.tprintf("%d MB", n / (1024 * 1024))
-	case:                         return fmt.tprintf("%d KB", max(n / 1024, 0))
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -681,8 +626,7 @@ game_menu_rows :: proc(g: ^Game) -> []Game_Menu_Item {
 
 game_menu_label :: proc(g: ^Game, item: Game_Menu_Item) -> string {
 	switch item.row {
-	case .Play:
-		return "Play"
+	case .Play: return "Play"
 	case .Install:
 		if game_menu.armed do return "Press Again to Reinstall"
 		return game_menu.installed ? "Reinstall" : "Install to Library"
@@ -690,12 +634,9 @@ game_menu_label :: proc(g: ^Game, item: Game_Menu_Item) -> string {
 		total := sync.atomic_load(&install.total_bytes)
 		if total <= 0 do return "Cancel Install"
 		return fmt.tprintf("Cancel Install (%d%%)", int(f64(sync.atomic_load(&install.done_bytes)) * 100 / f64(total)))
-	case .Browse:
-		return "Browse Files"
-	case .Plugin:
-		return plugin_game_actions[item.action].name
-	case .Close:
-		return "Close"
+	case .Browse: return "Browse Files"
+	case .Plugin: return plugin_game_actions[item.action].name
+	case .Close: return "Close"
 	}
 	return ""
 }
@@ -706,12 +647,9 @@ game_menu_sub :: proc(g: ^Game) -> string {
 	switch {
 	case !g.from_drive:
 		return g.platform != .None ? fmt.tprintf("%s  ·  in your library", RETRO_PLATFORM_NAME[g.platform]) : "In your library"
-	case !can && why != "":
-		return why
-	case game_menu.installed:
-		return "Already in your library  ·  reinstall to refresh it"
-	case kind == .Folder && g.platform == .None:
-		return "Install copies it to GAMES"
+	case !can && why != "": return why
+	case game_menu.installed: return "Already in your library  ·  reinstall to refresh it"
+	case kind == .Folder && g.platform == .None: return "Install copies it to GAMES"
 	case:
 		return fmt.tprintf("Install copies it to GAMES  ·  %s", RETRO_PLATFORM_NAME[g.platform])
 	}
@@ -738,13 +676,8 @@ game_menu_input :: proc() {
 		return
 	}
 	rows := game_menu_rows(g)
-	n := len(rows)
-	game_menu.sel = clamp(game_menu.sel, 0, n - 1)
-	if input.up || input.down {
-		game_menu.sel = (game_menu.sel + (input.up ? n - 1 : 1)) % n
-		game_menu.armed = false
-		sfx_click()
-	}
+	game_menu.sel = clamp(game_menu.sel, 0, len(rows) - 1)
+	if nav_list(&game_menu.sel, len(rows)) do game_menu.armed = false
 	if input.cancel || input.action || input.power {
 		game_menu_close()
 		return
@@ -792,14 +725,12 @@ game_menu_choose :: proc(g: ^Game, item: Game_Menu_Item) {
 		game_menu.open = false
 		sfx_click()
 		if msg := plugins_game_action_run(item.action); msg != "" do set_status("%s", msg)
-	case .Close:
-		game_menu_close()
+	case .Close: game_menu_close()
 	}
 }
 
 draw_game_menu :: proc(w, h: f32) {
-	game_menu.t = smooth_to(game_menu.t, game_menu.open ? 1 : 0, 16)
-	if game_menu.t < 0.02 && !game_menu.open do return
+	if !modal_fade(&game_menu.t, game_menu.open) do return
 	g := game_menu_game()
 	if g == nil {
 		game_menu.open = false
@@ -821,18 +752,9 @@ draw_game_menu :: proc(w, h: f32) {
 draw_install_card :: proc(w, h: f32) {
 	now := rl.GetTime()
 	show := install.running || (install.ended_at > 0 && now - install.ended_at < INSTALL_CARD_SEC)
-	install.card_t = smooth_to(install.card_t, show ? 1 : 0, 14)
+	if !modal_fade(&install.card_t, show, 14) do return
 	t := install.card_t
-	if t < 0.02 do return
-
-	cw: f32 = 440
-	ch: f32 = 104
-	s := 0.92 + 0.08 * t
-	y := h - FOOTER_H - 20 - ch * s - drive_scan.card_t * (92 + 12)
-	r := rl.Rectangle{w - PAD - cw * s + (1 - t) * 60, y, cw * s, ch * s}
-	failed := !install.running && !install.ended_ok
-	draw_soft_shadow(r, RADIUS, t * 1.4)
-	draw_glass(r, RADIUS, COL_PANEL_SOLID, 0.5, failed ? COL_WARN : COL_ACCENT, 0.25, t)
+	r := toast_card(w, h, 440, 104, t, drive_scan.card_t * (92 + 12), !install.running && !install.ended_ok)
 	if t < 0.5 do return
 
 	icon := rl.Vector2{r.x + 52, r.y + r.height * 0.5}

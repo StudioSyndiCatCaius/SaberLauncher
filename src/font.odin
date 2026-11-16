@@ -40,19 +40,15 @@ font_codepoints: [dynamic]rune
 
 font_init :: proc() {
 	// ASCII + Latin-1 (accented titles) + the punctuation the UI uses.
-	for r in rune(32) ..= 126 {
-		append(&font_codepoints, r)
-	}
-	for r in rune(0xA0) ..= 0xFF {
-		append(&font_codepoints, r)
-	}
+	for r in rune(32) ..= 126 do append(&font_codepoints, r)
+	for r in rune(0xA0) ..= 0xFF do append(&font_codepoints, r)
 	append(&font_codepoints, '—', '–', '…', '•', '’', '“', '”', '™')
 
 	bundled := path_join({app.exe_dir, "assets", "fonts"})
 	if fis, err := os.read_all_directory_by_path(bundled, context.temp_allocator); err == nil {
 		slice.sort_by(fis, proc(a, b: os.File_Info) -> bool { return a.name < b.name })
 		for fi in fis {
-			ext := strings.to_lower(filepath.ext(fi.name), context.temp_allocator)
+			ext := ascii_lower(filepath.ext(fi.name), context.temp_allocator)
 			if fi.type != .Directory && (ext == ".ttf" || ext == ".otf") {
 				append(&font_choices, Font_Choice{strings.clone(filepath.stem(fi.name)), strings.clone(fi.fullpath)})
 			}
@@ -60,9 +56,7 @@ font_init :: proc() {
 	}
 	for f in SYSTEM_FONTS {
 		p := path_join({"C:\\Windows\\Fonts", f[1]})
-		if os.exists(p) && index_of_font(f[0]) < 0 {
-			append(&font_choices, Font_Choice{f[0], p})
-		}
+		if os.exists(p) && index_of_font(f[0]) < 0 do append(&font_choices, Font_Choice{f[0], p})
 	}
 	apply_font(app.settings.font)
 }
@@ -81,9 +75,7 @@ unload_fonts :: proc() {
 
 index_of_font :: proc(name: string) -> int {
 	for f, i in font_choices {
-		if strings.equal_fold(f.name, name) {
-			return i
-		}
+		if eq_fold(f.name, name) do return i
 	}
 	return -1
 }
@@ -121,9 +113,7 @@ apply_font :: proc(name: string) {
 
 cycle_font :: proc(delta: int) {
 	n := len(font_choices)
-	if n == 0 {
-		return
-	}
+	if n == 0 do return
 	i := (max(index_of_font(app.settings.font), 0) + delta + n) % n
 	apply_font(font_choices[i].name)
 	save_settings()
@@ -139,16 +129,12 @@ font_for :: proc(size: f32) -> rl.Font {
 }
 
 measure_t :: proc(s: string, size: f32) -> f32 {
-	if s == "" {
-		return 0
-	}
+	if s == "" do return 0
 	return rl.MeasureTextEx(font_for(size), text_cs(s), size, size / 16).x
 }
 
 draw_t :: proc(s: string, x, y: f32, size: f32, col: rl.Color) {
-	if s == "" {
-		return
-	}
+	if s == "" do return
 	// snap to whole pixels so small text stays sharp
 	rl.DrawTextEx(font_for(size), text_cs(s), {math.round(x), math.round(y)}, size, size / 16, col)
 }
@@ -163,9 +149,7 @@ draw_t_right :: proc(s: string, right, y: f32, size: f32, col: rl.Color) {
 
 // Fits text into max_w: scrolls it (marquee) when focused, otherwise ellipsizes.
 draw_t_fit :: proc(s: string, x, y, max_w, size: f32, col: rl.Color, marquee: bool) {
-	if s == "" {
-		return
-	}
+	if s == "" do return
 	w := measure_t(s, size)
 	if w <= max_w {
 		draw_t(s, x, y, size, col)
@@ -194,9 +178,7 @@ draw_t_fit :: proc(s: string, x, y, max_w, size: f32, col: rl.Color, marquee: bo
 			hi = mid - 1
 		}
 	}
-	for lo > 0 && lo < len(s) && (s[lo] & 0xc0) == 0x80 {
-		lo -= 1
-	}
+	for lo > 0 && lo < len(s) && (s[lo] & 0xc0) == 0x80 do lo -= 1
 	draw_t(strings.concatenate({strings.trim_right_space(s[:lo]), ellipsis}, context.temp_allocator), x, y, size, col)
 }
 

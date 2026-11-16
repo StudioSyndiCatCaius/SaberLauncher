@@ -63,7 +63,7 @@ PS2_ROMDIR_SCAN :: 512 * 1024
 
 bios_is_ps2 :: proc(path, name: string, size: i64) -> bool {
 	if size != PS2_BIOS_SIZE do return false
-	ext := strings.to_lower(filepath.ext(name), context.temp_allocator)
+	ext := ascii_lower(filepath.ext(name), context.temp_allocator)
 	if ext != ".bin" && ext != ".rom0" && ext != ".rom" && ext != "" do return false
 	f, err := os.open(path)
 	if err != nil do return false
@@ -75,7 +75,7 @@ bios_is_ps2 :: proc(path, name: string, size: i64) -> bool {
 
 // A PS3 system update (.pup, "SCEUF" header), whatever it's called.
 bios_is_ps3 :: proc(path, name: string) -> bool {
-	if !strings.equal_fold(filepath.ext(name), ".pup") do return false
+	if !eq_fold(filepath.ext(name), ".pup") do return false
 	f, err := os.open(path)
 	if err != nil do return false
 	defer os.close(f)
@@ -89,7 +89,7 @@ bios_folder :: proc(root: string) -> string {
 	fis, err := os.read_all_directory_by_path(root, context.temp_allocator)
 	if err != nil do return ""
 	for fi in fis {
-		if fi.type == .Directory && strings.equal_fold(fi.name, "bios") do return strings.clone(fi.fullpath)
+		if fi.type == .Directory && eq_fold(fi.name, "bios") do return strings.clone(fi.fullpath)
 	}
 	return ""
 }
@@ -116,7 +116,7 @@ bios_walk :: proc(out: ^[dynamic]Bios_File, dir: string, depth: int) {
 		if fi.type != .Regular || fi.size <= 0 do continue
 		f := Bios_File{src = fi.fullpath, size = fi.size}
 		for k in BIOS_KNOWN {
-			if strings.equal_fold(fi.name, k.name) {
+			if eq_fold(fi.name, k.name) {
 				f.name, f.platform = k.name, k.platform
 				f.dest = retro_dir("system", k.dest, k.name) if k.dest != "" else retro_dir("system", k.name)
 				break
@@ -148,39 +148,12 @@ PS2_COMPANION_EXTS := [?]string{".nvm", ".mec", ".rom1", ".rom2", ".erom"}
 bios_ps2_companions :: proc(out: ^[dynamic]Bios_File, fis: []os.File_Info, bin: string) {
 	stem := filepath.stem(bin)
 	for fi in fis {
-		if fi.type != .Regular || !strings.equal_fold(filepath.stem(fi.name), stem) do continue
-		ext := strings.to_lower(filepath.ext(fi.name), context.temp_allocator)
+		if fi.type != .Regular || !eq_fold(filepath.stem(fi.name), stem) do continue
+		ext := ascii_lower(filepath.ext(fi.name), context.temp_allocator)
 		if !slice.contains(PS2_COMPANION_EXTS[:], ext) do continue
 		append(out, Bios_File{src = fi.fullpath, name = fi.name, platform = .PS2, size = fi.size,
 			dest = strings.clone(retro_dir("system", "pcsx2", "bios", fi.name), context.temp_allocator)})
 	}
-}
-
-// Full compare is only done for small files on the main thread; big ones (PS3 firmware)
-// match by size there and are verified byte for byte by the install worker.
-BIOS_QUICK_LIMIT :: 16 * 1024 * 1024
-
-bios_same :: proc(a, b: string, quick := false) -> bool {
-	fa, ea := os.open(a)
-	if ea != nil do return false
-	defer os.close(fa)
-	fb, eb := os.open(b)
-	if eb != nil do return false
-	defer os.close(fb)
-	sa, _ := os.file_size(fa)
-	sb, _ := os.file_size(fb)
-	if sa != sb do return false
-	if quick && sa > BIOS_QUICK_LIMIT do return true
-	// streamed: the PS3 firmware (PS3UPDAT.PUP) is ~200 MB
-	CHUNK :: 1024 * 1024
-	ba := make([]byte, CHUNK, context.temp_allocator)
-	bb := make([]byte, CHUNK, context.temp_allocator)
-	for off: i64 = 0; off < sa; off += CHUNK {
-		na, _ := os.read_at(fa, ba, off)
-		nb, _ := os.read_at(fb, bb, off)
-		if na <= 0 || na != nb || string(ba[:na]) != string(bb[:nb]) do return false
-	}
-	return true
 }
 
 // Drive scan (worker thread): the "Install BIOS" card for a drive whose bios folder holds any.
@@ -254,7 +227,8 @@ bios_menu_refresh :: proc() {
 		c.src = strings.clone(f.src)
 		c.name = filepath.base(c.src) if f.platform == .PS2 else f.name
 		c.dest = strings.clone(f.dest)
-		c.installed = bios_same(f.src, f.dest, quick = true)
+		// big files (PS3 firmware) only match by size here; copies are verified byte for byte
+		c.installed = files_same(f.src, f.dest, quick = true)
 		append(&bios_menu.files, c)
 		if n := len(bios_menu.groups); n == 0 || bios_menu.groups[n - 1].platform != c.platform {
 			append(&bios_menu.groups, Bios_Group{platform = c.platform})
@@ -349,7 +323,8 @@ bios_job_run :: proc() {
 	for &c, i in bios_job.copies {
 		if sync.atomic_load(&bios_job.cancel) do break
 		sync.atomic_store(&bios_job.current, i)
-		if bios_copy_file(c.src, c.dest, buf) {
+		os.make_directory_all(filepath.dir(c.dest))
+		if copy_file_part(c.src, c.dest, buf, &bios_job.cancel, &bios_job.copied, verify = true) == "" {
 			bios_job.done += 1
 		} else {
 			bios_job.failed += 1
@@ -360,42 +335,10 @@ bios_job_run :: proc() {
 	sync.atomic_store(&bios_job.finished, true)
 }
 
-bios_copy_file :: proc(src, dest: string, buf: []byte) -> bool {
-	os.make_directory_all(filepath.dir(dest))
-	part := fmt.tprintf("%s.part", dest)
-	ok := false
-	{
-		in_f, e1 := os.open(src)
-		if e1 != nil do return false
-		defer os.close(in_f)
-		out_f, e2 := os.open(part, {.Write, .Create, .Trunc})
-		if e2 != nil do return false
-		defer os.close(out_f)
-		for {
-			if sync.atomic_load(&bios_job.cancel) do break
-			n, _ := os.read(in_f, buf)
-			if n <= 0 {
-				ok = true
-				break
-			}
-			if w, e := os.write(out_f, buf[:n]); e != nil || w != n do break
-			sync.atomic_add(&bios_job.copied, i64(n))
-		}
-	}
-	if ok do ok = bios_same(src, part)
-	if ok {
-		os.remove(dest)
-		ok = os.rename(part, dest) == nil
-	}
-	if !ok do os.remove(part)
-	return ok
-}
-
 // Main thread, every frame: finishes a completed job.
 bios_job_poll :: proc() {
 	if !bios_job_running() || !sync.atomic_load(&bios_job.finished) do return
-	thread.join(bios_job.thread)
-	thread.destroy(bios_job.thread)
+	thread_end(&bios_job.thread)
 	cancelled := sync.atomic_load(&bios_job.cancel)
 	platform, done, failed := bios_job.platform, bios_job.done, bios_job.failed
 	for c in bios_job.copies {
@@ -452,12 +395,9 @@ bios_menu_choose :: proc(row: int) {
 		return
 	}
 	switch kind, gi := bios_menu_row(row); kind {
-	case .All:
-		bios_install(.None)
-	case .Group:
-		bios_install(bios_menu.groups[gi].platform)
-	case .Close:
-		bios_menu_close()
+	case .All: bios_install(.None)
+	case .Group: bios_install(bios_menu.groups[gi].platform)
+	case .Close: bios_menu_close()
 	}
 }
 
@@ -477,12 +417,8 @@ bios_menu_input :: proc() {
 		bios_menu.open = false // the drive was pulled
 		return
 	}
-	n := bios_menu_rows()
-	bios_menu.sel = clamp(bios_menu.sel, 0, n - 1)
-	if input.up || input.down {
-		bios_menu.sel = (bios_menu.sel + (input.up ? n - 1 : 1)) % n
-		sfx_click()
-	}
+	bios_menu.sel = clamp(bios_menu.sel, 0, bios_menu_rows() - 1)
+	nav_list(&bios_menu.sel, bios_menu_rows())
 	if input.cancel || input.action || input.power {
 		bios_menu_close()
 		return
@@ -491,8 +427,7 @@ bios_menu_input :: proc() {
 }
 
 draw_bios_menu :: proc(w, h: f32) {
-	bios_menu.t = smooth_to(bios_menu.t, bios_menu.open ? 1 : 0, 16)
-	if bios_menu.t < 0.02 && !bios_menu.open do return
+	if !modal_fade(&bios_menu.t, bios_menu.open) do return
 	if bios_menu.open && !bios_menu_card_present() do bios_menu.open = false
 	t := bios_menu.t
 	interactive := bios_menu.open
@@ -500,14 +435,9 @@ draw_bios_menu :: proc(w, h: f32) {
 	ROW_H :: 64
 	GAP :: 8
 	HEAD :: 112
-	rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(150 * t)))
 	rows := bios_menu_rows()
-	pw := min(f32(940), w - 48)
-	ph := min(h - 48, HEAD + f32(rows) * (ROW_H + GAP) + 24)
-	ph = max(ph, min(h - 48, 420))
-	s := 0.94 + 0.06 * t
-	r := rl.Rectangle{(w - pw * s) * 0.5, (h - ph * s) * 0.5, pw * s, ph * s}
-	draw_panel(r, false, with_alpha(COL_PANEL_SOLID, u8(244 * t)))
+	ph := max(min(h - 48, HEAD + f32(rows) * (ROW_H + GAP) + 24), min(h - 48, 420))
+	r := modal_panel({0, 0, w, h}, min(f32(940), w - 48), ph, t)
 	if t < 0.5 do return
 
 	// header: chip badge, title, source, overall tally
@@ -540,28 +470,15 @@ draw_bios_menu :: proc(w, h: f32) {
 	list := rl.Rectangle{r.x + 24, r.y + HEAD, wide ? r.width * 0.5 - 24 : r.width - 48, r.height - HEAD - 22}
 	visible := max(1, int((list.height + GAP) / (ROW_H + GAP)))
 	bios_menu.sel = clamp(bios_menu.sel, 0, rows - 1)
-	if bios_menu.sel < bios_menu.scroll do bios_menu.scroll = bios_menu.sel
-	if bios_menu.sel >= bios_menu.scroll + visible do bios_menu.scroll = bios_menu.sel - visible + 1
-	bios_menu.scroll = clamp(bios_menu.scroll, 0, max(rows - visible, 0))
+	scroll_follow(&bios_menu.scroll, bios_menu.sel, visible, rows)
 
 	clicked := -1
 	for i in bios_menu.scroll ..< min(rows, bios_menu.scroll + visible) {
 		br := rl.Rectangle{list.x, list.y + f32(i - bios_menu.scroll) * (ROW_H + GAP), list.width - (rows > visible ? 12 : 0), ROW_H}
-		hovered := interactive && mouse_over(br, true)
-		if hovered {
-			hover_enter(fmt.tprintf("bios-%d", i))
-			bios_menu.sel = i
-			if rl.IsMouseButtonPressed(.LEFT) do clicked = i
-		}
+		if interactive && list_row_mouse("bios", i, br, &bios_menu.sel) do clicked = i
 		draw_bios_row(i, br, i == bios_menu.sel)
 	}
-	if rows > visible {
-		track := rl.Rectangle{list.x + list.width - 5, list.y, 5, f32(visible) * (ROW_H + GAP) - GAP}
-		rl.DrawRectangleRounded(track, 1, 4, COL_FAINT)
-		th := track.height * f32(visible) / f32(rows)
-		ty := track.y + (track.height - th) * f32(bios_menu.scroll) / f32(rows - visible)
-		rl.DrawRectangleRounded({track.x, ty, track.width, th}, 1, 4, with_alpha(COL_ACCENT, 200))
-	}
+	draw_scrollbar({list.x + list.width - 5, list.y, 5, f32(visible) * (ROW_H + GAP) - GAP}, f32(bios_menu.scroll), visible, rows, with_alpha(COL_ACCENT, 200))
 	if wide {
 		d := rl.Rectangle{list.x + list.width + 16, list.y, r.x + r.width - 24 - (list.x + list.width + 16), list.height}
 		draw_bios_details(d)
@@ -742,8 +659,7 @@ draw_bios_row :: proc(row: int, br: rl.Rectangle, hot: bool) {
 	tx := tile.x + tile.width + 14
 	right := br.x + br.width - 16
 	switch kind {
-	case .Close:
-		draw_t_center("Close", br.x + br.width * 0.5, cy - 10, 20, hot ? COL_TEXT : COL_MUTED)
+	case .Close: draw_t_center("Close", br.x + br.width * 0.5, cy - 10, 20, hot ? COL_TEXT : COL_MUTED)
 	case .All:
 		files, missing := 0, 0
 		for grp in bios_menu.groups {
@@ -761,12 +677,6 @@ draw_bios_row :: proc(row: int, br: rl.Rectangle, hot: bool) {
 		draw_t(grp.files == 1 ? "1 file" : fmt.tprintf("%d files", grp.files), tx, br.y + 36, 14, COL_MUTED)
 		draw_bios_state(right, cy, grp.files, grp.missing, hot)
 	}
-}
-
-bios_size_label :: proc(n: i64) -> string {
-	if n >= 1024 * 1024 do return fmt.tprintf("%.1f MB", f64(n) / (1024 * 1024))
-	if n >= 1024 do return fmt.tprintf("%d KB", n / 1024)
-	return fmt.tprintf("%d B", n)
 }
 
 // "APP\libretro\system\..." for a destination path.
@@ -833,7 +743,7 @@ draw_bios_details :: proc(d: rl.Rectangle) {
 			}
 			if f.installed do draw_bios_check(x + 9, y + 11, 9)
 			else do draw_bios_pending(x + 9, y + 11, 9, COL_MUTED)
-			sz := bios_size_label(f.size)
+			sz := fmt_bytes(f.size)
 			draw_t_fit(f.name, x + 28, y + 2, inner - 28 - measure_t(sz, 14) - 12, 16, f.installed ? COL_TEXT : COL_MUTED, false)
 			draw_t_right(sz, x + inner, y + 3, 14, COL_MUTED)
 			y += LINE

@@ -1,6 +1,5 @@
 package saber
 
-import "core:strings"
 import rl "vendor:raylib"
 import win "core:sys/windows"
 
@@ -53,9 +52,7 @@ Proc_Row :: struct {
 // Every running process, from one Toolhelp snapshot. -1 when the snapshot fails.
 snapshot_processes :: proc(rows: []Proc_Row, match_name: string) -> int {
 	snap := win.CreateToolhelp32Snapshot(win.TH32CS_SNAPPROCESS, 0)
-	if snap == nil || snap == win.INVALID_HANDLE_VALUE {
-		return -1
-	}
+	if snap == nil || snap == win.INVALID_HANDLE_VALUE do return -1
 	defer win.CloseHandle(snap)
 	count := 0
 	pe := win.PROCESSENTRY32W{dwSize = size_of(win.PROCESSENTRY32W)}
@@ -64,13 +61,11 @@ snapshot_processes :: proc(rows: []Proc_Row, match_name: string) -> int {
 			named := false
 			if match_name != "" {
 				name, _ := win.wstring_to_utf8(win.wstring(&pe.szExeFile[0]), -1, context.temp_allocator)
-				named = strings.equal_fold(name, match_name)
+				named = eq_fold(name, match_name)
 			}
 			rows[count] = {pe.th32ProcessID, pe.th32ParentProcessID, named}
 			count += 1
-			if !win.Process32NextW(snap, &pe) {
-				break
-			}
+			if !win.Process32NextW(snap, &pe) do break
 		}
 	}
 	return count
@@ -87,12 +82,8 @@ session_find_window :: proc(s: ^Session) -> win.HWND {
 	search := Window_Search{s = s}
 	EnumWindows(proc "system" (hwnd: win.HWND, lp: win.LPARAM) -> win.BOOL {
 		ws := (^Window_Search)(rawptr(uintptr(lp)))
-		if !IsWindowVisible(hwnd) || IsIconic(hwnd) {
-			return true
-		}
-		if u32(GetWindowLongPtrW(hwnd, win.GWL_EXSTYLE)) & win.WS_EX_TOOLWINDOW != 0 {
-			return true
-		}
+		if !IsWindowVisible(hwnd) || IsIconic(hwnd) do return true
+		if u32(GetWindowLongPtrW(hwnd, win.GWL_EXSTYLE)) & win.WS_EX_TOOLWINDOW != 0 do return true
 		pid: win.DWORD
 		GetWindowThreadProcessId(hwnd, &pid)
 		found := false
@@ -102,9 +93,7 @@ session_find_window :: proc(s: ^Session) -> win.HWND {
 				break
 			}
 		}
-		if !found {
-			return true
-		}
+		if !found do return true
 		r: win.RECT
 		GetWindowRect(hwnd, &r)
 		area := (r.right - r.left) * (r.bottom - r.top)
@@ -164,15 +153,11 @@ xinput_connected: [4]bool
 xinput_probe_at: f64
 
 xinput_init :: proc() {
-	if xinput_loaded {
-		return
-	}
+	if xinput_loaded do return
 	xinput_loaded = true
 	for dll in ([]string{"xinput1_4.dll", "xinput1_3.dll"}) {
 		mod := win.LoadLibraryW(win.utf8_to_wstring(dll))
-		if mod == nil {
-			continue
-		}
+		if mod == nil do continue
 		if p := win.GetProcAddress(mod, transmute(cstring)uintptr(100)); p != nil {
 			xinput_get_state_ex = auto_cast p
 			xinput_connected = {true, true, true, true}
@@ -183,25 +168,17 @@ xinput_init :: proc() {
 
 xinput_guide_down :: proc() -> bool {
 	xinput_init()
-	if xinput_get_state_ex == nil {
-		return false
-	}
+	if xinput_get_state_ex == nil do return false
 	down := false
 	// Querying empty slots is slow, so only re-probe them every couple of seconds.
 	now := rl.GetTime()
 	probe := now >= xinput_probe_at
-	if probe {
-		xinput_probe_at = now + 2
-	}
+	if probe do xinput_probe_at = now + 2
 	for i in 0 ..< 4 {
-		if !xinput_connected[i] && !probe {
-			continue
-		}
+		if !xinput_connected[i] && !probe do continue
 		st: XInput_State
 		xinput_connected[i] = xinput_get_state_ex(u32(i), &st) == 0
-		if xinput_connected[i] && st.buttons & XINPUT_GUIDE != 0 {
-			down = true
-		}
+		if xinput_connected[i] && st.buttons & XINPUT_GUIDE != 0 do down = true
 	}
 	return down
 }
@@ -214,18 +191,12 @@ capture_screen :: proc() -> (rl.Texture2D, bool) {
 	m := monitor_rect(native_hwnd())
 	w := m.right - m.left
 	h := m.bottom - m.top
-	if w <= 0 || h <= 0 {
-		return {}, false
-	}
+	if w <= 0 || h <= 0 do return {}, false
 	sdc := GetDC(nil)
-	if sdc == nil {
-		return {}, false
-	}
+	if sdc == nil do return {}, false
 	defer ReleaseDC(nil, sdc)
 	mdc := win.CreateCompatibleDC(sdc)
-	if mdc == nil {
-		return {}, false
-	}
+	if mdc == nil do return {}, false
 	bmp := win.CreateCompatibleBitmap(sdc, w, h)
 	if bmp == nil {
 		win.DeleteDC(mdc)
@@ -238,9 +209,7 @@ capture_screen :: proc() -> (rl.Texture2D, bool) {
 	win.DeleteDC(mdc)
 
 	img, ok := hbitmap_to_image(bmp)
-	if !ok {
-		return {}, false
-	}
+	if !ok do return {}, false
 	defer rl.UnloadImage(img)
 	rl.ImageResize(&img, max(1, img.width / 6), max(1, img.height / 6))
 	tex := rl.LoadTextureFromImage(img)

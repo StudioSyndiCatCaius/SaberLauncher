@@ -151,13 +151,8 @@ handle_plugin_dialog_input :: proc() {
 	if !d.opened do return
 	switch d.kind {
 	case .Info, .Menu:
-		n := len(d.options)
-		if input.up || input.left {
-			d.sel = (d.sel - 1 + n) % n
-			sfx_click()
-		}
-		if input.down || input.right {
-			d.sel = (d.sel + 1) % n
+		if step := int(input.down || input.right) - int(input.up || input.left); step != 0 {
+			d.sel = cycle(d.sel, step, len(d.options))
 			sfx_click()
 		}
 		if input.confirm || d.clicked {
@@ -208,9 +203,7 @@ draw_plugin_dialog :: proc(w, h: f32) {
 	d.t = smooth_to(d.t, 1, 12)
 	switch d.kind {
 	case .Info:
-		labels := make([dynamic]string, context.temp_allocator)
-		for o in d.options do append(&labels, o)
-		draw_info_dialog(d, labels[:], w, h)
+		draw_info_dialog(d, w, h)
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Close"}})
 	case .Process:
 		draw_process_dialog(d, w, h)
@@ -224,7 +217,6 @@ draw_plugin_dialog :: proc(w, h: f32) {
 
 // Like the Info dialog, but rows past the screen scroll and the selected row's description shows.
 draw_menu_dialog :: proc(d: ^Plugin_Dialog, w, h: f32) {
-	rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(150 * d.t)))
 	lines := wrap_text(d.text, DIALOG_TEXT, DIALOG_W - 56)
 	desc := wrap_text(d.descs[d.sel], 15, DIALOG_W - 56)
 	bh: f32 = 54
@@ -235,21 +227,12 @@ draw_menu_dialog :: proc(d: ^Plugin_Dialog, w, h: f32) {
 	ph := head + f32(rows) * (bh + gap) + 14
 	// keep the selection on screen
 	first := clamp(int(d.scroll + 0.5), 0, n - rows)
-	if d.sel < first do first = d.sel
-	if d.sel >= first + rows do first = d.sel - rows + 1
+	scroll_follow(&first, d.sel, rows, n)
 	d.scroll = smooth_to(d.scroll, f32(first), 16)
 
-	s := 0.94 + 0.06 * d.t
-	r := rl.Rectangle{(w - DIALOG_W * s) * 0.5, (h - ph * s) * 0.5, DIALOG_W * s, ph * s}
-	draw_panel(r, false, with_alpha(COL_PANEL_SOLID, u8(244 * d.t)))
+	r := modal_panel({0, 0, w, h}, DIALOG_W, ph, d.t)
 	if d.t < 0.5 do return
-	draw_t_fit(d.title, r.x + 28, r.y + 26, r.width - 56, 22, COL_ACCENT, false)
-	y := r.y + 70
-	for line in lines {
-		draw_t(line, r.x + 28, y, DIALOG_TEXT, COL_TEXT)
-		y += DIALOG_LINE
-	}
-	y += 12
+	y := draw_dialog_head(d, r, lines) - 8
 	for line, i in desc {
 		if i >= 2 do break
 		draw_t(line, r.x + 28, y + f32(i) * 20, 15, COL_MUTED)
@@ -268,37 +251,33 @@ draw_menu_dialog :: proc(d: ^Plugin_Dialog, w, h: f32) {
 		}
 	}
 	rl.EndScissorMode()
-	if n > rows {
-		// scroll bar
-		track := rl.Rectangle{r.x + r.width - 14, list.y, 4, list.height}
-		rl.DrawRectangleRounded(track, 1, 4, COL_FAINT)
-		th := track.height * f32(rows) / f32(n)
-		ty := track.y + (track.height - th) * d.scroll / f32(n - rows)
-		rl.DrawRectangleRounded({track.x, ty, track.width, th}, 1, 4, COL_ACCENT)
-	}
+	draw_scrollbar({r.x + r.width - 14, list.y, 4, list.height}, d.scroll, rows, n, COL_ACCENT)
 }
 
 DIALOG_W :: 520
 DIALOG_TEXT :: 17
 DIALOG_LINE :: 24
 
-draw_info_dialog :: proc(d: ^Plugin_Dialog, labels: []string, w, h: f32) {
-	rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(150 * d.t)))
-	lines := wrap_text(d.text, DIALOG_TEXT, DIALOG_W - 56)
-	bh: f32 = 54
-	gap: f32 = 10
-	ph := 76 + f32(len(lines)) * DIALOG_LINE + 20 + f32(len(labels)) * (bh + gap) + 14
-	s := 0.94 + 0.06 * d.t
-	r := rl.Rectangle{(w - DIALOG_W * s) * 0.5, (h - ph * s) * 0.5, DIALOG_W * s, ph * s}
-	draw_panel(r, false, with_alpha(COL_PANEL_SOLID, u8(244 * d.t)))
-	if d.t < 0.5 do return
+// Plugin name and the wrapped text; returns the y under them.
+draw_dialog_head :: proc(d: ^Plugin_Dialog, r: rl.Rectangle, lines: []string) -> f32 {
 	draw_t_fit(d.title, r.x + 28, r.y + 26, r.width - 56, 22, COL_ACCENT, false)
 	y := r.y + 70
 	for line in lines {
 		draw_t(line, r.x + 28, y, DIALOG_TEXT, COL_TEXT)
 		y += DIALOG_LINE
 	}
-	y += 20
+	return y + 20
+}
+
+draw_info_dialog :: proc(d: ^Plugin_Dialog, w, h: f32) {
+	lines := wrap_text(d.text, DIALOG_TEXT, DIALOG_W - 56)
+	labels := d.options[:]
+	bh: f32 = 54
+	gap: f32 = 10
+	ph := 76 + f32(len(lines)) * DIALOG_LINE + 20 + f32(len(labels)) * (bh + gap) + 14
+	r := modal_panel({0, 0, w, h}, DIALOG_W, ph, d.t)
+	if d.t < 0.5 do return
+	y := draw_dialog_head(d, r, lines)
 	for label, i in labels {
 		br := rl.Rectangle{r.x + 24, y + f32(i) * (bh + gap), r.width - 48, bh}
 		if ui_button(fmt.tprintf("pdlg-%d", i), br, label, i == d.sel, true) && d.opened {
@@ -310,22 +289,14 @@ draw_info_dialog :: proc(d: ^Plugin_Dialog, labels: []string, w, h: f32) {
 
 draw_process_dialog :: proc(d: ^Plugin_Dialog, w, h: f32) {
 	d.shown = smooth_to(d.shown, d.value, 14)
-	rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(150 * d.t)))
-	pw: f32 = 560
-	ph: f32 = 230
-	r := rl.Rectangle{(w - pw) * 0.5, (h - ph) * 0.5, pw, ph}
-	draw_panel(r, false, with_alpha(COL_PANEL_SOLID, u8(244 * d.t)))
+	r := modal_panel({0, 0, w, h}, 560, 230, d.t)
 	draw_t_fit(d.title, r.x + 28, r.y + 26, r.width - 56, 22, COL_ACCENT, false)
 	draw_t_fit(d.text, r.x + 28, r.y + 66, r.width - 56 - 64, DIALOG_TEXT, COL_TEXT, false)
 	draw_t_right(fmt.tprintf("%d%%", int(d.value * 100 + 0.5)), r.x + r.width - 28, r.y + 66, 17, COL_TEXT)
 	bar := rl.Rectangle{r.x + 28, r.y + 104, r.width - 56, 10}
 	rl.DrawRectangleRounded(bar, 1, 8, COL_FAINT)
-	if d.shown > 0.001 {
-		rl.DrawRectangleRounded({bar.x, bar.y, max(bar.height, bar.width * d.shown), bar.height}, 1, 8, COL_ACCENT)
-	}
-	if ui_button("pdlg-cancel", {r.x + 24, r.y + 146, r.width - 48, 54}, "Cancel", true, true) && d.opened {
-		d.clicked = true
-	}
+	if d.shown > 0.001 do rl.DrawRectangleRounded({bar.x, bar.y, max(bar.height, bar.width * d.shown), bar.height}, 1, 8, COL_ACCENT)
+	if ui_button("pdlg-cancel", {r.x + 24, r.y + 146, r.width - 48, 54}, "Cancel", true, true) && d.opened do d.clicked = true
 }
 
 // Greedy word wrap; explicit newlines are kept.
@@ -368,9 +339,7 @@ lua_dialog_info :: proc "c" (L: ^lua_State) -> c.int {
 		n := int(lua_rawlen(L, 2))
 		for i in 1 ..= n {
 			lua_rawgeti(L, 2, i64(i))
-			if lua_type(L, -1) == LUA_TSTRING || lua_type(L, -1) == LUA_TNUMBER {
-				append(&d.options, strings.clone(lua_string(L, -1)))
-			}
+			if lua_type(L, -1) == LUA_TSTRING || lua_type(L, -1) == LUA_TNUMBER do append(&d.options, strings.clone(lua_string(L, -1)))
 			lua_pop(L, 1)
 		}
 	}

@@ -2,7 +2,6 @@ package saber
 
 import "core:math"
 import "core:os"
-import "core:path/filepath"
 import "core:slice"
 import "core:strings"
 import rl "vendor:raylib"
@@ -17,14 +16,8 @@ Theme :: struct {
 	has_bkg:     bool,
 	music:       rl.Music,
 	has_music:   bool,
-	sfx_click:   rl.Sound,
-	sfx_back:    rl.Sound,
-	sfx_over:    rl.Sound,
-	sfx_start:   rl.Sound,
-	has_click:   bool,
-	has_back:    bool,
-	has_over:    bool,
-	has_start:   bool,
+	sfx:         [Sfx]rl.Sound,
+	has_sfx:     [Sfx]bool,
 	hover_id:    string,
 }
 
@@ -79,11 +72,7 @@ UI_THEMES := [?]Ui_Theme {
 ui_theme_light: bool
 
 index_of_ui_theme :: proc(name: string) -> int {
-	for t, i in UI_THEMES {
-		if strings.equal_fold(t.name, name) {
-			return i
-		}
-	}
+	for t, i in UI_THEMES do if eq_fold(t.name, name) do return i
 	return 0
 }
 
@@ -111,8 +100,7 @@ apply_ui_theme :: proc(name: string) {
 }
 
 cycle_ui_theme :: proc(delta: int) {
-	n := len(UI_THEMES)
-	apply_ui_theme(UI_THEMES[(index_of_ui_theme(app.settings.ui_theme) + delta + n) % n].name)
+	apply_ui_theme(UI_THEMES[cycle(index_of_ui_theme(app.settings.ui_theme), delta, len(UI_THEMES))].name)
 	save_settings()
 	sfx_click()
 }
@@ -123,24 +111,17 @@ MUS_EXTS :: []string{".mp3", ".ogg", ".wav", ".flac"}
 // Card art is drawn well below its native size; mipmaps keep it from shimmering.
 load_texture_smooth :: proc(path: string, max_px: i32 = 1024) -> (rl.Texture2D, bool) {
 	img, ok := load_image_smooth(path, max_px)
-	if !ok {
-		return {}, false
-	}
+	if !ok do return {}, false
 	defer rl.UnloadImage(img)
 	return texture_from_image(img)
 }
 
 // CPU-side decode only, so it can run off the main thread (drive scans).
 load_image_smooth :: proc(path: string, max_px: i32 = 1024) -> (rl.Image, bool) {
-	if path == "" || !os.exists(path) {
-		return {}, false
-	}
-	ext := strings.to_lower(filepath.ext(path), context.temp_allocator)
-	if ext == ".png" || ext == ".bmp" || ext == ".gif" || ext == ".tga" || ext == ".qoi" {
+	if path == "" || !os.exists(path) do return {}, false
+	if has_ext(path, ".png", ".bmp", ".gif", ".tga", ".qoi") {
 		img := rl.LoadImage(strings.clone_to_cstring(path, context.temp_allocator))
-		if img.data != nil {
-			return img, true
-		}
+		if img.data != nil do return img, true
 	}
 	// this raylib build has no JPG/WebP decoder; let the OS decode it
 	return shell_image(path, max_px, max_px, still = true)
@@ -148,20 +129,14 @@ load_image_smooth :: proc(path: string, max_px: i32 = 1024) -> (rl.Image, bool) 
 
 texture_from_image :: proc(img: rl.Image) -> (rl.Texture2D, bool) {
 	tex := rl.LoadTextureFromImage(img)
-	if tex.id == 0 {
-		return {}, false
-	}
+	if tex.id == 0 do return {}, false
 	rl.GenTextureMipmaps(&tex)
 	rl.SetTextureFilter(tex, .TRILINEAR)
 	return tex, true
 }
 
 first_existing_dir :: proc(candidates: []string) -> string {
-	for c in candidates {
-		if os.exists(c) {
-			return c
-		}
-	}
+	for c in candidates do if os.exists(c) do return c
 	return candidates[0]
 }
 
@@ -184,12 +159,9 @@ theme_init :: proc() {
 }
 
 theme_shutdown :: proc() {
-	unload_bkg()
+	unload_tex(&theme.bkg_tex, &theme.has_bkg)
 	unload_bgm()
-	if theme.has_click { rl.UnloadSound(theme.sfx_click) }
-	if theme.has_back { rl.UnloadSound(theme.sfx_back) }
-	if theme.has_over { rl.UnloadSound(theme.sfx_over) }
-	if theme.has_start { rl.UnloadSound(theme.sfx_start) }
+	for s, i in theme.sfx do if theme.has_sfx[i] do rl.UnloadSound(s)
 	glass_shutdown()
 }
 
@@ -203,49 +175,19 @@ refresh_media_lists :: proc() {
 }
 
 collect_media :: proc(out: ^[dynamic]string, dir: string, exts: []string) {
-	if !os.exists(dir) {
-		return
-	}
-	fis, err := os.read_all_directory_by_path(dir, context.allocator)
-	if err != nil {
-		return
-	}
-	defer os.file_info_slice_delete(fis, context.allocator)
-	for fi in fis {
-		if fi.type == .Directory {
-			continue
-		}
-		ext := strings.to_lower(filepath.ext(fi.name), context.temp_allocator)
-		ok := false
-		for e in exts {
-			if ext == e {
-				ok = true
-				break
-			}
-		}
-		if ok {
-			append(out, strings.clone(fi.name))
-		}
-	}
+	fis, _ := list_dir(dir)
+	for fi in fis do if fi.type != .Directory && has_ext(fi.name, ..exts) do append(out, strings.clone(fi.name))
 }
 
 index_of_name :: proc(list: []string, name: string) -> int {
-	if name == "" {
-		return 0
-	}
-	for f, i in list {
-		if strings.equal_fold(f, name) {
-			return i
-		}
-	}
+	for f, i in list do if eq_fold(f, name) do return i
 	return 0
 }
 
-unload_bkg :: proc() {
-	if theme.has_bkg {
-		rl.UnloadTexture(theme.bkg_tex)
-		theme.has_bkg = false
-	}
+// Frees a texture that may not have loaded.
+unload_tex :: proc(tex: ^rl.Texture2D, has: ^bool) {
+	if has^ do rl.UnloadTexture(tex^)
+	has^ = false
 }
 
 unload_bgm :: proc() {
@@ -257,7 +199,7 @@ unload_bgm :: proc() {
 }
 
 theme_apply_bkg :: proc(name: string) {
-	unload_bkg()
+	unload_tex(&theme.bkg_tex, &theme.has_bkg)
 	if len(theme.bkg_files) == 0 {
 		app.settings.bkg = ""
 		return
@@ -286,90 +228,74 @@ theme_apply_bgm :: proc(name: string) {
 	}
 }
 
+// Steps the wallpaper / music through its folder.
 cycle_bkg :: proc(delta: int) {
-	if len(theme.bkg_files) == 0 {
-		return
-	}
-	i := index_of_name(theme.bkg_files[:], app.settings.bkg)
-	n := len(theme.bkg_files)
-	i = (i + delta % n + n) % n
-	theme_apply_bkg(theme.bkg_files[i])
-	save_settings()
-	sfx_click()
+	cycle_media(theme.bkg_files[:], app.settings.bkg, delta, theme_apply_bkg)
 }
 
 cycle_bgm :: proc(delta: int) {
-	if len(theme.bgm_files) == 0 {
-		return
-	}
-	i := index_of_name(theme.bgm_files[:], app.settings.bgm)
-	n := len(theme.bgm_files)
-	i = (i + delta % n + n) % n
-	theme_apply_bgm(theme.bgm_files[i])
+	cycle_media(theme.bgm_files[:], app.settings.bgm, delta, theme_apply_bgm)
+}
+
+cycle_media :: proc(files: []string, current: string, delta: int, apply: proc(name: string)) {
+	if len(files) == 0 do return
+	apply(files[cycle(index_of_name(files, current), delta, len(files))])
 	save_settings()
 	sfx_click()
 }
 
-load_sfx :: proc() {
-	try_sfx :: proc(name: string) -> (rl.Sound, bool) {
-		p := path_join({theme.sfx_dir, name})
-		if !os.exists(p) {
-			return {}, false
-		}
-		s := rl.LoadSound(strings.clone_to_cstring(p, context.temp_allocator))
-		return s, s.frameCount > 0
-	}
-	theme.sfx_click, theme.has_click = try_sfx("click.mp3")
-	theme.sfx_back, theme.has_back = try_sfx("back.mp3")
-	theme.sfx_over, theme.has_over = try_sfx("rollover.mp3")
-	theme.sfx_start, theme.has_start = try_sfx("gamestart.ogg")
+Sfx :: enum {
+	Click,
+	Back,
+	Over,
+	Start,
 }
 
-sfx_click :: proc() {
-	if theme.has_click { rl.PlaySound(theme.sfx_click) }
+SFX_FILES := [Sfx]string {
+	.Click = "click.mp3",
+	.Back  = "back.mp3",
+	.Over  = "rollover.mp3",
+	.Start = "gamestart.ogg",
 }
-sfx_back :: proc() {
-	if theme.has_back { rl.PlaySound(theme.sfx_back) }
+
+load_sfx :: proc() {
+	for name, s in SFX_FILES {
+		p := path_join({theme.sfx_dir, name})
+		if !os.exists(p) do continue
+		theme.sfx[s] = rl.LoadSound(strings.clone_to_cstring(p, context.temp_allocator))
+		theme.has_sfx[s] = theme.sfx[s].frameCount > 0
+	}
 }
-sfx_start :: proc() {
-	if theme.has_start { rl.PlaySound(theme.sfx_start) }
+
+play_sfx :: proc(s: Sfx) {
+	if theme.has_sfx[s] do rl.PlaySound(theme.sfx[s])
 }
+
+sfx_click :: proc() { play_sfx(.Click) }
+sfx_back :: proc() { play_sfx(.Back) }
+sfx_start :: proc() { play_sfx(.Start) }
 
 hover_enter :: proc(id: string) -> bool {
-	if theme.hover_id == id {
-		return false
-	}
+	if theme.hover_id == id do return false
 	delete(theme.hover_id)
 	theme.hover_id = strings.clone(id)
-	if theme.has_over {
-		rl.PlaySound(theme.sfx_over)
-	}
+	play_sfx(.Over)
 	return true
 }
 
 theme_update :: proc() {
 	if theme.has_music && !explorer.has_music {
 		rl.UpdateMusicStream(theme.music)
-		if !rl.IsMusicStreamPlaying(theme.music) {
-			rl.PlayMusicStream(theme.music)
-		}
+		if !rl.IsMusicStreamPlaying(theme.music) do rl.PlayMusicStream(theme.music)
 	}
 }
 
 theme_pause_for_game :: proc() {
-	if theme.has_music {
-		rl.PauseMusicStream(theme.music)
-	}
+	if theme.has_music do rl.PauseMusicStream(theme.music)
 }
 
 theme_resume_after_game :: proc() {
-	if theme.has_music {
-		rl.ResumeMusicStream(theme.music)
-	}
-}
-
-draw_background :: proc(w, h: f32) {
-	draw_wallpaper(w, h)
+	if theme.has_music do rl.ResumeMusicStream(theme.music)
 }
 
 // Wallpaper and its shading; also captured as the glass backdrop.
@@ -377,8 +303,7 @@ draw_wallpaper :: proc(w, h: f32) {
 	rl.ClearBackground(COL_BG)
 	if !theme.has_bkg {
 		draw_ambient_orbs(w, h)
-	}
-	if theme.has_bkg {
+	} else {
 		// slow drift; one quad per frame
 		t := f32(rl.GetTime())
 		zoom := 1.05 + 0.02 * math.sin(t * 0.1)

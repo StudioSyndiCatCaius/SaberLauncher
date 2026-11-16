@@ -6,8 +6,41 @@ package saber
 // The core's context is current only while it runs (context_reset / retro_run / destroy).
 // The contexts themselves (WGL / GLX) are in hwgl_<os>.odin.
 
-import gl "vendor:OpenGL"
 import rl "vendor:raylib"
+
+// The few GL entry points used here, loaded from the core's context (the whole
+// vendor:OpenGL loader cost ~40 KB of exe for these).
+Hw_Gl_Api :: struct {
+	GenFramebuffers, GenTextures, GenRenderbuffers:          proc "system" (n: i32, ids: ^u32),
+	DeleteFramebuffers, DeleteTextures, DeleteRenderbuffers: proc "system" (n: i32, ids: ^u32),
+	BindTexture, BindFramebuffer, BindRenderbuffer:          proc "system" (target, id: u32),
+	TexImage2D:              proc "system" (target: u32, level, ifmt, w, h, border: i32, fmt, type: u32, px: rawptr),
+	TexParameteri:           proc "system" (target, name: u32, v: i32),
+	TexParameteriv:          proc "system" (target, name: u32, v: [^]i32),
+	FramebufferTexture2D:    proc "system" (target, attach, textarget, tex: u32, level: i32),
+	RenderbufferStorage:     proc "system" (target, fmt: u32, w, h: i32),
+	FramebufferRenderbuffer: proc "system" (target, attach, rbtarget, rb: u32),
+	ClearColor:              proc "system" (r, g, b, a: f32),
+	Clear:                   proc "system" (mask: u32),
+	Flush:                   proc "system" (),
+}
+
+GL_TEXTURE_2D :: 0x0DE1
+GL_FRAMEBUFFER :: 0x8D40
+GL_RENDERBUFFER :: 0x8D41
+
+gl: Hw_Gl_Api
+
+hw_gl_load :: proc() -> bool {
+	names := [?]cstring{"glGenFramebuffers", "glGenTextures", "glGenRenderbuffers", "glDeleteFramebuffers", "glDeleteTextures", "glDeleteRenderbuffers", "glBindTexture", "glBindFramebuffer", "glBindRenderbuffer", "glTexImage2D", "glTexParameteri", "glTexParameteriv", "glFramebufferTexture2D", "glRenderbufferStorage", "glFramebufferRenderbuffer", "glClearColor", "glClear", "glFlush"}
+	#assert(len(names) * size_of(rawptr) == size_of(Hw_Gl_Api))
+	slots := ([^]rawptr)(&gl)
+	for n, i in names {
+		slots[i] = hw_gl_proc_address(&rhw.ctx, n)
+		if slots[i] == nil do return false
+	}
+	return true
+}
 
 Retro_Hw :: struct {
 	enabled:  bool,
@@ -66,7 +99,10 @@ retro_hw_start :: proc(max_w, max_h: i32) -> bool {
 
 	// GL entry points of the core's context (the same driver serves raylib's)
 	hw_gl_use_core(&rhw.ctx)
-	gl.load_up_to(4, 6, hw_gl_set_proc_address)
+	if !hw_gl_load() {
+		hw_gl_use_main(&rhw.ctx)
+		return false
+	}
 	rhw.ready = true
 	retro_hw_resize(max_w, max_h)
 	if rhw.cb.context_reset != nil do rhw.cb.context_reset()
@@ -84,26 +120,26 @@ retro_hw_resize :: proc(max_w, max_h: i32) {
 	}
 	if w == rhw.w && h == rhw.h do return
 	rhw.w, rhw.h = w, h
-	gl.BindTexture(gl.TEXTURE_2D, rhw.tex)
-	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, nil)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-	swizzle := [4]i32{gl.RED, gl.GREEN, gl.BLUE, gl.ONE} // cores leave junk in alpha
-	gl.TexParameteriv(gl.TEXTURE_2D, gl.TEXTURE_SWIZZLE_RGBA, &swizzle[0])
-	gl.BindTexture(gl.TEXTURE_2D, 0)
-	gl.BindFramebuffer(gl.FRAMEBUFFER, rhw.fbo)
-	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rhw.tex, 0)
+	gl.BindTexture(GL_TEXTURE_2D, rhw.tex)
+	gl.TexImage2D(GL_TEXTURE_2D, 0, 0x8058 /*RGBA8*/, w, h, 0, 0x1908 /*RGBA*/, 0x1401 /*UNSIGNED_BYTE*/, nil)
+	gl.TexParameteri(GL_TEXTURE_2D, 0x2801 /*MIN_FILTER*/, 0x2601 /*LINEAR*/)
+	gl.TexParameteri(GL_TEXTURE_2D, 0x2800 /*MAG_FILTER*/, 0x2601)
+	gl.TexParameteri(GL_TEXTURE_2D, 0x2802 /*WRAP_S*/, 0x812F /*CLAMP_TO_EDGE*/)
+	gl.TexParameteri(GL_TEXTURE_2D, 0x2803 /*WRAP_T*/, 0x812F)
+	swizzle := [4]i32{0x1903, 0x1904, 0x1905, 1} // RGB + ONE: cores leave junk in alpha
+	gl.TexParameteriv(GL_TEXTURE_2D, 0x8E46 /*SWIZZLE_RGBA*/, &swizzle[0])
+	gl.BindTexture(GL_TEXTURE_2D, 0)
+	gl.BindFramebuffer(GL_FRAMEBUFFER, rhw.fbo)
+	gl.FramebufferTexture2D(GL_FRAMEBUFFER, 0x8CE0 /*COLOR_ATTACHMENT0*/, GL_TEXTURE_2D, rhw.tex, 0)
 	if rhw.cb.depth || rhw.cb.stencil {
-		gl.BindRenderbuffer(gl.RENDERBUFFER, rhw.rb)
-		gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, w, h)
-		gl.FramebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, rhw.rb)
-		gl.BindRenderbuffer(gl.RENDERBUFFER, 0)
+		gl.BindRenderbuffer(GL_RENDERBUFFER, rhw.rb)
+		gl.RenderbufferStorage(GL_RENDERBUFFER, 0x88F0 /*DEPTH24_STENCIL8*/, w, h)
+		gl.FramebufferRenderbuffer(GL_FRAMEBUFFER, 0x821A /*DEPTH_STENCIL_ATTACHMENT*/, GL_RENDERBUFFER, rhw.rb)
+		gl.BindRenderbuffer(GL_RENDERBUFFER, 0)
 	}
 	gl.ClearColor(0, 0, 0, 1)
-	gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT)
-	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+	gl.Clear(0x4000 | 0x100 | 0x400) // colour | depth | stencil
+	gl.BindFramebuffer(GL_FRAMEBUFFER, 0)
 }
 
 // Wraps retro_run (and anything else that may touch GL) in the core's context.

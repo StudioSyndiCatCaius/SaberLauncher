@@ -78,17 +78,13 @@ pop_clip :: proc() {
 }
 
 mouse_over :: proc(r: rl.Rectangle, modal := false) -> bool {
-	if input.using_pad || (!modal && input_locked()) {
-		return false
-	}
+	if input.using_pad || (!modal && input_locked()) do return false
 	return rl.CheckCollisionPointRec(rl.GetMousePosition(), r)
 }
 
 ui_button :: proc(id: string, r: rl.Rectangle, label: string, focused := false, modal := false) -> bool {
 	hovered := mouse_over(r, modal)
-	if hovered {
-		hover_enter(id)
-	}
+	if hovered do hover_enter(id)
 	hot := hovered || focused
 	// modal menus sit over busy pictures (paused games): frost them nearly solid so labels stay readable
 	frost: f32 = modal ? 0.5 : 0
@@ -109,9 +105,7 @@ ui_button :: proc(id: string, r: rl.Rectangle, label: string, focused := false, 
 draw_texture_cover :: proc(tex: rl.Texture2D, dest: rl.Rectangle, tint := rl.WHITE) {
 	tw := f32(tex.width)
 	th := f32(tex.height)
-	if tw <= 0 || th <= 0 || dest.width <= 0 || dest.height <= 0 {
-		return
-	}
+	if tw <= 0 || th <= 0 || dest.width <= 0 || dest.height <= 0 do return
 	// crop the source instead of scissoring the destination
 	s := max(dest.width / tw, dest.height / th)
 	sw := dest.width / s
@@ -125,9 +119,7 @@ draw_texture_cover :: proc(tex: rl.Texture2D, dest: rl.Rectangle, tint := rl.WHI
 draw_texture_contain :: proc(tex: rl.Texture2D, dest: rl.Rectangle, tint := rl.WHITE) -> rl.Rectangle {
 	tw := f32(tex.width)
 	th := f32(tex.height)
-	if tw <= 0 || th <= 0 || dest.width <= 0 || dest.height <= 0 {
-		return {}
-	}
+	if tw <= 0 || th <= 0 || dest.width <= 0 || dest.height <= 0 do return {}
 	s := min(dest.width / tw, dest.height / th)
 	w, h := tw * s, th * s
 	r := rl.Rectangle{dest.x + (dest.width - w) * 0.5, dest.y + (dest.height - h) * 0.5, w, h}
@@ -138,9 +130,7 @@ draw_texture_contain :: proc(tex: rl.Texture2D, dest: rl.Rectangle, tint := rl.W
 draw_texture_fit :: proc(tex: rl.Texture2D, x, y, max_w, max_h: f32) -> f32 {
 	tw := f32(tex.width)
 	th := f32(tex.height)
-	if tw <= 0 || th <= 0 {
-		return 0
-	}
+	if tw <= 0 || th <= 0 do return 0
 	s := min(max_w / tw, max_h / th)
 	rl.DrawTexturePro(tex, {0, 0, tw, th}, {x, y, tw * s, th * s}, {}, 0, rl.WHITE)
 	return th * s
@@ -149,15 +139,57 @@ draw_texture_fit :: proc(tex: rl.Texture2D, x, y, max_w, max_h: f32) -> f32 {
 draw_triangle_dir :: proc(cx, cy, size: f32, dir: Nav_Dir, col: rl.Color) {
 	s := size * 0.5
 	switch dir {
-	case .Left:
-		rl.DrawTriangle({cx + s * 0.6, cy - s}, {cx - s * 0.6, cy}, {cx + s * 0.6, cy + s}, col)
-	case .Right:
-		rl.DrawTriangle({cx - s * 0.6, cy - s}, {cx - s * 0.6, cy + s}, {cx + s * 0.6, cy}, col)
-	case .Down:
-		rl.DrawTriangle({cx - s, cy - s * 0.5}, {cx, cy + s * 0.5}, {cx + s, cy - s * 0.5}, col)
-	case .Up, .None:
-		rl.DrawTriangle({cx - s, cy + s * 0.5}, {cx + s, cy + s * 0.5}, {cx, cy - s * 0.5}, col)
+	case .Left: rl.DrawTriangle({cx + s * 0.6, cy - s}, {cx - s * 0.6, cy}, {cx + s * 0.6, cy + s}, col)
+	case .Right: rl.DrawTriangle({cx - s * 0.6, cy - s}, {cx - s * 0.6, cy + s}, {cx + s * 0.6, cy}, col)
+	case .Down: rl.DrawTriangle({cx - s, cy - s * 0.5}, {cx, cy + s * 0.5}, {cx + s, cy - s * 0.5}, col)
+	case .Up, .None: rl.DrawTriangle({cx - s, cy + s * 0.5}, {cx + s, cy + s * 0.5}, {cx, cy - s * 0.5}, col)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Modals and lists
+
+// Eases a modal's fade in / out; false once it's fully gone (nothing to draw).
+modal_fade :: proc(t: ^f32, open: bool, speed: f32 = 16) -> bool {
+	t^ = smooth_to(t^, open ? 1 : 0, speed)
+	return open || t^ >= 0.02
+}
+
+dim_screen :: proc(w, h, alpha: f32) {
+	rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(alpha)))
+}
+
+// Dims `area` and draws a centred pw x ph panel that grows in with t; returns the panel.
+modal_panel :: proc(area: rl.Rectangle, pw, ph, t: f32) -> rl.Rectangle {
+	rl.DrawRectangleRec(area, with_alpha(COL_SHADE, u8(150 * t)))
+	s := 0.94 + 0.06 * t
+	r := rl.Rectangle{area.x + (area.width - pw * s) * 0.5, area.y + (area.height - ph * s) * 0.5, pw * s, ph * s}
+	draw_panel(r, false, with_alpha(COL_PANEL_SOLID, u8(244 * t)))
+	return r
+}
+
+// Keeps row `sel` of n inside the `visible` rows that start at first^.
+scroll_follow :: proc(first: ^int, sel, visible, n: int) {
+	if sel < first^ do first^ = sel
+	if sel >= first^ + visible do first^ = sel - visible + 1
+	first^ = clamp(first^, 0, max(n - visible, 0))
+}
+
+// Thumb of a list showing `visible` of n rows from row `first` (nothing when all fit).
+draw_scrollbar :: proc(track: rl.Rectangle, first: f32, visible, n: int, col: rl.Color, bg := rl.Color{}) {
+	if n <= visible do return
+	rl.DrawRectangleRounded(track, 1, 4, bg.a == 0 ? COL_FAINT : bg)
+	th := track.height * f32(visible) / f32(n)
+	ty := track.y + (track.height - th) * first / f32(n - visible)
+	rl.DrawRectangleRounded({track.x, ty, track.width, th}, 1, 4, col)
+}
+
+// The mouse on row i of a list: focuses it (with the hover sound); true on a left click.
+list_row_mouse :: proc(id: string, i: int, r: rl.Rectangle, sel: ^int, modal := true) -> bool {
+	if !mouse_over(r, modal) do return false
+	sel^ = i
+	hover_enter(fmt.tprintf("%s-%d", id, i))
+	return rl.IsMouseButtonPressed(.LEFT)
 }
 
 // ---------------------------------------------------------------------------
@@ -233,9 +265,7 @@ draw_header :: proc(w: f32) {
 	size: f32 = 17
 	gap: f32 = 36
 	total: f32 = 0
-	for label in TAB_LABELS {
-		total += measure_t(label, size)
-	}
+	for label in TAB_LABELS do total += measure_t(label, size)
 	total += gap * f32(SCREEN_COUNT - 1)
 	x := (w - total) * 0.5
 	ty: f32 = 33
@@ -257,9 +287,7 @@ draw_header :: proc(w: f32) {
 		draw_t(label, x, ty, size, active || hovered ? COL_TEXT : COL_MUTED)
 		if hovered {
 			hover_enter(label)
-			if rl.IsMouseButtonPressed(.LEFT) {
-				go_screen(s)
-			}
+			if rl.IsMouseButtonPressed(.LEFT) do go_screen(s)
 		}
 		x += tw + gap
 	}
@@ -288,14 +316,10 @@ draw_footer :: proc(w, h: f32) {
 	switch {
 	case plugin_dialog_open():
 		// the dialog draws its own hints
-	case explorer.open:
-		explorer_hints(w, h)
-	case app.power_open, game_menu.open, bios_menu.open, app_menu.open:
-		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Back"}})
-	case drives_menu.open:
-		draw_hints(w, h, []Hint{{"A", "Toggle"}, {"B", "Done"}})
-	case app.dropdown_open:
-		draw_hints(w, h, []Hint{{"A", "Choose"}, {"B", "Close"}})
+	case explorer.open: explorer_hints(w, h)
+	case app.power_open, game_menu.open, bios_menu.open, app_menu.open: draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Back"}})
+	case drives_menu.open: draw_hints(w, h, []Hint{{"A", "Toggle"}, {"B", "Done"}})
+	case app.dropdown_open: draw_hints(w, h, []Hint{{"A", "Choose"}, {"B", "Close"}})
 	case app.screen == .Plugins && app.plugin_page == 1:
 		draw_hints(w, h, []Hint{{"A", store.sel[.Plugin] == 0 ? "Refresh" : "Download"}, {"B", "Plugins"}, {"Y", "Installed"}, {"LB / RB", "Menus"}})
 		return
@@ -317,8 +341,7 @@ draw_footer :: proc(w, h: f32) {
 		} else {
 			draw_hints(w, h, []Hint{{"A", "Actions"}, {"B", "Home"}, {"Y", "Get Plugins"}, {"LB / RB", "Menus"}})
 		}
-	case app.screen == .Settings:
-		draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Home"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
+	case app.screen == .Settings: draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Home"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
 	case app.screen == .Main:
 		draw_hints(w, h, []Hint{{"A", "Play"}, {"X", "Actions"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
 	case app.screen == .Library:
@@ -332,9 +355,7 @@ draw_footer :: proc(w, h: f32) {
 
 draw_heading :: proc(text: string, count: int, y: f32) {
 	draw_t(text, PAD, y, 15, COL_ACCENT)
-	if count >= 0 {
-		draw_t(fmt.tprintf("%d", count), PAD + measure_t(text, 15) + 12, y, 15, COL_MUTED)
-	}
+	if count >= 0 do draw_t(fmt.tprintf("%d", count), PAD + measure_t(text, 15) + 12, y, 15, COL_MUTED)
 }
 
 // ---------------------------------------------------------------------------
@@ -367,13 +388,12 @@ CARD_KIND_COL := [Card_Kind]rl.Color {
 game_kind :: proc(g: ^Game) -> (Card_Kind, string) {
 	if g.bios_dir != "" do return .Other, "BIOS"
 	if g.platform == .None do return .Pc, "PC"
-	return .Emulated, strings.to_upper(RETRO_PLATFORM_DIR[g.platform], context.temp_allocator)
+	return .Emulated, ascii_upper(RETRO_PLATFORM_DIR[g.platform], context.temp_allocator)
 }
 
 card_for :: proc(s: Screen, i: int) -> Card {
 	#partial switch s {
-	case .Main:
-		return game_card(&app.drive_games[i])
+	case .Main: return game_card(&app.drive_games[i])
 	case .Library:
 		g := &app.library_games[i]
 		kind, tag := game_kind(g)
@@ -401,9 +421,7 @@ fade_color :: proc(c: rl.Color, a: f32) -> rl.Color {
 // `alpha` < 1 fades the whole card (Home cards appearing / vanishing).
 draw_card :: proc(c: Card, r: rl.Rectangle, hi: bool, title_size: f32 = 17, alpha: f32 = 1) {
 	box := r
-	if hi {
-		box.y -= 6
-	}
+	if hi do box.y -= 6
 	if alpha < 1 {
 		draw_panel(box, hi, fade_color(hi ? COL_PANEL_HI : COL_PANEL, alpha))
 	} else {
@@ -414,9 +432,7 @@ draw_card :: proc(c: Card, r: rl.Rectangle, hi: bool, title_size: f32 = 17, alph
 		rl.DrawRectangleRoundedLinesEx(box, roundness(box, RADIUS), 10, hi ? 2 : 1.5, fade_color(with_alpha(CARD_KIND_COL[c.kind], hi ? 170 : 110), alpha))
 	}
 	art := rl.Rectangle{box.x + 8, box.y + 8, box.width - 16, box.height - 16 - TITLE_STRIP}
-	if hi {
-		splash_focus_art = art
-	}
+	if hi do splash_focus_art = art
 	tint := fade_color(rl.WHITE, alpha)
 	if c.has_tex && c.contain {
 		rl.DrawRectangleRounded(art, roundness(art, RADIUS - 4), 6, fade_color(with_alpha(COL_SHADE, 70), alpha))
@@ -439,15 +455,11 @@ draw_card :: proc(c: Card, r: rl.Rectangle, hi: bool, title_size: f32 = 17, alph
 		badge_y += 28
 	}
 	draw_t_fit(c.title, box.x + 14, box.y + box.height - TITLE_STRIP + 8, box.width - 28, title_size, fade_color(hi ? COL_TEXT : COL_MUTED, alpha), hi)
-	if hi && alpha > 0.98 {
-		draw_focus_ring(box)
-	}
+	if hi && alpha > 0.98 do draw_focus_ring(box)
 }
 
 card_mouse :: proc(s: Screen, i: int, r: rl.Rectangle) {
-	if !mouse_over(r) {
-		return
-	}
+	if !mouse_over(r) do return
 	hover_enter(fmt.tprintf("card-%d-%d", int(s), i))
 	if (s == .Main || s == .Library) && rl.IsMouseButtonPressed(.RIGHT) {
 		grid_selection(s)^ = i
@@ -522,9 +534,7 @@ draw_main :: proc(w, h: f32) {
 			aspect := f32(g.box.width) / f32(g.box.height)
 			widths[i] = clamp(art_h * aspect, art_h * 0.5, art_h * 1.6) + 16
 		}
-		if i > 0 {
-			offsets[i] = offsets[i - 1] + (widths[i - 1] + widths[i]) * 0.5 * 0.9 + gap
-		}
+		if i > 0 do offsets[i] = offsets[i - 1] + (widths[i - 1] + widths[i]) * 0.5 * 0.9 + gap
 	}
 	target := w * 0.5 - offsets[sel]
 	if !app.carousel_ready {
@@ -535,15 +545,11 @@ draw_main :: proc(w, h: f32) {
 
 	// draw far cards first so the focused one sits on top
 	order := make([]int, len(app.drive_games), context.temp_allocator)
-	for i in 0 ..< len(order) {
-		order[i] = i
-	}
+	for i in 0 ..< len(order) do order[i] = i
 	dist :: proc(i: int, sel: int) -> int { return abs(i - sel) }
 	for i in 0 ..< len(order) {
 		for j in i + 1 ..< len(order) {
-			if dist(order[j], sel) > dist(order[i], sel) {
-				order[i], order[j] = order[j], order[i]
-			}
+			if dist(order[j], sel) > dist(order[i], sel) do order[i], order[j] = order[j], order[i]
 		}
 	}
 	draw_drive_ghosts()
@@ -566,23 +572,17 @@ draw_main :: proc(w, h: f32) {
 		ch := card_h * scale
 		r := rl.Rectangle{cx - cw * 0.5, area_top + (card_h - ch) * 0.5 + (1 - g.anim_t) * 40, cw, ch}
 		g.last_rect = r
-		if r.x > w || r.x + r.width < 0 {
-			continue
-		}
+		if r.x > w || r.x + r.width < 0 do continue
 		card_mouse(.Main, i, r)
 		draw_card(card_for(.Main, i), r, i == sel, 18, alpha)
-		if k > 0.02 {
-			rl.DrawRectangleRounded(r, roundness(r, RADIUS), 8, with_alpha(COL_SHADE, u8(110 * k * alpha)))
-		}
+		if k > 0.02 do rl.DrawRectangleRounded(r, roundness(r, RADIUS), 8, with_alpha(COL_SHADE, u8(110 * k * alpha)))
 	}
 
 	g := &app.drive_games[sel]
 	iy := area_top + card_h + 24
 	draw_t_center(g.title, w * 0.5, iy, 30, COL_TEXT)
 	meta := fmt.tprintf("%s  ·  played %s", g.drive_label, format_playtime(g.playtime_seconds))
-	if g.tags != "" {
-		meta = fmt.tprintf("%s  ·  %s", g.tags, meta)
-	}
+	if g.tags != "" do meta = fmt.tprintf("%s  ·  %s", g.tags, meta)
 	draw_t_center(meta, w * 0.5, iy + 42, 16, COL_MUTED)
 	if len(g.info) > 0 {
 		parts := make([dynamic]string, context.temp_allocator)
@@ -604,20 +604,10 @@ Grid_Layout :: struct {
 
 grid_layout :: proc(s: Screen) -> Grid_Layout {
 	#partial switch s {
-	case .Movies:
-		return {3, 0.5625}
-	case .Apps:
-		return {4, 1}
+	case .Movies: return {3, 0.5625}
+	case .Apps: return {4, 1}
 	}
 	return {4, 1.4}
-}
-
-draw_library :: proc(w, h: f32) {
-	draw_grid_page(.Library, "GAMES", "No games yet. Add a folder with a _Saber subfolder to APP/games.", w, h)
-}
-
-draw_movies :: proc(w, h: f32) {
-	draw_grid_page(.Movies, "MOVIES", "No movies yet. Drop .mp4 / .mkv / .avi files into APP/movies.", w, h)
 }
 
 
@@ -648,12 +638,8 @@ draw_grid_page :: proc(s: Screen, heading, empty: string, w, h: f32) {
 	// keep the focused row in view
 	row_y := f32(sel / lay.cols) * row_h
 	target := app.scroll[s]
-	if row_y < target {
-		target = row_y
-	}
-	if row_y + cell_h + 10 > target + area.height {
-		target = row_y + cell_h + 10 - area.height
-	}
+	if row_y < target do target = row_y
+	if row_y + cell_h + 10 > target + area.height do target = row_y + cell_h + 10 - area.height
 	app.scroll[s] = smooth_to(app.scroll[s], max(target, 0), 14)
 
 	// room above the first row for the lifted focus card and its ring
@@ -665,9 +651,7 @@ draw_grid_page :: proc(s: Screen, heading, empty: string, w, h: f32) {
 			cell_w,
 			cell_h,
 		}
-		if r.y + r.height < area.y - 12 || r.y > area.y + area.height {
-			continue
-		}
+		if r.y + r.height < area.y - 12 || r.y > area.y + area.height do continue
 		card_mouse(s, i, r)
 		draw_card(card_for(s, i), r, i == sel)
 	}
@@ -685,9 +669,7 @@ draw_detail :: proc(s: Screen, i: int, r: rl.Rectangle) {
 	action := "PLAY"
 
 	kv :: proc(label, value: string, x: f32, y: ^f32, w: f32) {
-		if value == "" {
-			return
-		}
+		if value == "" do return
 		draw_t(label, x, y^, 15, COL_MUTED)
 		draw_t_fit(value, x + 110, y^ - 1, w - 110, 17, COL_TEXT, false)
 		y^ += 30
@@ -696,9 +678,7 @@ draw_detail :: proc(s: Screen, i: int, r: rl.Rectangle) {
 	#partial switch s {
 	case .Library:
 		g := &app.library_games[i]
-		if g.has_logo {
-			y += draw_texture_fit(g.logo, x, y, iw, 96) + 20
-		}
+		if g.has_logo do y += draw_texture_fit(g.logo, x, y, iw, 96) + 20
 		draw_t_fit(g.title, x, y, iw, 30, COL_TEXT, true)
 		y += 42
 		if g.tags != "" {
@@ -712,9 +692,7 @@ draw_detail :: proc(s: Screen, i: int, r: rl.Rectangle) {
 		for line in g.info do kv(line.label, line.value, x, &y, iw)
 	case .Movies:
 		m := &app.movies[i]
-		if m.has_thumb {
-			y += draw_texture_fit(m.thumb, x, y, iw, min(iw * 0.5625, r.height * 0.4)) + 20
-		}
+		if m.has_thumb do y += draw_texture_fit(m.thumb, x, y, iw, min(iw * 0.5625, r.height * 0.4)) + 20
 		draw_t_fit(m.title, x, y, iw, 30, COL_TEXT, true)
 		y += 46
 		kv("File", filepath.base(m.path), x, &y, iw)
@@ -726,9 +704,7 @@ draw_detail :: proc(s: Screen, i: int, r: rl.Rectangle) {
 	case .Apps:
 		a := &app.shell_apps[i]
 		action = "OPEN"
-		if a.has_icon {
-			y += draw_texture_fit(a.icon, x, y, iw, 110) + 20
-		}
+		if a.has_icon do y += draw_texture_fit(a.icon, x, y, iw, 110) + 20
 		draw_t_fit(a.title, x, y, iw, 30, COL_TEXT, true)
 		y += 46
 		if strings.trim_space(a.exe) == "" {
@@ -743,9 +719,7 @@ draw_detail :: proc(s: Screen, i: int, r: rl.Rectangle) {
 	}
 
 	btn := rl.Rectangle{x, r.y + r.height - 28 - 52, min(iw, 240), 52}
-	if ui_button(fmt.tprintf("detail-%d", int(s)), btn, "", true) {
-		queue_activate(s, i)
-	}
+	if ui_button(fmt.tprintf("detail-%d", int(s)), btn, "", true) do queue_activate(s, i)
 	gw := draw_glyph("A", btn.x + 18, btn.y + btn.height * 0.5)
 	draw_t(action, btn.x + 18 + gw + 12, btn.y + 16, 20, COL_TEXT)
 }
@@ -767,6 +741,14 @@ SETTINGS_LABELS := [Settings_Row]string {
 	.Updates     = "Check for updates",
 	.Desktop     = "Desktop",
 	.Restart     = "Restart Saber",
+}
+
+// What the rows that open something show on their right.
+SETTINGS_ACTION_LABELS := #partial [Settings_Row]string {
+	.Ignored_Drives = "None",
+	.Emulation      = "Open settings",
+	.Desktop        = "Open Explorer",
+	.Restart        = "Restart",
 }
 
 SETTINGS_HELP := [Settings_Row]string {
@@ -833,138 +815,74 @@ draw_settings :: proc(w, h: f32) {
 			hover_enter(fmt.tprintf("set-%d", i))
 		}
 		draw_panel(r, focused)
-		if focused {
-			rl.DrawRectangleRounded({r.x + 8, r.y + 16, 3, r.height - 32}, 1, 4, COL_ACCENT)
-		}
+		if focused do rl.DrawRectangleRounded({r.x + 8, r.y + 16, 3, r.height - 32}, 1, 4, COL_ACCENT)
 		draw_t(SETTINGS_LABELS[row], r.x + 26, r.y + (ROW_H - 20) * 0.5, 20, focused ? COL_TEXT : COL_MUTED)
 
 		val := rl.Rectangle{r.x + r.width * 0.4, r.y + 10, r.width * 0.6 - 16, ROW_H - 20}
+		clicked := rl.IsMouseButtonPressed(.LEFT)
+		d := 0
 		switch row {
-		case .Ui_Theme:
-			if d := draw_stepper(val, app.settings.ui_theme, index_of_ui_theme(app.settings.ui_theme), len(UI_THEMES), focused); d != 0 {
-				cycle_ui_theme(d)
-			}
+		case .Ui_Theme: d = draw_stepper(val, app.settings.ui_theme, index_of_ui_theme(app.settings.ui_theme), len(UI_THEMES), focused)
 		case .Wallpaper:
-			idx := index_of_name(theme.bkg_files[:], app.settings.bkg)
-			if d := draw_stepper(val, app.settings.bkg != "" ? app.settings.bkg : "None", idx, len(theme.bkg_files), focused); d != 0 {
-				cycle_bkg(d)
-			}
+			d = draw_stepper(val, app.settings.bkg != "" ? app.settings.bkg : "None", index_of_name(theme.bkg_files[:], app.settings.bkg), len(theme.bkg_files), focused)
 		case .Music:
-			idx := index_of_name(theme.bgm_files[:], app.settings.bgm)
-			if d := draw_stepper(val, app.settings.bgm != "" ? filepath.stem(app.settings.bgm) : "None", idx, len(theme.bgm_files), focused); d != 0 {
-				cycle_bgm(d)
-			}
-		case .Font:
-			if d := draw_stepper(val, ui_font_name, max(index_of_font(app.settings.font), 0), len(font_choices), focused); d != 0 {
-				cycle_font(d)
-			}
-		case .Volume:
-			draw_volume_slider(val, focused)
-		case .Online_Mode:
-			if d := draw_stepper(val, app.settings.online_mode ? "On" : "Off", app.settings.online_mode ? 1 : 0, 2, focused); d != 0 {
-				set_online_mode(!app.settings.online_mode)
-			}
-		case .Ignored_Drives:
-			draw_t_right(app.settings.ignore_drives == 0 ? "None" : drive_letters(app.settings.ignore_drives, ", "), val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
+			d = draw_stepper(val, app.settings.bgm != "" ? filepath.stem(app.settings.bgm) : "None", index_of_name(theme.bgm_files[:], app.settings.bgm), len(theme.bgm_files), focused)
+		case .Font: d = draw_stepper(val, ui_font_name, max(index_of_font(app.settings.font), 0), len(font_choices), focused)
+		case .Online_Mode: d = draw_stepper(val, app.settings.online_mode ? "On" : "Off", app.settings.online_mode ? 1 : 0, 2, focused)
+		case .Volume: draw_volume_slider(val, focused)
+		case .Save_States, .Launch_Mode:
+			save := row == .Save_States
+			if save do save_row = r
+			else do launch_row = r
+			draw_select_box(val, save ? SAVE_MODE_NAMES[app.settings.save_mode] : LAUNCH_MODE_NAMES[app.settings.launch_mode], focused)
+			if !app.dropdown_open && mouse_over(val) && clicked do settings_change(row, 0)
+		case .Ignored_Drives, .Emulation, .Updates, .Desktop, .Restart:
+			label := SETTINGS_ACTION_LABELS[row]
+			if row == .Updates do label = UPDATE_STATUS[update_get_state()]
+			if row == .Ignored_Drives && app.settings.ignore_drives != 0 do label = drive_letters(app.settings.ignore_drives, ", ")
+			draw_t_right(label, val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
 			draw_glyph("A", val.x + val.width - 26, val.y + val.height * 0.5)
-			if !drives_menu.open && mouse_over(r) && rl.IsMouseButtonPressed(.LEFT) {
-				drives_menu_open()
-			}
-		case .Emulation:
-			draw_t_right("Open settings", val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
-			draw_glyph("A", val.x + val.width - 26, val.y + val.height * 0.5)
-			if mouse_over(r) && rl.IsMouseButtonPressed(.LEFT) {
-				emu_open(false)
-			}
-		case .Save_States:
-			save_row = r
-			draw_select_box(val, SAVE_MODE_NAMES[app.settings.save_mode], focused)
-			if !app.dropdown_open && mouse_over(val) && rl.IsMouseButtonPressed(.LEFT) {
-				open_dropdown(.Save_Mode)
-			}
-		case .Launch_Mode:
-			launch_row = r
-			draw_select_box(val, LAUNCH_MODE_NAMES[app.settings.launch_mode], focused)
-			if !app.dropdown_open && mouse_over(val) && rl.IsMouseButtonPressed(.LEFT) {
-				open_dropdown()
-			}
-		case .Updates:
-			draw_t_right(UPDATE_STATUS[update_get_state()], val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
-			draw_glyph("A", val.x + val.width - 26, val.y + val.height * 0.5)
-			if mouse_over(r) && rl.IsMouseButtonPressed(.LEFT) {
-				update_check_start()
-				sfx_click()
-			}
-		case .Desktop:
-			draw_t_right("Open Explorer", val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
-			draw_glyph("A", val.x + val.width - 26, val.y + val.height * 0.5)
-			if mouse_over(r) && rl.IsMouseButtonPressed(.LEFT) {
-				open_desktop()
-				set_status("Started Explorer")
-				sfx_click()
-			}
-		case .Restart:
-			draw_t_right("Restart", val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
-			draw_glyph("A", val.x + val.width - 26, val.y + val.height * 0.5)
-			if mouse_over(r) && rl.IsMouseButtonPressed(.LEFT) {
-				restart_saber()
-			}
+			if !drives_menu.open && mouse_over(r) && clicked do settings_change(row, 0)
 		}
+		if d != 0 do settings_change(row, d)
 	}
 
 	help := SETTINGS_HELP[Settings_Row(app.settings_focus)]
-	if Settings_Row(app.settings_focus) == .Launch_Mode {
-		help = LAUNCH_MODE_HELP[app.settings.launch_mode]
-	}
-	if Settings_Row(app.settings_focus) == .Save_States {
-		help = SAVE_MODE_HELP[app.settings.save_mode]
-	}
-	if !app.dropdown_open && !drives_menu.open {
-		draw_t(help, x + 4, y + f32(SETTINGS_ROWS) * step + 8, 16, COL_MUTED)
-	}
+	if Settings_Row(app.settings_focus) == .Launch_Mode do help = LAUNCH_MODE_HELP[app.settings.launch_mode]
+	if Settings_Row(app.settings_focus) == .Save_States do help = SAVE_MODE_HELP[app.settings.save_mode]
+	if !app.dropdown_open && !drives_menu.open do draw_t(help, x + 4, y + f32(SETTINGS_ROWS) * step + 8, 16, COL_MUTED)
 	pop_clip()
 
 	draw_dropdown(app.dropdown_kind == .Save_Mode ? save_row : launch_row)
 	drives_menu_draw(w, h)
 }
 
-// "< value  2/5 >" control; returns -1 / +1 when an arrow is clicked.
-draw_stepper :: proc(r: rl.Rectangle, value: string, idx, count: int, focused: bool) -> int {
-	col := focused ? COL_TEXT : COL_MUTED
+// "< value  2/5 >" control (count 0: no counter); returns -1 / +1 when an arrow is clicked.
+draw_stepper :: proc(r: rl.Rectangle, value: string, idx, count: int, focused: bool, modal := false) -> int {
 	arrow := focused ? COL_ACCENT : COL_MUTED
 	left := rl.Rectangle{r.x, r.y, 36, r.height}
 	right := rl.Rectangle{r.x + r.width - 36, r.y, 36, r.height}
 	draw_triangle_dir(left.x + 18, r.y + r.height * 0.5, 14, .Left, arrow)
 	draw_triangle_dir(right.x + 18, r.y + r.height * 0.5, 14, .Right, arrow)
 	counter := count > 0 ? fmt.tprintf("%d/%d", idx + 1, count) : ""
-	cw := measure_t(counter, 14)
-	draw_t_fit(value, left.x + 44, r.y + 11, r.width - 88 - cw - 16, 18, col, focused)
-	draw_t(counter, right.x - cw - 8, r.y + 13, 14, COL_MUTED)
-	if count <= 1 {
-		return 0
-	}
-	if mouse_over(left) && rl.IsMouseButtonPressed(.LEFT) {
-		return -1
-	}
-	if mouse_over(right) && rl.IsMouseButtonPressed(.LEFT) {
-		return 1
-	}
+	cw := counter != "" ? measure_t(counter, 14) + 16 : 0
+	draw_t_fit(value, left.x + 44, r.y + 11, r.width - 88 - cw, 18, focused ? COL_TEXT : COL_MUTED, focused)
+	draw_t(counter, right.x - cw + 8, r.y + 13, 14, COL_MUTED)
+	if count == 1 || !rl.IsMouseButtonPressed(.LEFT) do return 0
+	if mouse_over(left, modal) do return -1
+	if mouse_over(right, modal) do return 1
 	return 0
 }
 
 draw_volume_slider :: proc(r: rl.Rectangle, focused: bool) {
 	track := rl.Rectangle{r.x + 12, r.y + r.height * 0.5 - 3, r.width - 90, 6}
 	hit := rl.Rectangle{track.x - 8, r.y, track.width + 16, r.height}
-	if mouse_over(hit) && rl.IsMouseButtonPressed(.LEFT) {
-		app.slider_drag = true
-	}
+	if mouse_over(hit) && rl.IsMouseButtonPressed(.LEFT) do app.slider_drag = true
 	if app.slider_drag {
 		if rl.IsMouseButtonDown(.LEFT) {
 			v := clamp((rl.GetMousePosition().x - draw_dx - track.x) / track.width, 0, 1)
 			app.settings.volume = v
-			if theme.has_music {
-				rl.SetMusicVolume(theme.music, v)
-			}
+			if theme.has_music do rl.SetMusicVolume(theme.music, v)
 		} else {
 			app.slider_drag = false
 			set_volume(app.settings.volume) // save once on release
@@ -991,39 +909,25 @@ DROP_ITEM_H :: 58
 draw_dropdown :: proc(row: rl.Rectangle) {
 	target: f32 = app.dropdown_open ? 1 : 0
 	app.dropdown_t = smooth_to(app.dropdown_t, target, 18)
-	if !app.dropdown_open && app.dropdown_t < 0.02 {
-		return
-	}
+	if !app.dropdown_open && app.dropdown_t < 0.02 do return
 	n := dropdown_count()
 	box := rl.Rectangle{row.x + row.width * 0.4, row.y + 4, row.width * 0.6 - 6, f32(n) * DROP_ITEM_H + 12}
 	box.height *= 0.85 + 0.15 * app.dropdown_t
 	a := app.dropdown_t
 	draw_soft_shadow(box, RADIUS, a * 1.6)
 	draw_glass(box, RADIUS, COL_PANEL_SOLID, 0.6, COL_ACCENT, 0.25, a)
-	if a < 0.6 {
-		return
-	}
+	if a < 0.6 do return
 
 	clicked_inside := false
 	for i in 0 ..< n {
 		it := rl.Rectangle{box.x + 6, box.y + 6 + f32(i) * DROP_ITEM_H, box.width - 12, DROP_ITEM_H}
-		if app.dropdown_open && mouse_over(it) {
-			if app.dropdown_sel != i {
-				app.dropdown_sel = i
-				hover_enter(fmt.tprintf("mode-%d", i))
-			}
-			if rl.IsMouseButtonPressed(.LEFT) {
-				clicked_inside = true
-				dropdown_choose(i)
-			}
+		if app.dropdown_open && list_row_mouse("mode", i, it, &app.dropdown_sel, modal = false) {
+			clicked_inside = true
+			dropdown_choose(i)
 		}
-		if i == app.dropdown_sel {
-			draw_glass(it, RADIUS - 6, mix_color(COL_PANEL_HI, COL_ACCENT, 0.3), 0.45, COL_ACCENT, 0.4, refract = 6)
-		}
+		if i == app.dropdown_sel do draw_glass(it, RADIUS - 6, mix_color(COL_PANEL_HI, COL_ACCENT, 0.3), 0.45, COL_ACCENT, 0.4, refract = 6)
 		name, help, current := dropdown_item(i)
-		if current {
-			rl.DrawCircleV({it.x + 16, it.y + 20}, 4, COL_ACCENT)
-		}
+		if current do rl.DrawCircleV({it.x + 16, it.y + 20}, 4, COL_ACCENT)
 		draw_t(name, it.x + 30, it.y + 9, 18, i == app.dropdown_sel ? COL_TEXT : COL_MUTED)
 		draw_t_fit(help, it.x + 30, it.y + 33, it.width - 40, 13, COL_MUTED, false)
 	}
@@ -1038,26 +942,17 @@ draw_dropdown :: proc(row: rl.Rectangle) {
 
 // Returns the index of a clicked option, or -1.
 draw_modal_menu :: proc(title, sub: string, labels: []string, sel: int, t: f32, w, h: f32, interactive: bool) -> int {
-	rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(150 * t)))
 	bh: f32 = 54
 	gap: f32 = 10
-	pw: f32 = 460
-	ph := 104 + f32(len(labels)) * (bh + gap) + 14
-	s := 0.94 + 0.06 * t
-	r := rl.Rectangle{(w - pw * s) * 0.5, (h - ph * s) * 0.5, pw * s, ph * s}
-	draw_panel(r, false, with_alpha(COL_PANEL_SOLID, u8(244 * t)))
-	if t < 0.5 {
-		return -1
-	}
+	r := modal_panel({0, 0, w, h}, 460, 104 + f32(len(labels)) * (bh + gap) + 14, t)
+	if t < 0.5 do return -1
 	draw_t_fit(title, r.x + 28, r.y + 26, r.width - 56, 26, COL_TEXT, true)
 	draw_t(sub, r.x + 28, r.y + 62, 15, COL_MUTED)
 	clicked := -1
 	for label, i in labels {
 		br := rl.Rectangle{r.x + 24, r.y + 104 + f32(i) * (bh + gap), r.width - 48, bh}
 		if interactive {
-			if ui_button(fmt.tprintf("modal-%d", i), br, label, i == sel, true) {
-				clicked = i
-			}
+			if ui_button(fmt.tprintf("modal-%d", i), br, label, i == sel, true) do clicked = i
 		} else {
 			ui_button("", br, label, false, true)
 		}
@@ -1066,10 +961,7 @@ draw_modal_menu :: proc(title, sub: string, labels: []string, sel: int, t: f32, 
 }
 
 draw_power_dialog :: proc(w, h: f32) {
-	app.power_t = smooth_to(app.power_t, app.power_open ? 1 : 0, 16)
-	if app.power_t < 0.02 && !app.power_open {
-		return
-	}
+	if !modal_fade(&app.power_t, app.power_open) do return
 	title := "Power"
 	sub := app.in_shell ? "Saber is this account's shell" : app.settings.launch_mode == .Standalone ? "Quit Saber?" : "Quit Saber or power off the PC"
 	if app.power_confirm != .Cancel {

@@ -44,7 +44,7 @@ startup_disabled :: proc(root: win.HKEY, kind, name: string) -> bool {
 }
 
 startup_is_self :: proc(cmd, self_exe: string) -> bool {
-	return strings.contains(strings.to_lower(cmd, context.temp_allocator), strings.to_lower(filepath.base(self_exe), context.temp_allocator))
+	return strings.contains(ascii_lower(cmd, context.temp_allocator), ascii_lower(filepath.base(self_exe), context.temp_allocator))
 }
 
 startup_run_key :: proc(root: win.HKEY, wow: u32, approved_kind: string, self_exe: string) -> int {
@@ -93,7 +93,7 @@ startup_folder :: proc(folder: ^win.GUID, approved_root: win.HKEY, self_exe: str
 	if err != nil do return 0
 	count := 0
 	for fi in fis {
-		if fi.type == .Directory || strings.equal_fold(fi.name, "desktop.ini") do continue
+		if fi.type == .Directory || eq_fold(fi.name, "desktop.ini") do continue
 		if startup_is_self(fi.name, self_exe) || startup_disabled(approved_root, "StartupFolder", fi.name) do continue
 		full := path_join({dir, fi.name})
 		r := win.ShellExecuteW(nil, win.L("open"), win.utf8_to_wstring(full), nil, win.utf8_to_wstring(dir), win.SW_SHOWNORMAL)

@@ -72,39 +72,54 @@ app_spec_free :: proc(s: ^App_Spec) {
 }
 
 // Layout: APP/apps/<Folder>/<Folder>.toml + <Folder>.png, the program in APP/apps/<Folder>/app/.
+// (all temp)
 app_dir_of :: proc(id: string) -> string {
-	return path_join({app.apps_dir, id})
+	return tjoin({app.apps_dir, id})
 }
 
 app_store_dest :: proc(p: ^Store_Plugin) -> string {
-	return path_join({app_dir_of(p.folder), APP_PROGRAM_DIR})
+	return tjoin({app_dir_of(p.folder), APP_PROGRAM_DIR})
 }
 
 app_store_toml :: proc(p: ^Store_Plugin) -> string {
-	return path_join({app_dir_of(p.folder), fmt.tprintf("%s.toml", p.folder)})
+	return tjoin({app_dir_of(p.folder), fmt.tprintf("%s.toml", p.folder)})
 }
 
 APP_PROGRAM_DIR :: "app"
 
-// A key of APP/apps/<Folder>/<Folder>.toml ("" when there's no such file / key).
-app_store_toml_get :: proc(p: ^Store_Plugin, key: string) -> string {
-	data, err := os.read_entire_file(app_store_toml(p), context.temp_allocator)
-	if err != nil do return ""
-	v, _ := ini_get(string(data), key)
-	return v
+App_Toml_Key :: enum {
+	Store,
+	Version,
+	Linked,
+}
+
+// A key of APP/apps/<Folder>/<Folder>.toml ("" when there's no such file / key). The store page
+// asks every frame, so the file is only read again after APP/apps changed (scan_apps bumps apps_gen).
+app_store_toml_get :: proc(p: ^Store_Plugin, key: App_Toml_Key) -> string {
+	if p.toml_gen != apps_gen + 1 {
+		p.toml_gen = apps_gen + 1
+		for &v in p.toml {
+			delete(v)
+			v = ""
+		}
+		if data, err := os.read_entire_file(app_store_toml(p), context.temp_allocator); err == nil {
+			for &v, k in p.toml do ini_str(string(data), ascii_lower(fmt.tprint(k), context.temp_allocator), &v)
+		}
+	}
+	return p.toml[key]
 }
 
 // Installed or linked by the store (a hand-made .toml of the same name doesn't count).
 app_store_installed :: proc(p: ^Store_Plugin) -> bool {
-	return app_store_toml_get(p, "store") != ""
+	return app_store_toml_get(p, .Store) != ""
 }
 
 app_store_linked :: proc(p: ^Store_Plugin) -> bool {
-	return app_store_toml_get(p, "linked") != ""
+	return app_store_toml_get(p, .Linked) != ""
 }
 
 app_store_installed_version :: proc(p: ^Store_Plugin) -> string {
-	return app_store_toml_get(p, "version")
+	return app_store_toml_get(p, .Version)
 }
 
 // Runs app.lua in a throwaway Lua state and reads its table.
@@ -112,8 +127,7 @@ app_spec_read :: proc(path: string) -> (spec: App_Spec, err: string) {
 	L := luaL_newstate()
 	defer lua_close(L)
 	luaL_openlibs(L)
-	lua_pushstring(L, strings.clone_to_cstring(app.exe_dir, context.temp_allocator))
-	lua_setglobal(L, "SABER_DIR")
+	lua_set_global_string(L, "SABER_DIR", app.exe_dir)
 	if luaL_loadfilex(L, strings.clone_to_cstring(path, context.temp_allocator), nil) != LUA_OK || lua_pcall(L, 0, 1, 0) != LUA_OK {
 		return {}, fmt.tprintf("app.lua: %s", lua_string(L, -1))
 	}
@@ -165,7 +179,7 @@ app_store_fail :: proc(p: ^Store_Plugin, msg: string) {
 // The repo files are staged: read the recipe, then fetch the download (if any).
 app_store_staged :: proc(idx: int) {
 	p := &store.plugins[idx]
-	spec, err := app_spec_read(path_join({store_stage_dir(p), "app.lua"}))
+	spec, err := app_spec_read(tjoin({store_stage_dir(p), "app.lua"}))
 	if err != "" {
 		app_store_fail(p, err)
 		return
@@ -194,7 +208,7 @@ app_store_staged :: proc(idx: int) {
 	if i := strings.index_any(url, "?#"); i >= 0 do url = url[:i]
 	name := filepath.base(url)
 	if name == "" || name == "." || name == "/" do name = "download"
-	p.req = http_start_native(spec.download, path_join({store_stage_dir(p), "payload", name}), app_store_on_payload, {store.gen, idx})
+	p.req = http_start_native(spec.download, tjoin({store_stage_dir(p), "payload", name}), app_store_on_payload, {store.gen, idx})
 }
 
 app_store_on_payload :: proc(req: ^Http_Request) {
@@ -213,7 +227,7 @@ app_store_unpack :: proc(idx: int, payload: string) {
 	j := new(App_Job)
 	j.payload = strings.clone(payload)
 	j.dest = strings.clone(app_store_dest(p))
-	j.seed = strings.clone(path_join({store_stage_dir(p), "files"}))
+	j.seed = strings.clone(tjoin({store_stage_dir(p), "files"}))
 	j.installer = strings.clone(p.spec.installer)
 	p.job = j
 	j.worker = thread.create_and_start_with_data(j, app_job_worker)
@@ -252,7 +266,7 @@ app_job_worker :: proc(data: rawptr) {
 			return
 		}
 	} else if j.payload != "" {
-		if strings.equal_fold(filepath.ext(j.payload), ".zip") {
+		if has_ext(j.payload, ".zip") {
 			zip, err := os.read_entire_file(j.payload, context.allocator)
 			if err != nil {
 				fail(j, "Couldn't read the download")
@@ -300,8 +314,8 @@ app_job_worker :: proc(data: rawptr) {
 
 // Copies src's tree into dst, skipping files dst already has.
 app_copy_missing :: proc(src, dst: string) {
-	fis, err := os.read_all_directory_by_path(src, context.allocator)
-	if err != nil do return
+	fis, ok := list_dir(src)
+	if !ok do return
 	for fi in fis {
 		to := path_join({dst, fi.name})
 		if fi.type == .Directory {
@@ -321,8 +335,7 @@ app_store_update :: proc() {
 	for &p, i in store.plugins {
 		j := p.job
 		if j == nil || !sync.atomic_load(&j.done) do continue
-		thread.join(j.worker)
-		thread.destroy(j.worker)
+		thread_end(&j.worker)
 		p.job = nil
 		if j.err != "" {
 			app_store_fail(&p, j.err)
@@ -332,7 +345,7 @@ app_store_update :: proc() {
 		delete(j.payload)
 		delete(j.dest)
 		delete(j.seed)
-	delete(j.installer)
+		delete(j.installer)
 		delete(j.err)
 		free(j)
 	}
@@ -341,8 +354,7 @@ app_store_update :: proc() {
 app_store_shutdown :: proc() {
 	for &p in store.plugins {
 		if p.job == nil do continue
-		thread.join(p.job.worker) // unpacking can't be interrupted halfway safely
-		thread.destroy(p.job.worker)
+		thread_end(&p.job.worker) // unpacking can't be interrupted halfway safely
 		p.job = nil
 	}
 }
@@ -351,20 +363,19 @@ app_store_finish :: proc(idx: int) {
 	p := &store.plugins[idx]
 	repo := &store.repos[p.repo]
 	dest := app_store_dest(p)
-	_ = os.write_entire_file(path_join({dest, STORE_MARKER}), transmute([]u8)fmt.tprintf("%s/%s\n", repo.owner, repo.name))
+	_ = os.write_entire_file(tjoin({dest, STORE_MARKER}), transmute([]u8)fmt.tprintf("%s/%s\n", repo.owner, repo.name))
 	exe := p.spec.exe
-	if !os.is_file(path_join({dest, exe})) {
+	if !os.is_file(tjoin({dest, exe})) {
 		// recipe names the wrong exe: use the only real program in the folder if there's exactly one
 		found := make([dynamic]string, context.temp_allocator)
 		programs := make([dynamic]string, context.temp_allocator)
-		if fis, err := os.read_all_directory_by_path(dest, context.temp_allocator); err == nil {
-			for fi in fis {
-				if fi.type == .Directory || !strings.equal_fold(filepath.ext(fi.name), ".exe") do continue
-				append(&found, fi.name)
-				l := strings.to_lower(fi.name, context.temp_allocator)
-				if !strings.contains(l, "unins") && !strings.contains(l, "update") && !strings.contains(l, "crash") && !strings.contains(l, "helper") {
-					append(&programs, fi.name)
-				}
+		fis, _ := list_dir(dest)
+		for fi in fis {
+			if fi.type == .Directory || !has_ext(fi.name, ".exe") do continue
+			append(&found, fi.name)
+			l := ascii_lower(fi.name, context.temp_allocator)
+			if !strings.contains(l, "unins") && !strings.contains(l, "update") && !strings.contains(l, "crash") && !strings.contains(l, "helper") {
+				append(&programs, fi.name)
 			}
 		}
 		if len(programs) != 1 {
@@ -393,8 +404,8 @@ app_store_register :: proc(idx: int, exe: string, linked: bool) {
 	img := ""
 	store_art := false
 	os.make_directory_all(app_dir_of(p.folder))
-	icon_png := path_join({app_dir_of(p.folder), fmt.tprintf("%s.png", p.folder)})
-	if data, err := os.read_entire_file(path_join({stage, "icon.png"}), context.temp_allocator); err == nil {
+	icon_png := tjoin({app_dir_of(p.folder), fmt.tprintf("%s.png", p.folder)})
+	if data, err := os.read_entire_file(tjoin({stage, "icon.png"}), context.temp_allocator); err == nil {
 		store_art = os.write_entire_file(icon_png, data) == nil
 	} else if strings.has_prefix(spec.icon, "http://") || strings.has_prefix(spec.icon, "https://") {
 		http_start_native(spec.icon, icon_png, app_store_on_icon, {store.gen, idx})
@@ -500,7 +511,7 @@ app_delete_plan :: proc(toml_path: string) -> (plan: App_Delete_Plan) {
 	dir := filepath.dir(toml_path)
 	prog := path_join({dir, APP_PROGRAM_DIR})
 	store, _ := ini_get(text, "store")
-	if store != "" && !strings.equal_fold(dir, app.apps_dir) && os.exists(path_join({prog, STORE_MARKER})) {
+	if store != "" && !eq_fold(dir, app.apps_dir) && os.exists(tjoin({prog, STORE_MARKER})) {
 		plan.program = prog
 		plan.uninstall, _ = ini_get(text, "uninstall")
 	}
@@ -512,24 +523,29 @@ app_delete_plan :: proc(toml_path: string) -> (plan: App_Delete_Plan) {
 // .toml, the card art next to it (<stem>.png/.jpg/...), then its APP/apps/<Name>/ folder if that
 // is left empty. Clears autostart, rescans APPS. false = some files couldn't be deleted.
 app_delete_toml :: proc(toml_path, name: string, uninstall := false) -> bool {
+	// own copies: the uninstaller's splash frame frees the temp allocator the caller's may live in
+	toml_path, name := strings.clone(toml_path), strings.clone(name)
+	defer delete(toml_path)
+	defer delete(name)
 	plan := app_delete_plan(toml_path)
 	dir := filepath.dir(toml_path)
 	stem := filepath.stem(toml_path)
-	if uninstall && plan.uninstall != "" do app_run_uninstaller(plan.uninstall, plan.program, name)
-	if strings.equal_fold(app.settings.autostart_app, filepath.base(toml_path)) {
+	program := strings.clone(plan.program)
+	defer delete(program)
+	plan.program = program
+	if uninstall && plan.uninstall != "" do app_run_uninstaller(plan.uninstall, program, name)
+	if eq_fold(app.settings.autostart_app, filepath.base(toml_path)) {
 		app.settings.autostart_app = ""
 		save_settings()
 	}
 	unload_all_apps() // textures of the art we're about to delete
 	ok := true
 	if os.remove(toml_path) != nil && os.exists(toml_path) do ok = false
-	for ext in ([]string{".png", ".jpg", ".jpeg", ".webp"}) {
-		os.remove(path_join({dir, fmt.tprintf("%s%s", stem, ext)}))
-	}
+	for ext in ([]string{".png", ".jpg", ".jpeg", ".webp"}) do os.remove(tjoin({dir, fmt.tprintf("%s%s", stem, ext)}))
 	if plan.program != "" && os.remove_all(plan.program) != nil do ok = false
-	if !strings.equal_fold(dir, app.apps_dir) do os.remove(dir) // only succeeds when empty
+	if !eq_fold(dir, app.apps_dir) do os.remove(dir) // only succeeds when empty
 	for &sp in store.plugins {
-		if sp.kind == .App && sp.state == .Installed && strings.equal_fold(app_store_toml(&sp), toml_path) do sp.state = .Available
+		if sp.kind == .App && sp.state == .Installed && eq_fold(app_store_toml(&sp), toml_path) do sp.state = .Available
 	}
 	apps_rescan()
 	plugin_logf("apps: deleted %s (%s)", name, toml_path)
@@ -538,14 +554,18 @@ app_delete_toml :: proc(toml_path, name: string, uninstall := false) -> bool {
 
 // Runs an uninstall command ("uninstall.exe /S _?={dir}", exe relative to dir) and waits.
 app_run_uninstaller :: proc(cmd, dir, name: string) {
-	cmd, _ := strings.replace_all(cmd, "{dir}", win_path(dir), context.temp_allocator)
-	exe, args := cmd, ""
-	if i := strings.index(strings.to_lower(cmd, context.temp_allocator), ".exe"); i >= 0 {
-		exe, args = cmd[:i + 4], strings.trim_space(cmd[i + 4:])
+	line, _ := strings.replace_all(cmd, "{dir}", win_path(dir), context.temp_allocator)
+	exe, args := line, ""
+	if i := strings.index(ascii_lower(line, context.temp_allocator), ".exe"); i >= 0 {
+		exe, args = line[:i + 4], strings.trim_space(line[i + 4:])
 	}
 	exe = strings.trim(exe, "\"")
-	if !filepath.is_abs(exe) do exe = path_join({dir, exe})
+	if !filepath.is_abs(exe) do exe = tjoin({dir, exe})
 	if !os.exists(exe) do return
+	// heap copies: the splash frame frees the temp allocator
+	exe, args = strings.clone(exe), strings.clone(args)
+	defer delete(exe)
+	defer delete(args)
 	draw_splash(fmt.tprintf("Uninstalling %s", name))
 	code, ran := run_and_wait(exe, args, dir, 2 * 60 * 1000)
 	plugin_logf("apps: uninstall %s: ran=%v code=%d", name, ran, code)
@@ -577,19 +597,12 @@ lua_register_app :: proc "c" (L: ^lua_State) -> c.int {
 	id := lua_string(L, 1)
 	if !app_id_ok(id) do return fail(L, "Register_App: bad id")
 	if lua_type(L, 2) != LUA_TTABLE do return fail(L, "Register_App: second argument must be a table")
-	lua_getglobal(L, "PLUGIN_DIR")
-	plugin_dir := strings.clone(lua_string(L, -1), context.temp_allocator)
-	lua_pop(L, 1)
 	field :: proc(L: ^lua_State, key: cstring) -> string {
 		defer lua_pop(L, 1)
 		if lua_getfield(L, 2, key) != LUA_TSTRING do return ""
 		return strings.clone(lua_string(L, -1), context.temp_allocator)
 	}
-	abs :: proc(dir, p: string) -> string {
-		if p == "" || filepath.is_abs(p) do return p
-		return path_join({dir, p})
-	}
-	name, exe, args, img := field(L, "name"), abs(plugin_dir, field(L, "exe")), field(L, "args"), abs(plugin_dir, field(L, "img"))
+	name, exe, args, img := field(L, "name"), lua_plugin_path(L, field(L, "exe")), field(L, "args"), lua_plugin_path(L, field(L, "img"))
 	if exe == "" do return fail(L, "Register_App: exe is required")
 	b := strings.builder_make(context.temp_allocator)
 	fmt.sbprintf(&b, "name=\"%s\"\n", name != "" ? name : id)
@@ -598,7 +611,7 @@ lua_register_app :: proc "c" (L: ^lua_State) -> c.int {
 	if img != "" do fmt.sbprintf(&b, "img=\"%s\"\n", img)
 	if p := plugin_for_state(L); p != nil do fmt.sbprintf(&b, "plugin=\"%s\"\n", p.file)
 	os.make_directory_all(app_dir_of(id))
-	path := path_join({app_dir_of(id), fmt.tprintf("%s.toml", id)})
+	path := tjoin({app_dir_of(id), fmt.tprintf("%s.toml", id)})
 	if os.write_entire_file(path, b.buf[:]) != nil do return fail(L, fmt.tprintf("Couldn't write %s", path))
 	apps_rescan()
 	lua_pushboolean(L, 1)
@@ -608,11 +621,11 @@ lua_register_app :: proc "c" (L: ^lua_State) -> c.int {
 lua_unregister_app :: proc "c" (L: ^lua_State) -> c.int {
 	context = runtime.default_context()
 	id := lua_string(L, 1)
-	if !app_id_ok(id) || !os.exists(path_join({app_dir_of(id), fmt.tprintf("%s.toml", id)})) {
+	if !app_id_ok(id) || !os.exists(tjoin({app_dir_of(id), fmt.tprintf("%s.toml", id)})) {
 		lua_pushboolean(L, 0)
 		return 1
 	}
-	app_delete_toml(path_join({app_dir_of(id), fmt.tprintf("%s.toml", id)}), id)
+	app_delete_toml(tjoin({app_dir_of(id), fmt.tprintf("%s.toml", id)}), id)
 	lua_pushboolean(L, 1)
 	return 1
 }

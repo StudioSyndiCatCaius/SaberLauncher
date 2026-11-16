@@ -87,17 +87,13 @@ TARGET_FPS :: 60
 STATUS_SECONDS :: 6.0
 
 main :: proc() {
-	if shell_supervise() {
-		return // this process was the shell supervisor; the real Saber ran as its child
-	}
+	if shell_supervise() do return // this process was the shell supervisor; the real Saber ran as its child
 	if !app.supervised && !single_instance() { // a supervised child: the supervisor holds the mutex
 		return
 	}
 	crash_init()
 	app.exe_dir = exe_directory()
-	if app.exe_dir != "" {
-		_ = os.set_working_directory(app.exe_dir)
-	}
+	if app.exe_dir != "" do _ = os.set_working_directory(app.exe_dir)
 	app.games_dir = path_join({app.exe_dir, "games"})
 	app.roms_dir = path_join({app.exe_dir, "games_roms"})
 	app.apps_dir = path_join({app.exe_dir, "apps"})
@@ -140,18 +136,14 @@ main :: proc() {
 	autostart_app_on_login()
 
 	for !app.quit {
-		if rl.WindowShouldClose() && !app.in_shell {
-			break // Alt+F4; ignored as a shell so the session never ends on a black screen
-		}
+		if rl.WindowShouldClose() && !app.in_shell do break // Alt+F4; ignored as a shell so the session never ends on a black screen
 		keep_fullscreen()
 		poll_drive_changes()
 		drive_scan_update()
 		install_update()
 		bios_job_poll()
 		theme_update()
-		if rl.IsKeyPressed(.F11) {
-			rl.ToggleBorderlessWindowed()
-		}
+		if rl.IsKeyPressed(.F11) do rl.ToggleBorderlessWindowed()
 		input_poll()
 		online_update()
 		app_store_update()
@@ -180,7 +172,7 @@ main :: proc() {
 		if under_dialog {
 			glass_draw_scene()
 		} else {
-			draw_background(w, h)
+			draw_wallpaper(w, h)
 			draw_menus(w, h)
 		}
 		glass.source = under_dialog ? .Over : .Wall
@@ -225,7 +217,7 @@ play_disc_from_args :: proc() {
 	for i in 1 ..< len(args) - 1 {
 		if args[i] == "--play-rom" && args[i + 1] != "" {
 			for &g, gi in app.drive_games {
-				if g.rom_path != "" && strings.equal_fold(g.rom_path, args[i + 1]) {
+				if g.rom_path != "" && eq_fold(g.rom_path, args[i + 1]) {
 					app.selected_drive = gi
 					activate_item(.Main, gi)
 					return
@@ -234,9 +226,7 @@ play_disc_from_args :: proc() {
 			set_status("No ROM game at %s", args[i + 1])
 			continue
 		}
-		if args[i] != "--play-disc" || args[i + 1] == "" {
-			continue
-		}
+		if args[i] != "--play-disc" || args[i + 1] == "" do continue
 		letter := args[i + 1][0] &~ 0x20
 		for &g, gi in app.drive_games {
 			if g.platform != .None && g.disc_letter == letter {
@@ -251,9 +241,7 @@ play_disc_from_args :: proc() {
 
 exe_directory :: proc() -> string {
 	full := exe_full_path()
-	if full == "" {
-		return "."
-	}
+	if full == "" do return "."
 	return strings.clone(filepath.dir(full)) // dir() is a view into a temp string
 }
 
@@ -328,10 +316,7 @@ rescan_all :: proc(drives_async := false) {
 	}
 	scan_apps(&app.shell_apps, app.apps_dir)
 	scan_movies(&app.movies, app.movies_dir)
-	app.selected_drive = clamp(app.selected_drive, 0, max(0, len(app.drive_games) - 1))
-	app.selected_lib = clamp(app.selected_lib, 0, max(0, len(app.library_games) - 1))
-	app.selected_app = clamp(app.selected_app, 0, max(0, len(app.shell_apps) - 1))
-	app.selected_movie = clamp(app.selected_movie, 0, max(0, len(app.movies) - 1))
+	for s in Screen.Main ..= Screen.Apps do clamp_selection(s)
 	app.drive_mask = current_drive_mask()
 	app.portable_mask = portable_drive_mask(app.drive_mask)
 	app.disc_mask = disc_presence_mask()
@@ -354,27 +339,23 @@ rescan_library :: proc() {
 	scan_library(&app.library_games, app.games_dir)
 	scan_library_roms(&app.library_games, app.roms_dir)
 	for g, i in app.library_games do if keep != "" && g.root == keep do app.selected_lib = i
-	app.selected_lib = clamp(app.selected_lib, 0, max(0, len(app.library_games) - 1))
+	clamp_selection(.Library)
+}
+
+// Keeps a grid's selection on one of its items after the list changed.
+clamp_selection :: proc(s: Screen) {
+	sel := grid_selection(s)
+	sel^ = clamp(sel^, 0, max(0, grid_count(s) - 1))
 }
 
 update_scan_message :: proc() {
-	app.scan_message = fmt.bprintf(
-		app.scan_buf[:],
-		"%d inserted  ·  %d games  ·  %d movies  ·  %d apps",
-		len(app.drive_games),
-		len(app.library_games),
-		len(app.movies),
-		len(app.shell_apps),
-	)
+	app.scan_message = fmt.bprintf(app.scan_buf[:], "%d inserted  ·  %d games  ·  %d movies  ·  %d apps",
+		len(app.drive_games), len(app.library_games), len(app.movies), len(app.shell_apps))
 }
 
 unload_all_games :: proc() {
-	for &g in app.drive_games {
-		game_unload_art(&g)
-	}
-	for &g in app.library_games {
-		game_unload_art(&g)
-	}
+	for &g in app.drive_games do game_unload_art(&g)
+	for &g in app.library_games do game_unload_art(&g)
 }
 
 power_blocking :: proc() -> bool {
@@ -414,88 +395,46 @@ handle_app_input :: proc() {
 		eat_input()
 		return
 	}
-	if emu_menu.open {
-		emu_menu_input()
+	// The front modal takes the frame's input, and (except the power dialog and the dropdown,
+	// which share the screen's mouse) the mouse too, so a click can't reach a card below.
+	modal: proc()
+	mouse := true
+	switch {
+	case emu_menu.open:        modal = emu_menu_input
+	case plugin_dialog_open(): modal = handle_plugin_dialog_input
+	case power_blocking():     modal, mouse = handle_power_input, false
+	case app.swipe_t < 1:      return
+	case game_menu.open:       modal = game_menu_input
+	case app_menu.open:        modal = app_menu_input
+	case explorer.open:        modal = explorer_input
+	case bios_menu.open:       modal = bios_menu_input
+	case drives_menu.open:     modal = drives_menu_input
+	case app.dropdown_open:    modal, mouse = handle_dropdown_input, false
+	}
+	if modal != nil {
+		modal()
 		eat_input()
-		input.mouse_eaten = true
+		if mouse do input.mouse_eaten = true // also on the frame it closes
 		return
 	}
-	if plugin_dialog_open() {
-		handle_plugin_dialog_input()
-		eat_input()
-		input.mouse_eaten = true // also on the frame it closes, so the click can't reach a card
-		return
-	}
-	if power_blocking() {
-		handle_power_input()
-		eat_input()
-		return
-	}
-	if app.swipe_t < 1 {
-		return
-	}
-	if game_menu.open {
-		game_menu_input()
-		eat_input()
-		input.mouse_eaten = true
-		return
-	}
-	if app_menu.open {
-		app_menu_input()
-		eat_input()
-		input.mouse_eaten = true
-		return
-	}
-	if explorer.open {
-		explorer_input()
-		eat_input()
-		input.mouse_eaten = true
-		return
-	}
-	if bios_menu.open {
-		bios_menu_input()
-		eat_input()
-		input.mouse_eaten = true
-		return
-	}
-	if drives_menu.open {
-		drives_menu_input()
-		eat_input()
-		input.mouse_eaten = true
-		return
-	}
-	if app.dropdown_open {
-		handle_dropdown_input()
-		eat_input()
-		return
-	}
-	if input.power {
-		open_power_dialog()
-		eat_input()
-		return
-	}
-	if input.menu_l || input.menu_r {
-		cycle_screen(input.menu_l ? -1 : 1)
-		eat_input()
-		return
-	}
-	if input.cancel && app.screen == .Plugins && (app.plugin_focus == 1 || app.plugin_page == 1) {
+	handled := true
+	switch {
+	case input.power: open_power_dialog()
+	case input.menu_l || input.menu_r: cycle_screen(input.menu_l ? -1 : 1)
+	case input.cancel && app.screen == .Plugins && (app.plugin_focus == 1 || app.plugin_page == 1):
 		if app.plugin_page == 1 do app.plugin_page = 0
 		else do app.plugin_focus = 0
 		sfx_back()
-		eat_input()
-		return
-	}
-	if input.cancel && app.screen == .Apps && app.apps_page == 1 {
-		apps_toggle_page()
-		eat_input()
-		return
-	}
-	if input.cancel {
+	case input.cancel && app.screen == .Apps && app.apps_page == 1: apps_toggle_page()
+	case input.cancel:
 		if app.screen != .Main {
 			sfx_back()
 			go_screen(.Main)
 		}
+	case:
+		handled = false
+	}
+	if handled {
 		eat_input()
 		return
 	}
@@ -539,10 +478,8 @@ handle_app_input :: proc() {
 		} else if input.action && app.screen == .Apps && len(app.shell_apps) > 0 {
 			app_menu_open(sel^)
 		}
-	case .Plugins:
-		handle_plugins_input()
-	case .Settings:
-		handle_settings_input()
+	case .Plugins: handle_plugins_input()
+	case .Settings: handle_settings_input()
 	}
 }
 
@@ -565,67 +502,39 @@ Settings_Row :: enum {
 SETTINGS_ROWS :: len(Settings_Row)
 
 handle_settings_input :: proc() {
-	if input.up {
-		app.settings_focus = (app.settings_focus - 1 + SETTINGS_ROWS) % SETTINGS_ROWS
-		sfx_click()
-	}
-	if input.down {
-		app.settings_focus = (app.settings_focus + 1) % SETTINGS_ROWS
-		sfx_click()
-	}
-	step := 0
-	if input.left { step = -1 }
-	if input.right { step = 1 }
-	switch Settings_Row(app.settings_focus) {
-	case .Ui_Theme:
-		if step != 0 { cycle_ui_theme(step) }
-		if input.confirm { cycle_ui_theme(1) }
-	case .Wallpaper:
-		if step != 0 { cycle_bkg(step) }
-		if input.confirm { cycle_bkg(1) }
-	case .Music:
-		if step != 0 { cycle_bgm(step) }
-		if input.confirm { cycle_bgm(1) }
+	nav_list(&app.settings_focus, SETTINGS_ROWS)
+	step := input.left ? -1 : input.right ? 1 : 0
+	if step != 0 || input.confirm do settings_change(Settings_Row(app.settings_focus), step)
+}
+
+// A settings row stepped left / right (step -1 / 1), or activated with A or a click (step 0).
+settings_change :: proc(row: Settings_Row, step: int) {
+	fwd := step == 0 ? 1 : step
+	switch row {
+	case .Ui_Theme:    cycle_ui_theme(fwd)
+	case .Wallpaper:   cycle_bkg(fwd)
+	case .Music:       cycle_bgm(fwd)
+	case .Font:        cycle_font(fwd)
+	case .Online_Mode: set_online_mode(!app.settings.online_mode)
 	case .Volume:
-		if step != 0 {
-			set_volume(app.settings.volume + f32(step) * 0.05)
-			sfx_click()
-		}
-	case .Font:
-		if step != 0 { cycle_font(step) }
-		if input.confirm { cycle_font(1) }
-	case .Online_Mode:
-		if step != 0 || input.confirm { set_online_mode(!app.settings.online_mode) }
-	case .Ignored_Drives:
-		if input.confirm {
-			drives_menu_open()
-		}
-	case .Emulation:
-		if input.confirm {
-			emu_open(false)
-		}
-	case .Save_States:
-		if input.confirm {
-			open_dropdown(.Save_Mode)
-		}
-	case .Launch_Mode:
-		if input.confirm {
-			open_dropdown()
-		}
-	case .Updates:
-		if input.confirm {
+		if step == 0 do return
+		set_volume(app.settings.volume + f32(step) * 0.05)
+		sfx_click()
+	case .Ignored_Drives, .Emulation, .Save_States, .Launch_Mode, .Updates, .Desktop, .Restart:
+		if step != 0 do return // these only open / run something
+		#partial switch row {
+		case .Ignored_Drives: drives_menu_open()
+		case .Emulation:      emu_open(false)
+		case .Save_States:    open_dropdown(.Save_Mode)
+		case .Launch_Mode:    open_dropdown()
+		case .Restart:        restart_saber()
+		case .Updates:
 			update_check_start()
 			sfx_click()
-		}
-	case .Desktop:
-		if input.confirm {
+		case .Desktop:
 			open_desktop()
 			set_status("Started Explorer")
 			sfx_click()
-		}
-	case .Restart:
-		if input.confirm {
-			restart_saber()
 		}
 	}
 }
@@ -638,9 +547,7 @@ restart_saber :: proc() {
 
 set_volume :: proc(v: f32) {
 	app.settings.volume = clamp(f32(int(v * 100 + 0.5)) / 100, 0, 1)
-	if theme.has_music {
-		rl.SetMusicVolume(theme.music, app.settings.volume)
-	}
+	if theme.has_music do rl.SetMusicVolume(theme.music, app.settings.volume)
 	save_settings()
 }
 
@@ -694,23 +601,13 @@ dropdown_choose :: proc(i: int) {
 }
 
 handle_dropdown_input :: proc() {
-	n := dropdown_count()
-	if input.up {
-		app.dropdown_sel = (app.dropdown_sel - 1 + n) % n
-		sfx_click()
-	}
-	if input.down {
-		app.dropdown_sel = (app.dropdown_sel + 1) % n
-		sfx_click()
-	}
+	nav_list(&app.dropdown_sel, dropdown_count())
 	if input.cancel || input.power {
 		app.dropdown_open = false
 		sfx_back()
 		return
 	}
-	if input.confirm {
-		dropdown_choose(app.dropdown_sel)
-	}
+	if input.confirm do dropdown_choose(app.dropdown_sel)
 }
 
 choose_launch_mode :: proc(mode: Launch_Mode) {
@@ -728,12 +625,9 @@ choose_launch_mode :: proc(mode: Launch_Mode) {
 	app.settings.launch_mode = mode
 	save_settings()
 	switch mode {
-	case .Standalone:
-		set_status("Saber won't start on its own. Next sign-in uses the desktop.")
-	case .Autorun:
-		set_status("Saber will open after the next sign-in, on top of the desktop.")
-	case .Shell:
-		set_status("This account will boot straight into Saber after the next sign-in.")
+	case .Standalone: set_status("Saber won't start on its own. Next sign-in uses the desktop.")
+	case .Autorun: set_status("Saber will open after the next sign-in, on top of the desktop.")
+	case .Shell: set_status("This account will boot straight into Saber after the next sign-in.")
 	}
 	sfx_click()
 }
@@ -762,9 +656,7 @@ power_actions :: proc() -> []Power_Action {
 	@(static) shell := [?]Power_Action{.Quit_To_Desktop, .Log_Out, .Restart, .Shut_Down}
 	@(static) autorun := [?]Power_Action{.Cancel, .Quit, .Log_Out, .Restart, .Shut_Down}
 	@(static) standalone := [?]Power_Action{.Cancel, .Quit}
-	if app.in_shell {
-		return shell[:]
-	}
+	if app.in_shell do return shell[:]
 	return app.settings.launch_mode == .Standalone ? standalone[:] : autorun[:]
 }
 
@@ -776,25 +668,13 @@ power_labels :: proc() -> []string {
 		return labels[:2]
 	}
 	actions := power_actions()
-	for a, i in actions {
-		labels[i] = POWER_LABELS[a]
-	}
+	for a, i in actions do labels[i] = POWER_LABELS[a]
 	return labels[:len(actions)]
 }
 
 handle_power_input :: proc() {
-	if !app.power_open {
-		return
-	}
-	n := len(power_labels())
-	if input.up {
-		app.power_sel = (app.power_sel - 1 + n) % n
-		sfx_click()
-	}
-	if input.down {
-		app.power_sel = (app.power_sel + 1) % n
-		sfx_click()
-	}
+	if !app.power_open do return
+	nav_list(&app.power_sel, len(power_labels()))
 	if input.cancel && app.power_confirm != .Cancel {
 		cancel_power_confirm()
 		return
@@ -804,16 +684,12 @@ handle_power_input :: proc() {
 		sfx_back()
 		return
 	}
-	if input.confirm {
-		apply_power_choice()
-	}
+	if input.confirm do apply_power_choice()
 }
 
 cancel_power_confirm :: proc() {
 	for a, i in power_actions() {
-		if a == app.power_confirm {
-			app.power_sel = i
-		}
+		if a == app.power_confirm do app.power_sel = i
 	}
 	app.power_confirm = .Cancel
 	sfx_back()
@@ -830,9 +706,7 @@ apply_power_choice :: proc() {
 		return
 	}
 	actions := power_actions()
-	if app.power_sel < 0 || app.power_sel >= len(actions) {
-		return
-	}
+	if app.power_sel < 0 || app.power_sel >= len(actions) do return
 	action := actions[app.power_sel]
 	#partial switch action {
 	case .Log_Out, .Restart, .Shut_Down:
@@ -849,8 +723,7 @@ run_power_action :: proc(action: Power_Action) {
 	case .Cancel:
 		app.power_open = false
 		sfx_back()
-	case .Quit:
-		app.quit = true
+	case .Quit: app.quit = true
 	case .Quit_To_Desktop:
 		open_desktop()
 		app.quit = true
@@ -874,26 +747,19 @@ run_power_action :: proc(action: Power_Action) {
 
 grid_count :: proc(s: Screen) -> int {
 	#partial switch s {
-	case .Main:
-		return len(app.drive_games)
-	case .Library:
-		return len(app.library_games)
-	case .Movies:
-		return len(app.movies)
-	case .Apps:
-		return len(app.shell_apps)
+	case .Main:    return len(app.drive_games)
+	case .Library: return len(app.library_games)
+	case .Movies:  return len(app.movies)
+	case .Apps:    return len(app.shell_apps)
 	}
 	return 0
 }
 
 grid_selection :: proc(s: Screen) -> ^int {
 	#partial switch s {
-	case .Main:
-		return &app.selected_drive
-	case .Library:
-		return &app.selected_lib
-	case .Movies:
-		return &app.selected_movie
+	case .Main:    return &app.selected_drive
+	case .Library: return &app.selected_lib
+	case .Movies:  return &app.selected_movie
 	}
 	return &app.selected_app
 }
@@ -906,12 +772,9 @@ queue_activate :: proc(s: Screen, i: int) {
 }
 
 activate_item :: proc(s: Screen, i: int) {
-	if input_locked() || i < 0 || i >= grid_count(s) {
-		return
-	}
+	if input_locked() || i < 0 || i >= grid_count(s) do return
 	#partial switch s {
-	case .Main, .Library:
-		play_game(s == .Main ? &app.drive_games[i] : &app.library_games[i])
+	case .Main, .Library: play_game(s == .Main ? &app.drive_games[i] : &app.library_games[i])
 	case .Movies:
 		m := &app.movies[i]
 		if ok, err := movie_launch(m); !ok {

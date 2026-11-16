@@ -155,7 +155,7 @@ draw_initials_tile :: proc(name: string, art: rl.Rectangle) {
 		if len(initials) >= 2 do break
 		append(&initials, word[0])
 	}
-	text := strings.to_upper(string(initials[:]), context.temp_allocator)
+	text := ascii_upper(string(initials[:]), context.temp_allocator)
 	size := min(art.height * 0.4, 72)
 	draw_t_center(text, art.x + art.width * 0.5, art.y + (art.height - size) * 0.5, size, rl.WHITE)
 }
@@ -191,18 +191,8 @@ draw_app_store_detail :: proc(r: rl.Rectangle, idx: int) {
 			draw_t(line, x, y, 16, COL_TEXT)
 			y += 24
 		}
-		y += 8
-		draw_t_fit(store.message, x, y, iw, 15, COL_MUTED, false)
-		y += 34
-		for &repo, ri in store.repos {
-			if y > r.y + r.height - 40 do break
-			draw_t_fit(fmt.tprintf("%s/%s", repo.owner, repo.name), x, y, iw * 0.6, 16, COL_TEXT, false)
-			count := 0
-			for &p in store.plugins do if p.repo == ri && p.kind == .App do count += 1
-			note := repo.err != "" ? repo.err : store.pending > 0 ? "..." : fmt.tprintf("%d app(s)", count)
-			draw_t_fit(note, x + iw * 0.6, y, iw * 0.4, 16, repo.err != "" ? COL_ACCENT : COL_MUTED, false)
-			y += 26
-		}
+		draw_t_fit(store.message, x, y + 8, iw, 15, COL_MUTED, false)
+		draw_store_repos(.App, x, y + 42, iw, r.y + r.height)
 		return
 	}
 
@@ -228,10 +218,7 @@ draw_app_store_detail :: proc(r: rl.Rectangle, idx: int) {
 	tx := x + ICON + 18
 	tw := iw - ICON - 18
 	draw_t_fit(p.name, tx, y + 8, tw, 28, COL_TEXT, true)
-	byline := make([dynamic]string, context.temp_allocator)
-	if p.version != "" do append(&byline, fmt.tprintf("v%s", p.version))
-	if p.author != "" do append(&byline, fmt.tprintf("by %s", p.author))
-	draw_t_fit(strings.join(byline[:], "  ·  ", context.temp_allocator), tx, y + 46, tw, 15, COL_ACCENT, false)
+	draw_t_fit(byline(p.version, p.author), tx, y + 46, tw, 15, COL_ACCENT, false)
 	y += ICON + 20
 
 	if p.description != "" {
@@ -257,7 +244,7 @@ draw_app_store_detail :: proc(r: rl.Rectangle, idx: int) {
 	if !p.link && !linked do kv("Installs to", fmt.tprintf("APP/apps/%s", p.folder), x, &y, iw)
 	if iv := app_store_installed_version(p); iv != "" do kv("Installed", fmt.tprintf("v%s", iv), x, &y, iw)
 	else if app_store_installed(p) do kv("Installed", "Yes", x, &y, iw)
-	kv("Repo", fmt.tprintf("%s/%s", store.repos[p.repo].owner, store.repos[p.repo].name), x, &y, iw, COL_MUTED)
+	kv("Repo", store_repo_name(p.repo), x, &y, iw, COL_MUTED)
 	if p.state == .Failed && p.err != "" do kv("Error", p.err, x, &y, iw, COL_ACCENT)
 
 	// actions, anchored to the bottom of the panel
@@ -266,30 +253,18 @@ draw_app_store_detail :: proc(r: rl.Rectangle, idx: int) {
 	ay := max(y + 12, r.y + r.height - 24 - f32(rows) * (ACTION_ROW_H + 10) + 10)
 	ar := rl.Rectangle{x, ay, iw, ACTION_ROW_H}
 	label := app_store_action_label(p)
-	draw_panel(ar, true)
+	desc := p.link ? "Looks for it on this PC and adds it to APPS" : "Downloads the app and adds it to APPS"
+	if !online_enabled() do desc = "Needs Online Mode (Settings)"
+	if draw_action_row(ar, label, desc, true, p.state == .Installing ? "" : label) do store_install(idx)
 	if p.state == .Installing {
 		t := clamp(store_progress(p), 0, 1)
 		rl.DrawRectangleRounded({ar.x + 2, ar.y + ar.height - 6, (ar.width - 4) * t, 4}, 1, 6, COL_STORE_OK)
 	}
-	draw_t_fit(label, ar.x + 18, ar.y + 9, iw - 150, 18, COL_TEXT, true)
-	desc := p.link ? "Looks for it on this PC and adds it to APPS" : "Downloads the app and adds it to APPS"
-	if !online_enabled() do desc = "Needs Online Mode (Settings)"
-	draw_t_fit(desc, ar.x + 18, ar.y + 33, iw - 150, 14, COL_MUTED, false)
-	if p.state != .Installing {
-		draw_t_right(label, ar.x + ar.width - 44, ar.y + 19, 17, COL_TEXT)
-		draw_glyph("A", ar.x + ar.width - 26, ar.y + ar.height * 0.5)
-	}
-	if mouse_over(ar) && rl.IsMouseButtonPressed(.LEFT) do store_install(idx)
-
 	if can_remove {
-		rr := rl.Rectangle{x, ar.y + ACTION_ROW_H + 10, iw, ACTION_ROW_H}
 		armed := store.armed == idx
-		draw_panel(rr, armed)
-		draw_t_fit(armed ? "Press X again to remove" : "Remove", rr.x + 18, rr.y + 9, iw - 150, 18, armed ? COL_ACCENT : COL_TEXT, armed)
 		rm := linked ? fmt.tprintf("Removes the APPS card only (%s stays installed)", p.name) : fmt.tprintf("Deletes APP/apps/%s and its APPS card", p.folder)
-		draw_t_fit(rm, rr.x + 18, rr.y + 33, iw - 150, 14, COL_MUTED, false)
-		draw_t_right("Remove", rr.x + rr.width - 44, rr.y + 19, 17, COL_TEXT)
-		draw_glyph("X", rr.x + rr.width - 26, rr.y + rr.height * 0.5)
-		if mouse_over(rr) && rl.IsMouseButtonPressed(.LEFT) do app_store_remove_press(idx)
+		if draw_action_row({x, ar.y + ACTION_ROW_H + 10, iw, ACTION_ROW_H}, armed ? "Press X again to remove" : "Remove", rm, armed, "Remove", "X", armed ? COL_ACCENT : COL_TEXT) {
+			app_store_remove_press(idx)
+		}
 	}
 }

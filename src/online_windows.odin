@@ -61,9 +61,7 @@ http_fetch :: proc(r: ^Http_Request, body: ^[dynamic]u8) -> bool {
 	r.status = int(status)
 	length: u32
 	sz = u32(size_of(length))
-	if HttpQueryInfoW(h, HTTP_QUERY_CONTENT_LENGTH | HTTP_QUERY_FLAG_NUMBER, &length, &sz, nil) {
-		sync.atomic_store(&r.total, i64(length))
-	}
+	if HttpQueryInfoW(h, HTTP_QUERY_CONTENT_LENGTH | HTTP_QUERY_FLAG_NUMBER, &length, &sz, nil) do sync.atomic_store(&r.total, i64(length))
 
 	buf: [16 * 1024]u8
 	for {

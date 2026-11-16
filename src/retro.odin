@@ -157,7 +157,7 @@ Retro :: struct {
 	disc_present:    bool,
 	disc_serial:     u32,
 	disc_path_c:     cstring,
-	disc_iso:        bool, // the disc is served as .iso (cd_open_iso), not .cue/.bin
+	disc_iso:        bool, // the disc is served as .iso (cd_open(iso = true)), not .cue/.bin
 	disc_check_at:   f64,
 	rom_data:        []byte, // ROM games whose core wants the file in memory (need_fullpath = false)
 
@@ -338,7 +338,7 @@ psp_disc_game :: proc(letter: rune, label: string) -> (Game, bool) {
 	umd, err := os.read_entire_file(drive_path(letter, "UMD_DATA.BIN"), context.temp_allocator)
 	if err != nil do return {}, false
 	serial, _, _ := strings.partition(string(umd), "|")
-	serial = strings.to_upper(strings.trim_space(serial), context.temp_allocator)
+	serial = ascii_upper(strings.trim_space(serial), context.temp_allocator)
 	if len(serial) < 9 do return {}, false
 	title := ""
 	if sfo, e := os.read_entire_file(drive_path(letter, "PSP_GAME", "PARAM.SFO"), context.temp_allocator); e == nil {
@@ -386,7 +386,7 @@ serial_from_boot :: proc(v: string) -> string {
 	if i := strings.index_byte(s, ';'); i >= 0 do s = s[:i]
 	s, _ = strings.replace_all(strings.trim_space(s), "_", "-", context.temp_allocator)
 	s, _ = strings.replace_all(s, ".", "", context.temp_allocator)
-	return strings.to_upper(s, context.temp_allocator)
+	return ascii_upper(s, context.temp_allocator)
 }
 
 // Optical drives are polled on a background thread: while a freshly inserted disc spins
@@ -447,11 +447,12 @@ media_volume :: proc(letter: u8) -> (serial: u32, present: bool, ok: bool) {
 // ---------------------------------------------------------------------------
 // Session
 
+// APP/libretro/<parts...> (temp)
 retro_dir :: proc(parts: ..string) -> string {
 	all := make([dynamic]string, context.temp_allocator)
 	append(&all, app.exe_dir, "libretro")
 	append(&all, ..parts)
-	return path_join(all[:])
+	return tjoin(all[:])
 }
 
 // The core picked in the emulation menu wins; otherwise the first installed candidate.
@@ -495,7 +496,7 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 		if cue, dc_ok, dc_err = dc_prepare(g); !dc_ok do return false, dc_err
 	} else {
 		disc_ok: bool
-		cue, disc_ok = retro_open_disc(g.disc_letter, retro_iso)
+		cue, disc_ok = cd_open(g.disc_letter, retro_iso)
 		if !disc_ok do return false, fmt.tprintf("Couldn't read the disc in %c:", g.disc_letter)
 	}
 
@@ -646,15 +647,11 @@ game_suspended :: proc(g: ^Game) -> bool {
 	if g.suspend_checked == 0 || now - g.suspend_checked > 2 {
 		g.suspend_checked = now
 		key, _ := retro_save_key(g)
-		g.suspended = key != "" && os.exists(path_join({retro_dir("saves", RETRO_PLATFORM_DIR[g.platform]), fmt.tprintf("%s.suspend.state", key)}))
+		g.suspended = key != "" && os.exists(tjoin({retro_dir("saves", RETRO_PLATFORM_DIR[g.platform]), fmt.tprintf("%s.suspend.state", key)}))
 	}
 	return g.suspended
 }
 
-retro_open_disc :: proc(letter: u8, iso: bool) -> (string, bool) {
-	if iso do return cd_open_iso(letter)
-	return cd_open(letter)
-}
 
 retro_free :: proc() {
 	if retro.has_tex do rl.UnloadTexture(retro.tex)
@@ -750,9 +747,7 @@ retro_pace :: proc(next_frame: ^time.Tick) {
 		// Audio-driven: wait until the device has drained down to the target latency.
 		target := u64(raudio.rate * emu_audio_target_sec())
 		start := time.tick_now()
-		for retro_audio_buffered() > target && time.tick_since(start) < 100 * time.Millisecond {
-			sleep_ms(1)
-		}
+		for retro_audio_buffered() > target && time.tick_since(start) < 100 * time.Millisecond do sleep_ms(1)
 		next_frame^ = time.tick_now()
 		return
 	}
@@ -764,9 +759,7 @@ retro_pace :: proc(next_frame: ^time.Tick) {
 		next_frame^ = time.tick_now()
 		return
 	}
-	for time.tick_diff(time.tick_now(), next_frame^) > 2 * time.Millisecond {
-		sleep_ms(1)
-	}
+	for time.tick_diff(time.tick_now(), next_frame^) > 2 * time.Millisecond do sleep_ms(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -790,7 +783,7 @@ retro_watch_disc :: proc() {
 		retro_osd("Disc ejected")
 	}
 	if !present do return
-	cue, ok := retro_open_disc(retro.disc_letter, retro.disc_iso)
+	cue, ok := cd_open(retro.disc_letter, retro.disc_iso)
 	if !ok do return
 	defer delete(cue)
 	retro.disc_present = true
@@ -826,43 +819,39 @@ retro_video_refresh :: proc "c" (data: rawptr, width, height: c.uint, pitch: c.s
 	if data == nil do return // dupe: keep the previous frame
 	w, h := int(width), int(height)
 	resize(&retro.frame, w * h * 4)
-	src := ([^]u8)(data)
-	dst := retro.frame[:]
+	retro_convert_frame(([^]u8)(data), int(pitch), ([^]u32)(raw_data(retro.frame)), w, h, retro.pixel_format)
+	retro.frame_w, retro.frame_h = i32(w), i32(h)
+	retro.frame_dirty = true
+}
+
+// Every frame of a software core: its pixels to RGBA8 (u32 = 0xAABBGGRR), a whole pixel per
+// store. Sizes come from the frame itself, so no bounds checks in here.
+retro_convert_frame :: proc(src: [^]u8, pitch: int, dst: [^]u32, w, h: int, format: Pixel_Format) #no_bounds_check {
 	for y in 0 ..< h {
-		row := src[y * int(pitch):]
-		o := dst[y * w * 4:]
-		switch retro.pixel_format {
-		case .XRGB8888:
+		o := dst[y * w:]
+		switch format {
+		case .XRGB8888: // 0x--RRGGBB
+			px := ([^]u32)(src[y * pitch:])
 			for x in 0 ..< w {
-				o[x * 4 + 0] = row[x * 4 + 2]
-				o[x * 4 + 1] = row[x * 4 + 1]
-				o[x * 4 + 2] = row[x * 4 + 0]
-				o[x * 4 + 3] = 255
+				v := px[x]
+				o[x] = 0xFF000000 | (v & 0xFF) << 16 | v & 0xFF00 | (v >> 16) & 0xFF
 			}
 		case .RGB565:
-			px := ([^]u16)(row)
+			px := ([^]u16)(src[y * pitch:])
 			for x in 0 ..< w {
-				v := px[x]
-				r, g, b := u8(v >> 11), u8(v >> 5) & 63, u8(v) & 31
-				o[x * 4 + 0] = r << 3 | r >> 2
-				o[x * 4 + 1] = g << 2 | g >> 4
-				o[x * 4 + 2] = b << 3 | b >> 2
-				o[x * 4 + 3] = 255
+				v := u32(px[x])
+				r, g, b := v >> 11, (v >> 5) & 63, v & 31
+				o[x] = 0xFF000000 | (b << 3 | b >> 2) << 16 | (g << 2 | g >> 4) << 8 | (r << 3 | r >> 2)
 			}
 		case .RGB1555:
-			px := ([^]u16)(row)
+			px := ([^]u16)(src[y * pitch:])
 			for x in 0 ..< w {
-				v := px[x]
-				r, g, b := u8(v >> 10) & 31, u8(v >> 5) & 31, u8(v) & 31
-				o[x * 4 + 0] = r << 3 | r >> 2
-				o[x * 4 + 1] = g << 3 | g >> 2
-				o[x * 4 + 2] = b << 3 | b >> 2
-				o[x * 4 + 3] = 255
+				v := u32(px[x])
+				r, g, b := (v >> 10) & 31, (v >> 5) & 31, v & 31
+				o[x] = 0xFF000000 | (b << 3 | b >> 2) << 16 | (g << 3 | g >> 2) << 8 | (r << 3 | r >> 2)
 			}
 		}
 	}
-	retro.frame_w, retro.frame_h = i32(w), i32(h)
-	retro.frame_dirty = true
 }
 
 retro_upload_frame :: proc() {
@@ -932,9 +921,7 @@ retro_draw_frame :: proc(w, h: f32, tint: rl.Color) {
 		lines := int(abs(src.height))
 		if pitch := dst.height / f32(max(lines, 1)); pitch >= 2 {
 			col := rl.Color{0, 0, 0, emu.scanlines == 1 ? 55 : 120}
-			for i in 0 ..< lines {
-				rl.DrawRectangleRec({dst.x, dst.y + f32(i) * pitch + pitch * 0.5, dst.width, pitch * 0.5}, col)
-			}
+			for i in 0 ..< lines do rl.DrawRectangleRec({dst.x, dst.y + f32(i) * pitch + pitch * 0.5, dst.width, pitch * 0.5}, col)
 		}
 	}
 }
@@ -962,13 +949,44 @@ retro_draw_osd :: proc(w, h: f32) {
 // ---------------------------------------------------------------------------
 // In-game overlay (Home / Esc)
 
-// The paused game frame is what the overlay's glass panels see through.
-retro_capture_glass :: proc(w, h: f32) {
+// Overlays over the paused game (pause menu, save slots, emulation settings) run their own
+// frame loop. Input: false when the window is closing (the game quits). The press that
+// opened the overlay still reads as "pressed" on its first frame, so that one is dropped.
+retro_overlay_input :: proc(first: bool) -> bool {
+	if rl.WindowShouldClose() && !app.in_shell {
+		retro.quit = true
+		return false
+	}
+	input_poll()
+	if first {
+		eat_input()
+		guide_pressed(false)
+	}
+	return true
+}
+
+// B / Guide / Esc / F1 backs out of an overlay.
+retro_overlay_back :: proc() -> bool {
+	return guide_pressed(false) || input.cancel || rl.IsKeyPressed(.ESCAPE) || rl.IsKeyPressed(.F1)
+}
+
+// Starts an overlay frame: the frozen game picture, also the glass panels' backdrop.
+retro_overlay_begin :: proc() -> (w, h: f32) {
+	w, h = f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())
 	if glass_capture_begin(w, h) {
 		rl.ClearBackground(rl.BLACK)
 		retro_draw_frame(w, h, rl.WHITE)
 		glass_capture_end(.Wall)
 	}
+	rl.BeginDrawing()
+	rl.ClearBackground(rl.BLACK)
+	retro_draw_frame(w, h, rl.WHITE)
+	return
+}
+
+retro_overlay_end :: proc() {
+	rl.EndDrawing()
+	free_all(context.temp_allocator)
 }
 
 Pause_Item :: enum {
@@ -1024,16 +1042,13 @@ retro_pause_pressed :: proc() -> bool {
 retro_pause_menu :: proc(g: ^Game) {
 	// Overlay owns the pad: drop the last in-game snapshot so a core that
 	// samples input while we are paused cannot see the A/B that closes us.
-	retro.joy = {}
-	retro.analog = {}
-	retro.trigger = {}
+	retro.joy, retro.analog, retro.trigger = {}, {}, {}
 	sfx_click()
 	app.pause_sel = 0
 	app.pause_t = 0
 	sub := g.tags
 	items := retro_pause_items()
-	n := len(items)
-	labels := make([]string, n)
+	labels := make([]string, len(items))
 	defer delete(labels)
 	emu_item := 0
 	for it, i in items {
@@ -1045,28 +1060,11 @@ retro_pause_menu :: proc(g: ^Game) {
 	has_thumb := false
 	if retro.save_mode == .Quick do thumb, has_thumb = load_texture_smooth(retro_slot_path(0, "png"), THUMB_W)
 	defer if has_thumb do rl.UnloadTexture(thumb)
-	// The key/button that opened the overlay still reads as "pressed" until the next
-	// EndDrawing polls events, so ignore input on the first pass or it closes instantly.
 	first := true
 	for {
-		if rl.WindowShouldClose() && !app.in_shell {
-			retro.quit = true
-			return
-		}
-		input_poll()
-		if first {
-			eat_input()
-			guide_pressed(false)
-		}
-		if input.up {
-			app.pause_sel = (app.pause_sel + n - 1) % n
-			sfx_click()
-		}
-		if input.down {
-			app.pause_sel = (app.pause_sel + 1) % n
-			sfx_click()
-		}
-		if !first && (guide_pressed(false) || input.cancel || rl.IsKeyPressed(.ESCAPE) || rl.IsKeyPressed(.F1)) {
+		if !retro_overlay_input(first) do return
+		nav_list(&app.pause_sel, len(items))
+		if !first && retro_overlay_back() {
 			sfx_back()
 			return
 		}
@@ -1076,8 +1074,7 @@ retro_pause_menu :: proc(g: ^Game) {
 		}
 		if input.confirm {
 			switch items[app.pause_sel] {
-			case .Resume:
-				return
+			case .Resume: return
 			case .Quick_Save:
 				if retro_save_slot(0) {
 					sub = "Quick saved"
@@ -1125,14 +1122,9 @@ retro_pause_menu :: proc(g: ^Game) {
 			}
 		}
 
-		w := f32(rl.GetScreenWidth())
-		h := f32(rl.GetScreenHeight())
 		app.pause_t = smooth_to(app.pause_t, 1, 12)
-		retro_capture_glass(w, h)
-		rl.BeginDrawing()
-		rl.ClearBackground(rl.BLACK)
-		retro_draw_frame(w, h, rl.WHITE)
-		rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(150 * app.pause_t)))
+		w, h := retro_overlay_begin()
+		dim_screen(w, h, 150 * app.pause_t)
 		if clicked := draw_modal_menu(g.title, sub, labels, app.pause_sel, app.pause_t, w, h, true); clicked >= 0 {
 			app.pause_sel = clicked
 			input.confirm = true
@@ -1146,8 +1138,7 @@ retro_pause_menu :: proc(g: ^Game) {
 			draw_texture_contain(thumb, {r.x + 12, r.y + 44, tw, tw * 0.75})
 		}
 		draw_hints(w, h, []Hint{{"A", "Select"}, {"Y", "Settings"}, {"B", "Resume"}})
-		rl.EndDrawing()
-		free_all(context.temp_allocator)
+		retro_overlay_end()
 		first = false
 	}
 }
@@ -1202,20 +1193,9 @@ retro_slots_menu :: proc(game: ^Game) -> bool {
 	msg_buf: [128]u8
 	msg := "A: load (or save to an empty slot)    X: save"
 	t: f32
-	first := true
-	for {
-		if rl.WindowShouldClose() && !app.in_shell {
-			retro.quit = true
-			return false
-		}
-		input_poll()
-		if first {
-			eat_input()
-			guide_pressed(false)
-		}
-		w := f32(rl.GetScreenWidth())
-		h := f32(rl.GetScreenHeight())
-		grid := slot_grid(w, h)
+	for first := true; ; first = false {
+		if !retro_overlay_input(first) do return false
+		grid := slot_grid(f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight()))
 
 		moved := false
 		if input.left && sel % SLOT_COLS > 0 { sel -= 1; moved = true }
@@ -1225,19 +1205,15 @@ retro_slots_menu :: proc(game: ^Game) -> bool {
 		do_load, do_save := input.confirm, input.action
 		for i in 0 ..< SAVE_SLOTS {
 			if !mouse_over(slot_card(grid, i), true) do continue
-			if sel != i {
-				sel = i
-				moved = true
-				hover_enter(fmt.tprintf("slot-%d", i))
-			}
-			if rl.IsMouseButtonPressed(.LEFT) do do_load = true
+			if sel != i do moved = true
+			if list_row_mouse("slot", i, slot_card(grid, i), &sel) do do_load = true
 			if rl.IsMouseButtonPressed(.RIGHT) do do_save = true
 		}
 		if moved {
 			sfx_click()
 			overwrite = -1
 		}
-		if !first && (input.cancel || guide_pressed(false) || rl.IsKeyPressed(.ESCAPE) || rl.IsKeyPressed(.F1)) {
+		if !first && retro_overlay_back() {
 			sfx_back()
 			return false
 		}
@@ -1268,11 +1244,8 @@ retro_slots_menu :: proc(game: ^Game) -> bool {
 		}
 
 		t = smooth_to(t, 1, 12)
-		retro_capture_glass(w, h)
-		rl.BeginDrawing()
-		rl.ClearBackground(rl.BLACK)
-		retro_draw_frame(w, h, rl.WHITE)
-		rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(190 * t)))
+		w, h := retro_overlay_begin()
+		dim_screen(w, h, 190 * t)
 		draw_t_fit(fmt.tprintf("Save States - %s", game.title), grid.x, 40, w - grid.x * 2, 28, COL_TEXT, true)
 		draw_t(msg, grid.x, 80, 16, overwrite >= 0 ? COL_WARN : COL_MUTED)
 		for i in 0 ..< SAVE_SLOTS {
@@ -1296,9 +1269,7 @@ retro_slots_menu :: proc(game: ^Game) -> bool {
 			if i == sel do draw_focus_ring(r)
 		}
 		draw_hints(w, h, []Hint{{"A", slots[sel].used ? "Load" : "Save"}, {"X", "Save"}, {"B", "Back"}})
-		rl.EndDrawing()
-		free_all(context.temp_allocator)
-		first = false
+		retro_overlay_end()
 	}
 }
 
@@ -1363,9 +1334,7 @@ trigger_axis :: proc(v: f32) -> i16 {
 }
 
 retro_update_input :: proc() {
-	retro.joy = {}
-	retro.analog = {}
-	retro.trigger = {}
+	retro.joy, retro.analog, retro.trigger = {}, {}, {}
 
 	// Connected pads fill ports in order, whatever index raylib gave them.
 	port := 0
@@ -1448,9 +1417,7 @@ combo_guard_reset :: proc() {
 	for p in 0 ..< i32(MAX_PADS) {
 		g := &combo_guard[p]
 		g^ = {}
-		if rl.IsGamepadAvailable(p) {
-			g.eaten = rl.IsGamepadButtonDown(p, .MIDDLE_LEFT) || rl.IsGamepadButtonDown(p, .MIDDLE_RIGHT)
-		}
+		if rl.IsGamepadAvailable(p) do g.eaten = rl.IsGamepadButtonDown(p, .MIDDLE_LEFT) || rl.IsGamepadButtonDown(p, .MIDDLE_RIGHT)
 	}
 }
 
@@ -1627,9 +1594,7 @@ retro_sram_load :: proc() {
 }
 
 retro_sram_save :: proc() {
-	if sram := retro_sram(); sram != nil {
-		_ = os.write_entire_file(retro.sram_path, sram)
-	}
+	if sram := retro_sram(); sram != nil do _ = os.write_entire_file(retro.sram_path, sram)
 }
 
 // Writes the memory card shortly after the game changes it, so a crash never eats a save.
@@ -1670,14 +1635,7 @@ retro_load_overrides :: proc() {
 	for d in RETRO_OPTION_DEFAULTS do retro_set_override(d[0], d[1])
 	if data, err := os.read_entire_file(retro_dir("options.ini"), context.temp_allocator); err == nil {
 		it := string(data)
-		for line in strings.split_lines_iterator(&it) {
-			l := strings.trim_space(line)
-			if l == "" || l[0] == ';' || l[0] == '#' || l[0] == '[' do continue
-			k, _, v := strings.partition(l, "=")
-			k = strings.trim_space(k)
-			if k == "" do continue
-			retro_set_override(k, strings.trim(strings.trim_space(v), "\""))
-		}
+		for k, v in ini_next(&it) do if k != "" do retro_set_override(k, v)
 	}
 	for k, v in emu.core_opts do retro_set_override(k, v)
 }
@@ -1718,38 +1676,27 @@ retro_option :: proc(key: cstring) -> ^Retro_Option {
 retro_environment :: proc "c" (cmd: c.uint, data: rawptr) -> bool {
 	context = retro.ctx
 	switch cmd {
-	case ENV_GET_CAN_DUPE:
-		(^bool)(data)^ = true
-	case ENV_GET_OVERSCAN:
-		(^bool)(data)^ = false
+	case ENV_GET_CAN_DUPE: (^bool)(data)^ = true
+	case ENV_GET_OVERSCAN: (^bool)(data)^ = false
 	case ENV_SET_MESSAGE:
 		m := (^Retro_Message)(data)
 		retro_osd("%s", string(m.msg))
 	case ENV_SET_MESSAGE_EXT:
 		m := (^Retro_Message_Ext)(data)
 		if m.target != 2 do retro_osd("%s", string(m.msg)) // 2 = log only
-	case ENV_GET_MESSAGE_INTERFACE_VERSION:
-		(^c.uint)(data)^ = 1
-	case ENV_SHUTDOWN:
-		retro.quit = true
-	case ENV_GET_SYSTEM_DIRECTORY:
-		(^cstring)(data)^ = retro.system_dir_c
-	case ENV_GET_SAVE_DIRECTORY:
-		(^cstring)(data)^ = retro.saves_dir_c
-	case ENV_GET_CORE_ASSETS_DIRECTORY:
-		(^cstring)(data)^ = retro.assets_dir_c
-	case ENV_GET_LIBRETRO_PATH:
-		(^cstring)(data)^ = retro.core_path_c
+	case ENV_GET_MESSAGE_INTERFACE_VERSION: (^c.uint)(data)^ = 1
+	case ENV_SHUTDOWN: retro.quit = true
+	case ENV_GET_SYSTEM_DIRECTORY: (^cstring)(data)^ = retro.system_dir_c
+	case ENV_GET_SAVE_DIRECTORY: (^cstring)(data)^ = retro.saves_dir_c
+	case ENV_GET_CORE_ASSETS_DIRECTORY: (^cstring)(data)^ = retro.assets_dir_c
+	case ENV_GET_LIBRETRO_PATH: (^cstring)(data)^ = retro.core_path_c
 	case ENV_SET_PIXEL_FORMAT:
 		f := (^Pixel_Format)(data)^
 		if f < .RGB1555 || f > .RGB565 do return false
 		retro.pixel_format = f
-	case ENV_SET_HW_RENDER:
-		return retro_hw_request((^HW_Render_Callback)(data))
-	case ENV_GET_PREFERRED_HW_RENDER:
-		(^c.uint)(data)^ = c.uint(HW_Context_Type.OPENGL)
-	case ENV_GET_CURRENT_SOFTWARE_FRAMEBUFFER, ENV_GET_RUMBLE_INTERFACE:
-		return false
+	case ENV_SET_HW_RENDER: return retro_hw_request((^HW_Render_Callback)(data))
+	case ENV_GET_PREFERRED_HW_RENDER: (^c.uint)(data)^ = c.uint(HW_Context_Type.OPENGL)
+	case ENV_GET_CURRENT_SOFTWARE_FRAMEBUFFER, ENV_GET_RUMBLE_INTERFACE: return false
 	case ENV_GET_VFS_INTERFACE:
 		info := (^Vfs_Interface_Info)(data)
 		if info.required_interface_version > 3 do return false
@@ -1774,8 +1721,7 @@ retro_environment :: proc "c" (cmd: c.uint, data: rawptr) -> bool {
 	case ENV_GET_VARIABLE_UPDATE:
 		(^bool)(data)^ = retro.options_dirty
 		retro.options_dirty = false
-	case ENV_GET_CORE_OPTIONS_VERSION:
-		(^c.uint)(data)^ = 0 // makes cores fall back to SET_VARIABLES
+	case ENV_GET_CORE_OPTIONS_VERSION: (^c.uint)(data)^ = 0 // makes cores fall back to SET_VARIABLES
 	case ENV_SET_CORE_OPTIONS_DISPLAY, ENV_SET_CORE_OPTIONS_UPDATE_DISPLAY_CB:
 	case ENV_SET_DISK_CONTROL_INTERFACE:
 		retro.disk = {}
@@ -1784,15 +1730,11 @@ retro_environment :: proc "c" (cmd: c.uint, data: rawptr) -> bool {
 	case ENV_SET_DISK_CONTROL_EXT_INTERFACE:
 		retro.disk = (^Disk_Control)(data)^
 		retro.has_disk = true
-	case ENV_GET_DISK_CONTROL_INTERFACE_VERSION:
-		(^c.uint)(data)^ = 1
-	case ENV_GET_INPUT_DEVICE_CAPABILITIES:
-		(^u64)(data)^ = (1 << RETRO_DEVICE_JOYPAD) | (1 << RETRO_DEVICE_ANALOG)
+	case ENV_GET_DISK_CONTROL_INTERFACE_VERSION: (^c.uint)(data)^ = 1
+	case ENV_GET_INPUT_DEVICE_CAPABILITIES: (^u64)(data)^ = (1 << RETRO_DEVICE_JOYPAD) | (1 << RETRO_DEVICE_ANALOG)
 	case ENV_GET_INPUT_BITMASKS:
-	case ENV_GET_INPUT_MAX_USERS:
-		(^c.uint)(data)^ = 4
-	case ENV_GET_LOG_INTERFACE:
-		(^rawptr)(data)^ = rawptr(retro_log)
+	case ENV_GET_INPUT_MAX_USERS: (^c.uint)(data)^ = 4
+	case ENV_GET_LOG_INTERFACE: (^rawptr)(data)^ = rawptr(retro_log)
 	case ENV_GET_PERF_INTERFACE:
 		(^Perf_Callback)(data)^ = {
 			get_time_usec    = retro_perf_time_usec,
@@ -1817,24 +1759,18 @@ retro_environment :: proc "c" (cmd: c.uint, data: rawptr) -> bool {
 		retro.av.geometry.base_width = g.base_width
 		retro.av.geometry.base_height = g.base_height
 		retro.av.geometry.aspect_ratio = g.aspect_ratio
-	case ENV_GET_USERNAME:
-		(^cstring)(data)^ = "Player"
-	case ENV_GET_LANGUAGE:
-		(^c.uint)(data)^ = 0
+	case ENV_GET_USERNAME: (^cstring)(data)^ = "Player"
+	case ENV_GET_LANGUAGE: (^c.uint)(data)^ = 0
 	case ENV_GET_AUDIO_VIDEO_ENABLE:
 		if data != nil do (^c.int)(data)^ = 3
-	case ENV_GET_FASTFORWARDING:
-		(^bool)(data)^ = false
-	case ENV_GET_TARGET_REFRESH_RATE:
-		(^f32)(data)^ = f32(retro.av.timing.fps)
-	case ENV_GET_THROTTLE_STATE:
-		(^Throttle_State)(data)^ = {mode = 0, rate = f32(retro.av.timing.fps)}
+	case ENV_GET_FASTFORWARDING: (^bool)(data)^ = false
+	case ENV_GET_TARGET_REFRESH_RATE: (^f32)(data)^ = f32(retro.av.timing.fps)
+	case ENV_GET_THROTTLE_STATE: (^Throttle_State)(data)^ = {mode = 0, rate = f32(retro.av.timing.fps)}
 	case ENV_GET_SAVESTATE_CONTEXT:
 		if data != nil do (^c.int)(data)^ = 0
 	case ENV_GET_JIT_CAPABLE:
 		if data != nil do (^bool)(data)^ = true
-	case ENV_SET_FRAME_TIME_CALLBACK:
-		retro.frame_time_cb = (^Frame_Time_Callback)(data)^
+	case ENV_SET_FRAME_TIME_CALLBACK: retro.frame_time_cb = (^Frame_Time_Callback)(data)^
 	case ENV_SET_CONTROLLER_INFO:
 		infos := ([^]Controller_Info)(data)
 		n := 0

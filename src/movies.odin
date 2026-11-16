@@ -22,24 +22,10 @@ movie_player_label: string
 
 scan_movies :: proc(out: ^[dynamic]Movie, movies_dir: string) {
 	_, _, movie_player_label, _ = movie_player()
-	if !os.exists(movies_dir) {
-		return
-	}
-	fis, err := os.read_all_directory_by_path(movies_dir, context.allocator)
-	if err != nil {
-		return
-	}
-	defer os.file_info_slice_delete(fis, context.allocator)
-
+	fis, _ := list_dir(movies_dir)
 	for fi in fis {
-		if fi.type == .Directory {
-			continue
-		}
 		base := fi.name if fi.name != "" else filepath.base(fi.fullpath)
-		ext := strings.to_lower(filepath.ext(base), context.temp_allocator)
-		if !is_video_ext(ext) {
-			continue
-		}
+		if fi.type == .Directory || !has_ext(base, ..VIDEO_EXTS) do continue
 		m: Movie
 		m.path = strings.clone(fi.fullpath)
 		m.title = strings.clone(filepath.stem(base))
@@ -49,113 +35,61 @@ scan_movies :: proc(out: ^[dynamic]Movie, movies_dir: string) {
 	}
 }
 
-is_video_ext :: proc(ext: string) -> bool {
-	for e in VIDEO_EXTS {
-		if ext == e {
-			return true
-		}
-	}
-	return false
-}
 
 thumbs_dir :: proc(movies_dir: string) -> string {
-	dir := path_join({movies_dir, "_thumbs"})
+	dir := tjoin({movies_dir, "_thumbs"})
 	_ = os.make_directory(dir)
 	return dir
 }
 
 file_mtime :: proc(path: string) -> (time.Time, bool) {
 	fi, err := os.stat(path, context.temp_allocator)
-	if err != nil {
-		return {}, false
-	}
-	return fi.modification_time, true
+	return fi.modification_time, err == nil
 }
 
+// The cached thumbnail is at least as new as the video.
 cache_is_fresh :: proc(cache_path, video_path: string) -> bool {
-	if !os.exists(cache_path) {
-		return false
-	}
 	ct, cok := file_mtime(cache_path)
+	if !cok do return false
 	vt, vok := file_mtime(video_path)
-	if !cok || !vok {
-		return os.exists(cache_path)
-	}
-	return time.time_to_unix_nano(ct) >= time.time_to_unix_nano(vt)
+	return !vok || time.time_to_unix_nano(ct) >= time.time_to_unix_nano(vt)
 }
 
+// <stem>.png/.jpg/... beside the video, else a frame grabbed into _thumbs (cached).
 resolve_movie_thumb :: proc(movies_dir, stem, video_path: string) -> string {
 	for ext in ([]string{".png", ".jpg", ".jpeg", ".webp"}) {
-		cand := path_join({movies_dir, fmt.tprintf("%s%s", stem, ext)})
-		if os.exists(cand) {
-			return cand
-		}
+		if cand := tjoin({movies_dir, fmt.tprintf("%s%s", stem, ext)}); os.exists(cand) do return strings.clone(cand)
 	}
 	cache := path_join({thumbs_dir(movies_dir), fmt.tprintf("%s.png", stem)})
-	if cache_is_fresh(cache, video_path) {
-		return cache
-	}
-	if extract_movie_thumb(video_path, cache) || os.exists(cache) {
-		return cache
-	}
+	if cache_is_fresh(cache, video_path) || extract_movie_thumb(video_path, cache) || os.exists(cache) do return cache
 	// Empty marker: rescans skip the slow extractors (delete _thumbs to retry).
 	_ = os.write_entire_file(cache, []u8{})
+	delete(cache)
 	return ""
 }
 
 movie_load_thumb :: proc(m: ^Movie) {
-	if m.thumb_file == "" {
-		return
-	}
-	if fi, err := os.stat(m.thumb_file, context.temp_allocator); err != nil || fi.size == 0 {
-		return
-	}
+	if m.thumb_file == "" do return
+	if fi, err := os.stat(m.thumb_file, context.temp_allocator); err != nil || fi.size == 0 do return
 	m.thumb, m.has_thumb = load_texture_smooth(m.thumb_file)
 }
 
 extract_movie_thumb :: proc(video_path, dest_png: string) -> bool {
-	if extract_thumb_shell(video_path, dest_png) {
-		return true
-	}
-	if extract_thumb_ffmpeg(video_path, dest_png) {
-		return true
-	}
-	if extract_thumb_vlc(video_path, dest_png) {
-		return true
+	return extract_thumb_shell(video_path, dest_png) || extract_thumb_ffmpeg(video_path, dest_png) || extract_thumb_vlc(video_path, dest_png)
+}
+
+extract_thumb_ffmpeg :: proc(video_path, dest_png: string) -> bool {
+	exe := find_ffmpeg_exe() or_return
+	// 8 s in first; short clips: 1 s in
+	for seek in ([2]string{"-ss 8", "-ss 1"}) {
+		cmd := fmt.tprintf("%s -y %s -i %s -frames:v 1 -vf scale=640:-2 -q:v 4 %s", quote_arg(exe), seek, quote_arg(video_path), quote_arg(dest_png))
+		if run_hidden_process(exe, cmd, 20000) do return os.exists(dest_png)
 	}
 	return false
 }
 
-extract_thumb_ffmpeg :: proc(video_path, dest_png: string) -> bool {
-	exe, found := find_ffmpeg_exe()
-	if !found {
-		return false
-	}
-	cmd := fmt.tprintf(
-		"%s -y -ss 8 -i %s -frames:v 1 -vf scale=640:-2 -q:v 4 %s",
-		quote_arg(exe),
-		quote_arg(video_path),
-		quote_arg(dest_png),
-	)
-	if !run_hidden_process(exe, cmd, 20000) {
-		cmd = fmt.tprintf(
-			"%s -y -ss 1 -i %s -frames:v 1 -vf scale=640:-2 %s",
-			quote_arg(exe),
-			quote_arg(video_path),
-			quote_arg(dest_png),
-		)
-		if !run_hidden_process(exe, cmd, 20000) {
-			return false
-		}
-	}
-	return os.exists(dest_png)
-}
-
 extract_thumb_vlc :: proc(video_path, dest_png: string) -> bool {
-	exe, found := find_vlc_exe()
-	if !found {
-		return false
-	}
+	exe := find_vlc_exe() or_return
 	out_dir := filepath.dir(dest_png)
 	cmd := fmt.tprintf(
 		"%s -I dummy --dummy-quiet --no-audio --no-video-title-show --video-filter=scene --scene-format=png --scene-ratio=100000 --scene-prefix=thumb --scene-replace --scene-path=%s --start-time=8 --stop-time=9 --run-time=1 --play-and-exit %s",
@@ -164,48 +98,26 @@ extract_thumb_vlc :: proc(video_path, dest_png: string) -> bool {
 		quote_arg(video_path),
 	)
 	_ = run_hidden_process(exe, cmd, 25000)
-	cands := []string{
-		path_join({out_dir, "thumb.png"}),
-		path_join({out_dir, "thumb00001.png"}),
-		path_join({out_dir, "thumb00000.png"}),
-	}
-	for c in cands {
-		if os.exists(c) {
-			if c != dest_png {
-				_ = os.rename(c, dest_png)
-			}
-			return os.exists(dest_png)
+	for name in ([]string{"thumb.png", "thumb00001.png", "thumb00000.png"}) {
+		if c := tjoin({out_dir, name}); os.exists(c) {
+			if c != dest_png do _ = os.rename(c, dest_png)
+			break
 		}
 	}
 	return os.exists(dest_png)
 }
 
-movie_unload_thumb :: proc(m: ^Movie) {
-	if m.has_thumb {
-		rl.UnloadTexture(m.thumb)
-		m.has_thumb = false
-	}
-}
-
 unload_all_movies :: proc() {
-	for &m in app.movies {
-		movie_unload_thumb(&m)
-	}
+	for &m in app.movies do unload_tex(&m.thumb, &m.has_thumb)
 }
 
 movie_launch :: proc(m: ^Movie) -> (ok: bool, err: string) {
-	if m == nil || m.path == "" || !os.exists(m.path) {
-		return false, "Movie file missing"
-	}
+	if m == nil || m.path == "" || !os.exists(m.path) do return false, "Movie file missing"
 	exe, prefix, player_name, found := movie_player()
-	if !found {
-		return false, MOVIE_PLAYER_HINT
-	}
+	if !found do return false, MOVIE_PLAYER_HINT
 	cmd := fmt.tprintf("%s %s %s", quote_arg(exe), prefix, quote_arg(m.path))
 	pi, created := spawn_process(exe, cmd, filepath.dir(exe))
-	if !created {
-		return false, fmt.tprintf("Could not start %s", player_name)
-	}
+	if !created do return false, fmt.tprintf("Could not start %s", player_name)
 	run_session(pi, .Movie, m.title, filepath.base(exe))
 	return true, ""
 }

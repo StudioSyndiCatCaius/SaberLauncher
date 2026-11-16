@@ -17,49 +17,31 @@ Shell_App :: struct {
 	has_icon:  bool,
 }
 
-scan_apps :: proc(out: ^[dynamic]Shell_App, apps_dir: string) {
-	if !os.exists(apps_dir) {
-		return
-	}
-	fis, err := os.read_all_directory_by_path(apps_dir, context.allocator)
-	if err != nil {
-		return
-	}
-	defer os.file_info_slice_delete(fis, context.allocator)
+// Bumped whenever APP/apps is scanned (installs, removals, rescans): cached reads of its
+// files (app_store_toml_get) are redone.
+apps_gen: int
 
+scan_apps :: proc(out: ^[dynamic]Shell_App, apps_dir: string) {
+	apps_gen += 1
 	// APP/apps/<Name>.toml, or one folder down: APP/apps/<Name>/<Name>.toml (store installs)
-	for fi in fis {
-		if fi.type == .Directory {
-			if !strings.has_suffix(fi.name, ".part") do scan_apps_in(out, fi.fullpath)
-			continue
-		}
-		base := fi.name if fi.name != "" else filepath.base(fi.fullpath)
-		ext := strings.to_lower(filepath.ext(base), context.temp_allocator)
-		if ext != ".toml" {
-			continue
-		}
-		if a, ok := app_from_toml(fi.fullpath, apps_dir); ok {
-			append(out, a)
-		}
-	}
+	scan_apps_in(out, apps_dir, true)
 }
 
-// .toml files directly in one app folder.
-scan_apps_in :: proc(out: ^[dynamic]Shell_App, dir: string) {
-	fis, err := os.read_all_directory_by_path(dir, context.allocator)
-	if err != nil do return
-	defer os.file_info_slice_delete(fis, context.allocator)
+// .toml files in one folder (and with `nested`, in its subfolders).
+scan_apps_in :: proc(out: ^[dynamic]Shell_App, dir: string, nested := false) {
+	fis, _ := list_dir(dir)
 	for fi in fis {
-		if fi.type == .Directory || !strings.equal_fold(filepath.ext(fi.name), ".toml") do continue
-		if a, ok := app_from_toml(fi.fullpath, dir); ok do append(out, a)
+		if fi.type == .Directory {
+			if nested && !strings.has_suffix(fi.name, ".part") do scan_apps_in(out, fi.fullpath)
+		} else if has_ext(fi.name, ".toml") {
+			if a, ok := app_from_toml(fi.fullpath, dir); ok do append(out, a)
+		}
 	}
 }
 
 app_from_toml :: proc(toml_path, apps_dir: string) -> (Shell_App, bool) {
 	data, err := os.read_entire_file(toml_path, context.allocator)
-	if err != nil {
-		return {}, false
-	}
+	if err != nil do return {}, false
 	defer delete(data)
 	text := string(data)
 
@@ -67,57 +49,25 @@ app_from_toml :: proc(toml_path, apps_dir: string) -> (Shell_App, bool) {
 	a.toml_file = strings.clone(toml_path)
 	a.dir = strings.clone(apps_dir)
 	stem := filepath.stem(toml_path)
-	if v, found := ini_get(text, "name"); found && v != "" {
-		a.title = strings.clone(v)
-	} else {
-		a.title = strings.clone(stem)
-	}
-	if v, found := ini_get(text, "exe"); found && v != "" {
-		a.exe = strings.clone(v)
-	} else if v, found := ini_get(text, "path"); found {
-		a.exe = strings.clone(v)
-	}
-	if v, found := ini_get(text, "exe_args"); found {
-		a.args = strings.clone(v)
-	} else if v, found := ini_get(text, "launch_args"); found {
-		a.args = strings.clone(v)
-	} else if v, found := ini_get(text, "args"); found {
-		a.args = strings.clone(v)
-	}
-
-	img := ""
-	if v, found := ini_get(text, "img"); found && v != "" {
-		img = v
-	}
+	if !ini_str(text, "name", &a.title, nonempty = true) do a.title = strings.clone(stem)
+	_ = ini_str(text, "exe", &a.exe, nonempty = true) || ini_str(text, "path", &a.exe)
+	_ = ini_str(text, "exe_args", &a.args) || ini_str(text, "launch_args", &a.args) || ini_str(text, "args", &a.args)
+	img, _ := ini_get(text, "img")
 	a.img_file = resolve_app_image(apps_dir, stem, img)
 	app_load_icon(&a)
 	return a, true
 }
 
+// img= next to the .toml, else relative to the exe; without one, <stem>.png/.jpg/... beside it.
 resolve_app_image :: proc(apps_dir, stem, img: string) -> string {
-	if strings.trim_space(img) != "" {
-		p := strings.trim_space(img)
-		if strings.has_prefix(p, "./") || strings.has_prefix(p, ".\\") {
-			p = p[2:]
-		}
-		if filepath.is_abs(p) {
-			return strings.clone(p)
-		}
-		local := path_join({apps_dir, p}) // next to the .toml
-		if os.exists(local) {
-			return local
-		}
-		joined := path_join({app.exe_dir, p})
-		if os.exists(joined) {
-			return joined
-		}
-		return local
+	if p := strings.trim_space(img); p != "" {
+		if strings.has_prefix(p, "./") || strings.has_prefix(p, ".\\") do p = p[2:]
+		if filepath.is_abs(p) do return strings.clone(p)
+		if from_exe := tjoin({app.exe_dir, p}); !os.exists(tjoin({apps_dir, p})) && os.exists(from_exe) do return strings.clone(from_exe)
+		return path_join({apps_dir, p})
 	}
 	for ext in ([]string{".png", ".jpg", ".jpeg", ".webp"}) {
-		cand := path_join({apps_dir, fmt.tprintf("%s%s", stem, ext)})
-		if os.exists(cand) {
-			return cand
-		}
+		if cand := tjoin({apps_dir, fmt.tprintf("%s%s", stem, ext)}); os.exists(cand) do return strings.clone(cand)
 	}
 	return ""
 }
@@ -126,63 +76,38 @@ app_load_icon :: proc(a: ^Shell_App) {
 	a.icon, a.has_icon = load_texture_smooth(a.img_file)
 }
 
-app_unload_icon :: proc(a: ^Shell_App) {
-	if a.has_icon {
-		rl.UnloadTexture(a.icon)
-		a.has_icon = false
-	}
-}
-
 unload_all_apps :: proc() {
-	for &a in app.shell_apps {
-		app_unload_icon(&a)
-	}
+	for &a in app.shell_apps do unload_tex(&a.icon, &a.has_icon)
 }
 
+// exe=: absolute, or relative to the .toml's folder, APP/apps, then the exe's folder (temp).
 resolve_app_exe :: proc(a: ^Shell_App) -> (string, bool) {
 	exe := strings.trim_space(a.exe)
-	if exe == "" {
-		return "", false
-	}
-	if filepath.is_abs(exe) {
-		return exe, os.exists(exe)
-	}
-	if a.dir != "" {
-		if from_dir := path_join({a.dir, exe}); os.exists(from_dir) do return from_dir, true
-	}
-	from_apps := path_join({app.apps_dir, exe})
-	if os.exists(from_apps) {
-		return from_apps, true
-	}
-	from_exe := path_join({app.exe_dir, exe})
-	if os.exists(from_exe) {
-		return from_exe, true
+	if exe == "" do return "", false
+	if filepath.is_abs(exe) do return exe, os.exists(exe)
+	for dir in ([3]string{a.dir, app.apps_dir, app.exe_dir}) {
+		if dir == "" do continue
+		if p := tjoin({dir, exe}); os.exists(p) do return p, true
 	}
 	return exe, os.exists(exe)
 }
 
 is_steam_exe :: proc(path: string) -> bool {
 	base := filepath.base(path)
-	return strings.equal_fold(base, "steam.exe") || base == "steam"
+	return eq_fold(base, "steam.exe") || base == "steam"
 }
 
 shell_app_launch :: proc(a: ^Shell_App) -> (ok: bool, detached: bool, err: string) {
 	exe_path, has := resolve_app_exe(a)
 	if !has {
-		if strings.trim_space(a.exe) == "" {
-			return false, false, fmt.tprintf("No exe set for %s — edit APP/apps .toml", a.title)
-		}
+		if strings.trim_space(a.exe) == "" do return false, false, fmt.tprintf("No exe set for %s — edit APP/apps .toml", a.title)
 		return false, false, fmt.tprintf("Missing exe: %s", a.exe)
 	}
 
 	cmd := exe_command(exe_path, strings.trim_space(a.args))
 	pi, created := spawn_process(exe_path, cmd, filepath.dir(exe_path))
-	if !created {
-		return false, false, fmt.tprintf("Could not launch %s", a.title)
-	}
-	if is_steam_exe(exe_path) {
-		open_steam_big_picture()
-	}
+	if !created do return false, false, fmt.tprintf("Could not launch %s", a.title)
+	if is_steam_exe(exe_path) do open_steam_big_picture()
 	_, detached = run_session(pi, .App, a.title, filepath.base(exe_path))
 	return true, detached, ""
 }
@@ -193,7 +118,7 @@ shell_app_launch :: proc(a: ^Shell_App) -> (ok: bool, detached: bool, err: strin
 AUTOSTART_DONE_VALUE :: "SaberAutostartDone"
 
 app_is_autostart :: proc(a: ^Shell_App) -> bool {
-	return app.settings.autostart_app != "" && strings.equal_fold(app.settings.autostart_app, filepath.base(a.toml_file))
+	return app.settings.autostart_app != "" && eq_fold(app.settings.autostart_app, filepath.base(a.toml_file))
 }
 
 toggle_autostart_app :: proc(a: ^Shell_App) {
@@ -241,7 +166,7 @@ apps_rescan :: proc() {
 	}
 	clear(&app.shell_apps)
 	scan_apps(&app.shell_apps, app.apps_dir)
-	app.selected_app = clamp(app.selected_app, 0, max(0, len(app.shell_apps) - 1))
+	clamp_selection(.Apps)
 }
 
 // Y on APPS flips between the grid and GET APPS (the app store).
@@ -322,13 +247,8 @@ app_menu_input :: proc() {
 		return
 	}
 	rows := app_menu_rows(&app.shell_apps[i])
-	n := len(rows)
-	app_menu.sel = clamp(app_menu.sel, 0, n - 1)
-	if input.up || input.down {
-		app_menu.sel = (app_menu.sel + (input.up ? n - 1 : 1)) % n
-		app_menu.armed = false
-		sfx_click()
-	}
+	app_menu.sel = clamp(app_menu.sel, 0, len(rows) - 1)
+	if nav_list(&app_menu.sel, len(rows)) do app_menu.armed = false
 	if input.cancel || input.action || input.power {
 		app_menu.open = false
 		sfx_back()
@@ -343,8 +263,7 @@ app_menu_choose :: proc(i: int, row: App_Menu_Row) {
 	case .Open:
 		app_menu.open = false
 		app.pending_open = [2]int{int(Screen.Apps), i}
-	case .Autostart:
-		toggle_autostart_app(a)
+	case .Autostart: toggle_autostart_app(a)
 	case .Delete, .Uninstall:
 		if !app_menu.armed {
 			app_menu.armed = true
@@ -377,8 +296,7 @@ app_menu_label :: proc(a: ^Shell_App, row: App_Menu_Row, selected: bool) -> stri
 }
 
 draw_app_menu :: proc(w, h: f32) {
-	app_menu.t = smooth_to(app_menu.t, app_menu.open ? 1 : 0, 16)
-	if app_menu.t < 0.02 && !app_menu.open do return
+	if !modal_fade(&app_menu.t, app_menu.open) do return
 	i := app_menu_index()
 	if i < 0 {
 		app_menu.open = false

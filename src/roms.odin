@@ -40,25 +40,21 @@ rom_crc_cache: map[string]string
 scan_roms :: proc(out: ^[dynamic]Game, root, label: string) {
 	found := 0
 	scan_rom_dir(out, root, label, &found)
-	fis, err := os.read_all_directory_by_path(root, context.allocator)
-	if err != nil do return
-	defer os.file_info_slice_delete(fis, context.allocator)
+	fis, _ := list_dir(root)
 	for fi in fis {
 		if fi.type != .Directory || fi.name == "_Saber" || strings.has_prefix(fi.name, "$") do continue
 		if fi.name == "System Volume Information" do continue
-		if os.exists(path_join({fi.fullpath, "_Saber"})) do continue // a _Saber game's own files
+		if os.exists(tjoin({fi.fullpath, "_Saber"})) do continue // a _Saber game's own files
 		scan_rom_dir(out, fi.fullpath, label, &found)
 	}
 }
 
 scan_rom_dir :: proc(out: ^[dynamic]Game, dir, label: string, found: ^int) {
-	fis, err := os.read_all_directory_by_path(dir, context.allocator)
-	if err != nil do return
-	defer os.file_info_slice_delete(fis, context.allocator)
+	fis, _ := list_dir(dir)
 	for fi in fis {
 		if found^ >= ROM_MAX_PER_DRIVE do return
 		if fi.type != .Regular do continue
-		ext := strings.to_lower(filepath.ext(fi.name), context.temp_allocator)
+		ext := ext_lower(fi.name)
 		if ext == ".cue" {
 			if g, ok := cue_game(fi, label); ok {
 				append(out, g)
@@ -171,12 +167,13 @@ md_has_sega_header :: proc(path: string) -> bool {
 	return n == len(buf) && strings.contains(string(buf[:]), "SEGA")
 }
 
-// serial: the image's own ID (GameCube / Wii), else the ROM's CRC32 or file name.
-rom_game :: proc(fi: os.File_Info, label: string, platform: Retro_Platform, serial := "") -> Game {
+// serial: the image's own ID (GameCube / Wii) or disc serial, else the ROM's CRC32 (`hash`) or
+// file name.
+rom_game :: proc(fi: os.File_Info, label: string, platform: Retro_Platform, serial := "", hash := true) -> Game {
 	g: Game
 	g.rom_path = strings.clone(fi.fullpath)
 	g.rom_name = strings.clone(filepath.stem(fi.name))
-	g.rom_crc = strings.clone(rom_crc(fi))
+	if hash do g.rom_crc = strings.clone(rom_crc(fi))
 	g.root = strings.clone(g.rom_path)
 	g.drive_label = strings.clone(label)
 	g.from_drive = true
@@ -192,18 +189,7 @@ rom_game :: proc(fi: os.File_Info, label: string, platform: Retro_Platform, seri
 cue_game :: proc(fi: os.File_Info, label: string) -> (Game, bool) {
 	serial, ok := cue_ps1_serial(fi.fullpath)
 	if !ok do return {}, false
-	g: Game
-	g.rom_path = strings.clone(fi.fullpath)
-	g.rom_name = strings.clone(filepath.stem(fi.name))
-	g.root = strings.clone(g.rom_path)
-	g.drive_label = strings.clone(label)
-	g.from_drive = true
-	g.platform = .PS1
-	g.meta_platform = .PS1
-	g.disc_serial = strings.clone(serial)
-	g.title = strings.clone(rom_display_title(g.rom_name))
-	plugins_apply(&g)
-	return g, true
+	return rom_game(fi, label, .PS1, serial, hash = false), true
 }
 
 Cue_Bin :: struct {
@@ -222,7 +208,7 @@ cue_ps1_serial :: proc(cue_path: string) -> (serial: string, ok: bool) {
 	mode: string
 	it := string(data)
 	for line in strings.split_lines_iterator(&it) {
-		up := strings.to_upper(strings.trim_space(line), context.temp_allocator)
+		up := ascii_upper(strings.trim_space(line), context.temp_allocator)
 		if strings.has_prefix(up, "TRACK ") {
 			fields := strings.fields(up, context.temp_allocator)
 			if len(fields) >= 3 do mode = fields[2]
@@ -236,7 +222,7 @@ cue_ps1_serial :: proc(cue_path: string) -> (serial: string, ok: bool) {
 	case "MODE1/2048", "MODE2/2048": cb.sector, cb.user = 2048, 0
 	case: return
 	}
-	bin_path := filepath.is_abs(bin_name) ? bin_name : path_join({filepath.dir(cue_path), bin_name})
+	bin_path := filepath.is_abs(bin_name) ? bin_name : tjoin({filepath.dir(cue_path), bin_name})
 	f, ferr := os.open(bin_path)
 	if ferr != nil do return
 	defer os.close(f)
@@ -251,7 +237,7 @@ cue_ps1_serial :: proc(cue_path: string) -> (serial: string, ok: bool) {
 		}
 		return true
 	}
-	cnf, found := iso_find_root_file(read, &cb, "SYSTEM.CNF", 64 * 1024, context.temp_allocator)
+	cnf, found := iso_find_file(read, &cb, "SYSTEM.CNF", 64 * 1024, context.temp_allocator)
 	if !found do return
 	text := string(cnf)
 	for line in strings.split_lines_iterator(&text) {
@@ -267,7 +253,7 @@ cue_file_names :: proc(cue_text: string) -> []string {
 	it := cue_text
 	for line in strings.split_lines_iterator(&it) {
 		l := strings.trim_space(line)
-		if !strings.has_prefix(strings.to_upper(l, context.temp_allocator), "FILE ") do continue
+		if !strings.has_prefix(ascii_upper(l, context.temp_allocator), "FILE ") do continue
 		if a := strings.index_byte(l, '"'); a >= 0 {
 			if b := strings.last_index_byte(l, '"'); b > a do append(&names, l[a + 1:b])
 		} else {
@@ -287,8 +273,7 @@ rom_crc :: proc(fi: os.File_Info) -> string {
 	defer delete(data)
 	body := data
 	// SNES copier header: No-Intro hashes the ROM without it
-	ext := strings.to_lower(filepath.ext(fi.name), context.temp_allocator)
-	if (ext == ".sfc" || ext == ".smc") && len(body) % 1024 == 512 do body = body[512:]
+	if has_ext(fi.name, ".sfc", ".smc") && len(body) % 1024 == 512 do body = body[512:]
 	v := fmt.aprintf("%08X", hash.crc32(body))
 	rom_crc_cache[strings.clone(key)] = v
 	return v

@@ -41,37 +41,29 @@ splash_begin :: proc(g: ^Game) {
 		from     = splash_focus_art,
 		has_from = splash_focus_art.width > 0,
 	}
-	if splash.has_box && splash.has_from {
-		splash.from = contain_rect(splash.box, splash.from)
-	}
+	if splash.has_box && splash.has_from do splash.from = contain_rect(splash.box, splash.from)
 
 	splash.ui = rl.LoadRenderTexture(i32(w), i32(h))
 	eaten := input.mouse_eaten
 	input.mouse_eaten = true // no hover or clicks while re-drawing the menu
 	rl.BeginTextureMode(splash.ui)
-	draw_background(w, h)
+	draw_wallpaper(w, h)
 	draw_screens(w, h)
 	draw_header(w)
 	draw_footer(w, h)
 	rl.EndTextureMode()
 	input.mouse_eaten = eaten
 
-	if splash.has_box {
-		splash_make_blur()
-	}
+	if splash.has_box do splash_make_blur()
 	sfx_start()
 	theme_pause_for_game()
 	splash.started = rl.GetTime()
 }
 
 splash_end :: proc() {
-	if !splash.active {
-		return
-	}
+	if !splash.active do return
 	rl.UnloadRenderTexture(splash.ui)
-	if splash.has_blur {
-		rl.UnloadRenderTexture(splash.blur)
-	}
+	if splash.has_blur do rl.UnloadRenderTexture(splash.blur)
 	splash = {}
 }
 
@@ -81,9 +73,7 @@ splash_intro_done :: proc() -> bool {
 
 // Blocks until the cover has landed; the idle frame stays up while the caller loads.
 splash_play_intro :: proc() {
-	for splash.active && !splash_intro_done() {
-		splash_frame()
-	}
+	for splash.active && !splash_intro_done() do splash_frame()
 	splash_frame()
 }
 
@@ -99,17 +89,11 @@ splash_frame :: proc() {
 
 // Drawn over an emulated game's first frames until it has faded away.
 splash_draw_over_game :: proc(w, h: f32) {
-	if !splash.active {
-		return
-	}
+	if !splash.active do return
 	now := rl.GetTime()
-	if splash.out_at == 0 {
-		splash.out_at = now
-	}
+	if splash.out_at == 0 do splash.out_at = now
 	a := 1 - f32(now - splash.out_at) / SPLASH_OUT_SEC
-	if a > 0 {
-		splash_draw(w, h, a * a)
-	}
+	if a > 0 do splash_draw(w, h, a * a)
 }
 
 // Downscale in steps so the last one averages the whole cover instead of sampling a few texels.
@@ -129,9 +113,7 @@ splash_make_blur :: proc() {
 			rl.DrawTexturePro(prev.texture, {0, 0, f32(prev.texture.width), -f32(prev.texture.height)}, dest, {}, 0, rl.WHITE)
 		}
 		rl.EndTextureMode()
-		if i > 0 {
-			rl.UnloadRenderTexture(prev)
-		}
+		if i > 0 do rl.UnloadRenderTexture(prev)
 		prev = rt
 	}
 	splash.blur = prev
@@ -140,9 +122,7 @@ splash_make_blur :: proc() {
 
 contain_rect :: proc(tex: rl.Texture2D, r: rl.Rectangle) -> rl.Rectangle {
 	tw, th := f32(tex.width), f32(tex.height)
-	if tw <= 0 || th <= 0 {
-		return r
-	}
+	if tw <= 0 || th <= 0 do return r
 	s := min(r.width / tw, r.height / th)
 	return {r.x + (r.width - tw * s) * 0.5, r.y + (r.height - th * s) * 0.5, tw * s, th * s}
 }

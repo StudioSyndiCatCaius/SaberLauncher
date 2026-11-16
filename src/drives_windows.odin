@@ -30,12 +30,7 @@ current_drive_mask :: proc() -> u32 {
 
 is_system_drive :: proc(letter: rune) -> bool {
 	sys := os.get_env("SystemDrive", context.temp_allocator)
-	if sys == "" {
-		return letter == 'C'
-	}
-	sys = strings.to_upper(sys)
-	id := fmt.tprintf("%c:", letter)
-	return strings.equal_fold(id, sys)
+	return sys == "" ? letter == 'C' : eq_fold(fmt.tprintf("%c:", letter), sys)
 }
 
 drive_type :: proc(letter: rune) -> u32 {
@@ -53,14 +48,13 @@ drive_path :: proc(letter: rune, parts: ..string) -> string {
 	return fmt.tprintf("%c:\\%s", letter, strings.join(parts, "\\", context.temp_allocator))
 }
 
+// The volume's name, else "F:" (temp).
 volume_label :: proc(letter: rune) -> string {
 	root_w := [4]u16{u16(letter), ':', '\\', 0}
 	name: [261]u16
 	ok := GetVolumeInformationW(win.LPCWSTR(raw_data(root_w[:])), raw_data(name[:]), u32(len(name)), nil, nil, nil, nil, 0)
-	if ok && name[0] != 0 {
-		return strings.clone(wide_to_utf8(raw_data(name[:]), -1))
-	}
-	return fmt.aprintf("%c:", letter)
+	if ok && name[0] != 0 do return wide_to_utf8(raw_data(name[:]), -1)
+	return fmt.tprintf("%c:", letter)
 }
 
 volume_serial :: proc(letter: u8) -> (serial: u32, present: bool) {

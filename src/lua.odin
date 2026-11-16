@@ -1,6 +1,7 @@
 package saber
 
 import "core:c"
+import "core:path/filepath"
 
 // Minimal Lua 5.4 bindings against the static lib built by lua/build_lua.bat
 // (shared with the Flasher; vendor:lua only ships a DLL on Windows, which would break the single-exe build).
@@ -80,6 +81,15 @@ lua_call :: proc(L: ^lua_State, nargs, nresults: c.int) {
 lua_register :: proc(L: ^lua_State, name: cstring, fn: lua_CFunction) {
 	lua_pushcclosure(L, fn, 0)
 	lua_setglobal(L, name)
+}
+
+// A path a plugin passed in; relative ones are inside its folder (PLUGIN_DIR is set before
+// the plugin's code runs, so this works during load too). Temp-allocated.
+lua_plugin_path :: proc(L: ^lua_State, p: string) -> string {
+	if p == "" || filepath.is_abs(p) do return p
+	lua_getglobal(L, "PLUGIN_DIR")
+	defer lua_pop(L, 1)
+	return tjoin({lua_string(L, -1), p})
 }
 
 lua_string :: proc(L: ^lua_State, idx: c.int) -> string {

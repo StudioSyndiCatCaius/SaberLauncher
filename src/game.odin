@@ -56,9 +56,7 @@ Game :: struct {
 game_from_folder :: proc(root: string, drive_label: string, from_drive: bool) -> (Game, bool) {
 	saber := path_join({root, "_Saber"})
 	ini_path := path_join({saber, "saber.ini"})
-	if !os.exists(ini_path) {
-		return {}, false
-	}
+	if !os.exists(ini_path) do return {}, false
 
 	g: Game
 	g.root = strings.clone(root)
@@ -76,29 +74,14 @@ game_from_folder :: proc(root: string, drive_label: string, from_drive: bool) ->
 			delete(g.title)
 			g.title = strings.clone(v)
 		}
-		if v, found := ini_get(text, "tags"); found {
-			g.tags = strings.clone(v)
-		}
-		logo_name := "logo.png"
-		box_name := "box.png"
-		if v, found := ini_get(text, "logo"); found && v != "" {
-			logo_name = v
-		}
-		if v, found := ini_get(text, "box"); found && v != "" {
-			box_name = v
-		}
-		if v, found := ini_get(text, "exe"); found {
-			g.exe_name = strings.clone(v)
-		}
-		if v, found := ini_get(text, "args"); found {
-			g.launch_args = strings.clone(v)
-		}
+		ini_str(text, "tags", &g.tags)
+		ini_str(text, "exe", &g.exe_name)
+		ini_str(text, "args", &g.launch_args)
+		ini_str(text, "mod", &g.mod_name, nonempty = true)
 		// optional: lets plugins identify the game (covers, info), e.g. a dumped PS1 disc
-		if v, found := ini_get(text, "serial"); found && v != "" {
-			g.disc_serial = strings.to_upper(v)
-		}
+		if v, found := ini_get(text, "serial"); found && v != "" do g.disc_serial = ascii_upper(v)
 		if v, found := ini_get(text, "platform"); found {
-			for p in Retro_Platform do if p != .None && strings.equal_fold(RETRO_PLATFORM_DIR[p], v) do g.meta_platform = p
+			for p in Retro_Platform do if p != .None && eq_fold(RETRO_PLATFORM_DIR[p], v) do g.meta_platform = p
 		}
 		// an installed disc / ROM (install.odin): played by the libretro host instead of an exe
 		if v, found := ini_get(text, "rom"); found && v != "" && g.meta_platform != .None {
@@ -106,25 +89,18 @@ game_from_folder :: proc(root: string, drive_label: string, from_drive: bool) ->
 			g.rom_name = strings.clone(filepath.stem(v))
 			g.platform = g.meta_platform
 		}
-		if v, found := ini_get(text, "mod"); found && v != "" {
-			g.mod_name = strings.clone(v)
-		}
-		g.logo_file = path_join({saber, logo_name})
-		g.box_file = path_join({saber, box_name})
+		logo, _ := ini_get(text, "logo")
+		box, _ := ini_get(text, "box")
+		g.logo_file = path_join({saber, logo != "" ? logo : "logo.png"})
+		g.box_file = path_join({saber, box != "" ? box : "box.png"})
 	}
 
 	if rec, err := os.read_entire_file(g.records_path, context.allocator); err == nil {
 		defer delete(rec)
 		text := string(rec)
-		if v, found := ini_get(text, "date_first_played"); found {
-			g.date_first = strings.clone(strings.trim(v, "\""))
-		}
-		if v, found := ini_get(text, "date_last_played"); found {
-			g.date_last = strings.clone(strings.trim(v, "\""))
-		}
-		if v, found := ini_get(text, "playtime_seconds"); found {
-			g.playtime_seconds, _ = strconv.parse_int(v)
-		}
+		ini_str(text, "date_first_played", &g.date_first)
+		ini_str(text, "date_last_played", &g.date_last)
+		if v, found := ini_get(text, "playtime_seconds"); found do g.playtime_seconds, _ = strconv.parse_int(v)
 	}
 
 	game_load_art(&g)
@@ -144,74 +120,47 @@ game_load_art :: proc(g: ^Game) {
 
 // Main-thread half of a deferred scan: upload the decoded art, then run the plugins.
 game_finish_scan :: proc(g: ^Game) {
-	if g.box_img.data != nil {
-		g.box, g.has_box = texture_from_image(g.box_img)
-		rl.UnloadImage(g.box_img)
-		g.box_img = {}
-	}
-	if g.logo_img.data != nil {
-		g.logo, g.has_logo = texture_from_image(g.logo_img)
-		rl.UnloadImage(g.logo_img)
-		g.logo_img = {}
-	}
+	if g.box_img.data != nil do g.box, g.has_box = texture_from_image(g.box_img)
+	if g.logo_img.data != nil do g.logo, g.has_logo = texture_from_image(g.logo_img)
+	unload_images(g)
 	if g.pending_apply {
 		g.pending_apply = false
 		plugins_apply(g, from_ini = g.pending_from_ini)
 	}
 }
 
-game_unload_art :: proc(g: ^Game) {
-	if g.box_img.data != nil {
-		rl.UnloadImage(g.box_img)
-		g.box_img = {}
-	}
-	if g.logo_img.data != nil {
-		rl.UnloadImage(g.logo_img)
-		g.logo_img = {}
-	}
-	if g.has_box {
-		rl.UnloadTexture(g.box)
-		g.has_box = false
-	}
-	if g.has_logo {
-		rl.UnloadTexture(g.logo)
-		g.has_logo = false
-	}
+unload_images :: proc(g: ^Game) {
+	if g.box_img.data != nil do rl.UnloadImage(g.box_img)
+	if g.logo_img.data != nil do rl.UnloadImage(g.logo_img)
+	g.box_img, g.logo_img = {}, {}
 }
 
+game_unload_art :: proc(g: ^Game) {
+	unload_images(g)
+	unload_tex(&g.box, &g.has_box)
+	unload_tex(&g.logo, &g.has_logo)
+}
+
+// The game's exe=: absolute, or relative to the game folder, then to its _Saber folder.
 resolve_launch_exe :: proc(g: ^Game) -> (path: string, ok: bool) {
 	exe := strings.trim_space(g.exe_name)
-	if exe == "" {
-		return "", false
-	}
-	if filepath.is_abs(exe) && os.exists(exe) {
-		return exe, true
-	}
-	from_root := path_join({g.root, exe})
-	if os.exists(from_root) {
-		return from_root, true
-	}
-	from_saber := path_join({g.saber_dir, exe})
-	if os.exists(from_saber) {
-		return from_saber, true
+	if exe == "" do return "", false
+	if filepath.is_abs(exe) do return exe, os.exists(exe)
+	for dir in ([2]string{g.root, g.saber_dir}) {
+		if p := tjoin({dir, exe}); os.exists(p) do return p, true
 	}
 	return "", false
 }
 
 game_launch :: proc(g: ^Game) -> (ok: bool, err: string) {
 	if g.platform != .None {
-		if g.gdrom {
-			return retro_play(g) // only explains why it can't play
-		}
+		if g.gdrom do return retro_play(g) // only explains why it can't play
 		splash_begin(g)
 		defer splash_end()
 		splash_play_intro()
 		return retro_play(g)
 	}
-	cmd: string
-	wait_name: string
-	fail_msg := "Failed to start game"
-
+	cmd, wait_name, fail_msg: string
 	if exe_path, has_exe := resolve_launch_exe(g); has_exe {
 		cmd = exe_command(exe_path, strings.trim_space(g.launch_args))
 		wait_name = filepath.base(exe_path)
@@ -219,10 +168,9 @@ game_launch :: proc(g: ^Game) -> (ok: bool, err: string) {
 	} else if os.exists(g.play_bat) {
 		cmd = bat_command(g.play_bat)
 		fail_msg = "Failed to start PLAY.bat"
+	} else if strings.trim_space(g.exe_name) != "" {
+		return false, fmt.tprintf("Missing exe: %s", g.exe_name)
 	} else {
-		if strings.trim_space(g.exe_name) != "" {
-			return false, fmt.tprintf("Missing exe: %s", g.exe_name)
-		}
 		return false, "Missing exe in saber.ini and no PLAY.bat"
 	}
 
@@ -236,9 +184,7 @@ game_launch :: proc(g: ^Game) -> (ok: bool, err: string) {
 
 	g.playtime_seconds += max(elapsed, 0)
 	today := today_iso()
-	if g.date_first == "" {
-		g.date_first = strings.clone(today)
-	}
+	if g.date_first == "" do g.date_first = strings.clone(today)
 	delete(g.date_last)
 	g.date_last = strings.clone(today)
 	game_save_records(g)
@@ -246,25 +192,14 @@ game_launch :: proc(g: ^Game) -> (ok: bool, err: string) {
 }
 
 game_save_records :: proc(g: ^Game) {
-	text := fmt.tprintf(
-		"[records]\n\ndate_first_played=\"%s\"\ndate_last_played=\"%s\"\nplaytime_seconds=%d\n",
-		g.date_first,
-		g.date_last,
-		g.playtime_seconds,
-	)
-	_ = os.write_entire_file(g.records_path, text)
+	_ = os.write_entire_file(g.records_path, fmt.tprintf("[records]\n\ndate_first_played=\"%s\"\ndate_last_played=\"%s\"\nplaytime_seconds=%d\n",
+		g.date_first, g.date_last, g.playtime_seconds))
 }
 
 format_playtime :: proc(seconds: int) -> string {
-	h := seconds / 3600
-	m := (seconds % 3600) / 60
-	s := seconds % 60
-	if h > 0 {
-		return fmt.tprintf("%dh %02dm", h, m)
-	}
-	if m > 0 {
-		return fmt.tprintf("%dm %02ds", m, s)
-	}
+	h, m, s := seconds / 3600, seconds % 3600 / 60, seconds % 60
+	if h > 0 do return fmt.tprintf("%dh %02dm", h, m)
+	if m > 0 do return fmt.tprintf("%dm %02ds", m, s)
 	return fmt.tprintf("%ds", s)
 }
 
@@ -274,31 +209,3 @@ today_iso :: proc() -> string {
 	return fmt.tprintf("%04d-%02d-%02d", y, int(mo), d)
 }
 
-path_join :: proc(parts: []string) -> string {
-	p, _ := filepath.join(parts)
-	return p
-}
-
-ini_get :: proc(text, key: string) -> (string, bool) {
-	it := text
-	for line in strings.split_lines_iterator(&it) {
-		trim := strings.trim_space(line)
-		if trim == "" || strings.has_prefix(trim, "[") || strings.has_prefix(trim, ";") || strings.has_prefix(trim, "#") {
-			continue
-		}
-		eq := strings.index_byte(trim, '=')
-		if eq < 0 {
-			continue
-		}
-		k := strings.trim_space(trim[:eq])
-		if !strings.equal_fold(k, key) {
-			continue
-		}
-		v := strings.trim_space(trim[eq + 1:])
-		if strings.has_prefix(v, "\"") && strings.has_suffix(v, "\"") && len(v) >= 2 {
-			v = v[1:len(v) - 1]
-		}
-		return v, true
-	}
-	return "", false
-}

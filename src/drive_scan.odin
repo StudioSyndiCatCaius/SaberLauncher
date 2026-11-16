@@ -84,16 +84,12 @@ drive_scan_update :: proc() {
 		break
 	}
 	if !drive_scan.running || !sync.atomic_load(&drive_scan.done) do return
-	thread.join(drive_scan.worker)
-	thread.destroy(drive_scan.worker)
-	drive_scan.worker = nil
+	thread_end(&drive_scan.worker)
 	drive_scan.running = false
 
 	// keep the focus on the same game if it is still there
 	keep := ""
-	if sel := app.selected_drive; sel >= 0 && sel < len(app.drive_games) {
-		keep = fmt.tprint(app.drive_games[sel].root)
-	}
+	if sel := app.selected_drive; sel >= 0 && sel < len(app.drive_games) do keep = fmt.tprint(app.drive_games[sel].root)
 	old := app.drive_games
 	app.drive_games = drive_scan.games
 	drive_scan.games = nil
@@ -116,7 +112,7 @@ drive_scan_update :: proc() {
 	}
 	delete(old)
 
-	app.selected_drive = clamp(app.selected_drive, 0, max(0, len(app.drive_games) - 1))
+	clamp_selection(.Main)
 	for g, i in app.drive_games {
 		if keep != "" && g.root == keep {
 			app.selected_drive = i
@@ -145,9 +141,7 @@ drive_scan_update :: proc() {
 
 drive_scan_shutdown :: proc() {
 	if drive_scan.worker == nil do return
-	thread.join(drive_scan.worker)
-	thread.destroy(drive_scan.worker)
-	drive_scan.worker = nil
+	thread_end(&drive_scan.worker)
 	for &g in drive_scan.games do game_unload_art(&g)
 	delete(drive_scan.games)
 }
@@ -240,17 +234,9 @@ draw_drive_scan_card :: proc(w, h: f32) {
 	if reading && drive_scan.card_t < 0.02 do drive_scan.shown_at = now
 	if drive_scan.card_t > 0.02 && now - drive_scan.shown_at < DRIVE_CARD_MIN do reading = true
 	if reading do drive_scan.card_kind = drive_scan.kind
-	drive_scan.card_t = smooth_to(drive_scan.card_t, notice || reading ? 1 : 0, 14)
+	if !modal_fade(&drive_scan.card_t, notice || reading, 14) do return
 	t := drive_scan.card_t
-	if t < 0.02 do return
-
-	cw: f32 = 380
-	ch: f32 = 92
-	s := 0.92 + 0.08 * t
-	// bottom-right, clear of the Home title and the hint bar; slides in from the edge
-	r := rl.Rectangle{w - PAD - cw * s + (1 - t) * 60, h - FOOTER_H - 20 - ch * s, cw * s, ch * s}
-	draw_soft_shadow(r, RADIUS, t * 1.4)
-	draw_glass(r, RADIUS, COL_PANEL_SOLID, 0.5, notice ? COL_WARN : COL_ACCENT, 0.25, t)
+	r := toast_card(w, h, 380, 92, t, 0, notice)
 	if t < 0.5 do return
 
 	icon := rl.Vector2{r.x + 52, r.y + r.height * 0.5}
@@ -283,6 +269,16 @@ draw_drive_scan_card :: proc(w, h: f32) {
 	label := drive_scan_label()
 	if label == "" do label = disc ? "Spinning up…" : "Looking for games…"
 	draw_t_fit(label, tx, r.y + 52, r.width - (tx - r.x) - 20, 15, COL_MUTED, false)
+}
+
+// Glass card sliding in at the bottom right, clear of the Home title and the hint bar
+// (drive scans, installs); `lift` stacks it above another one.
+toast_card :: proc(w, h, cw, ch, t, lift: f32, warn: bool) -> rl.Rectangle {
+	s := 0.92 + 0.08 * t
+	r := rl.Rectangle{w - PAD - cw * s + (1 - t) * 60, h - FOOTER_H - 20 - ch * s - lift, cw * s, ch * s}
+	draw_soft_shadow(r, RADIUS, t * 1.4)
+	draw_glass(r, RADIUS, COL_PANEL_SOLID, 0.5, warn ? COL_WARN : COL_ACCENT, 0.25, t)
+	return r
 }
 
 // The disc rises out of the tray (e: 0 -> 1) under an eject symbol.

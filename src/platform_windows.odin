@@ -39,9 +39,7 @@ instance_mutex: win.HANDLE
 
 // Starts a fresh Saber; call last, after everything is shut down.
 restart_self :: proc() -> bool {
-	if app.supervised {
-		win.ExitProcess(SUPERVISED_RESTART) // the supervisor starts the new copy
-	}
+	if app.supervised do win.ExitProcess(SUPERVISED_RESTART) // the supervisor starts the new copy
 	if instance_mutex != nil { // last handle closed = mutex gone, so the new copy passes single_instance
 		win.CloseHandle(instance_mutex)
 		instance_mutex = nil
@@ -52,9 +50,7 @@ restart_self :: proc() -> bool {
 
 // ntdll's _snprintf: linking a CRT printf clashes with static raylib's CRT.
 load_snprintf :: proc() -> Snprintf_Proc {
-	if nt := win.GetModuleHandleW(win.L("ntdll.dll")); nt != nil {
-		return auto_cast win.GetProcAddress(nt, "_snprintf")
-	}
+	if nt := win.GetModuleHandleW(win.L("ntdll.dll")); nt != nil do return auto_cast win.GetProcAddress(nt, "_snprintf")
 	return nil
 }
 

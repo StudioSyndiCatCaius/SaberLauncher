@@ -13,13 +13,10 @@ Hw_Gl :: struct {
 	opengl32: win.HMODULE,
 }
 
-hw_gl_set_proc_address :: win.gl_set_proc_address
-
 hw_gl_proc_address :: proc "contextless" (g: ^Hw_Gl, sym: cstring) -> rawptr {
 	p := win.wglGetProcAddress(sym)
 	switch uintptr(p) {
-	case 0, 1, 2, 3, ~uintptr(0):
-		p = win.GetProcAddress(g.opengl32, sym)
+	case 0, 1, 2, 3, ~uintptr(0): p = win.GetProcAddress(g.opengl32, sym)
 	}
 	return p
 }

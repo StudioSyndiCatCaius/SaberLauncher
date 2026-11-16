@@ -1,8 +1,8 @@
 package saber
 
 import "core:fmt"
-import "core:strings"
 import "core:os"
+import "core:strings"
 import rl "vendor:raylib"
 
 // A running game / app / movie that Saber is hidden behind.
@@ -46,6 +46,10 @@ REFOCUS_SEC :: 1.0
 // user leaves it from the Home-button overlay. Returns seconds spent, and whether
 // it was left running.
 run_session :: proc(pi: Proc_Info, kind: Launch_Kind, title, exe_name: string) -> (seconds: int, detached: bool) {
+	// own copies: the loop below frees the temp allocator the caller's may live in
+	title, exe_name := strings.clone(title), strings.clone(exe_name)
+	defer delete(title)
+	defer delete(exe_name)
 	s := Session{
 		kind     = kind,
 		title    = title,
@@ -64,9 +68,7 @@ run_session :: proc(pi: Proc_Info, kind: Launch_Kind, title, exe_name: string) -
 		theme_pause_for_game()
 	}
 	allow_foreground()
-	if !splash.active {
-		hide_for_child()
-	}
+	if !splash.active do hide_for_child()
 	guide_reset()
 
 	next_track: f64 = 0
@@ -74,9 +76,7 @@ run_session :: proc(pi: Proc_Info, kind: Launch_Kind, title, exe_name: string) -
 		now := rl.GetTime()
 		if now >= next_track {
 			next_track = now + TRACK_INTERVAL
-			if session_tick(&s, now) {
-				break
-			}
+			if session_tick(&s, now) do break
 			// keep the splash up until the game has a window to cover the desktop
 			if splash.active && splash_intro_done() && (s.seen_window || now - s.started >= SPLASH_MAX_SEC) {
 				hide_for_child()
@@ -84,9 +84,7 @@ run_session :: proc(pi: Proc_Info, kind: Launch_Kind, title, exe_name: string) -
 			}
 		}
 		if guide_pressed() {
-			if pause_menu(&s) {
-				break
-			}
+			if pause_menu(&s) do break
 			splash_end()
 			next_track = 0
 		}
@@ -109,9 +107,7 @@ run_session :: proc(pi: Proc_Info, kind: Launch_Kind, title, exe_name: string) -
 session_tick :: proc(s: ^Session, now: f64) -> bool {
 	session_refresh_pids(s)
 	if s.pid_count == 0 {
-		if s.gone_at == 0 {
-			s.gone_at = now
-		}
+		if s.gone_at == 0 do s.gone_at = now
 		return now - s.gone_at >= EXIT_GRACE
 	}
 	s.gone_at = 0
@@ -136,9 +132,7 @@ session_tick :: proc(s: ^Session, now: f64) -> bool {
 		}
 	} else if s.kind == .App {
 		if s.seen_window {
-			if s.windowless_at == 0 {
-				s.windowless_at = now
-			}
+			if s.windowless_at == 0 do s.windowless_at = now
 			return now - s.windowless_at >= APP_WINDOWLESS_SEC
 		}
 		root_done := !proc_alive(s.handle)
@@ -149,9 +143,7 @@ session_tick :: proc(s: ^Session, now: f64) -> bool {
 
 generic_wait_exe :: proc(name: string) -> bool {
 	for n in ([]string{"cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe", "explorer.exe", "Saber.exe"}) {
-		if strings.equal_fold(name, n) {
-			return true
-		}
+		if eq_fold(name, n) do return true
 	}
 	return false
 }
@@ -162,17 +154,13 @@ session_refresh_pids :: proc(s: ^Session) {
 	rows: [1024]Proc_Row
 	match_name := s.exe_name != "" && !generic_wait_exe(s.exe_name) ? s.exe_name : ""
 	count := snapshot_processes(rows[:], match_name)
-	if count < 0 {
-		return
-	}
+	if count < 0 do return
 
 	known := s.pids
 	known_n := s.pid_count
 	in_known :: proc(list: []u32, pid: u32) -> bool {
 		for p in list {
-			if p == pid {
-				return true
-			}
+			if p == pid do return true
 		}
 		return false
 	}
@@ -188,16 +176,12 @@ session_refresh_pids :: proc(s: ^Session) {
 	for changed && n < MAX_TRACKED {
 		changed = false
 		for r in rows[:count] {
-			if r.pid == 0 || r.pid == self || r.pid == s.pid || in_known(next[:n], r.pid) {
-				continue
-			}
+			if r.pid == 0 || r.pid == self || r.pid == s.pid || in_known(next[:n], r.pid) do continue
 			if r.named || in_known(known[:known_n], r.pid) || in_known(known[:known_n], r.ppid) || in_known(next[:n], r.ppid) {
 				next[n] = r.pid
 				n += 1
 				changed = true
-				if n == MAX_TRACKED {
-					break
-				}
+				if n == MAX_TRACKED do break
 			}
 		}
 	}
@@ -207,17 +191,13 @@ session_refresh_pids :: proc(s: ^Session) {
 
 session_owns_pid :: proc(s: ^Session, pid: u32) -> bool {
 	for p in s.pids[:s.pid_count] {
-		if p == pid {
-			return true
-		}
+		if p == pid do return true
 	}
 	return false
 }
 
 session_owns_window :: proc(s: ^Session, hwnd: Window_Handle) -> bool {
-	if hwnd == nil {
-		return false
-	}
+	if hwnd == nil do return false
 	return session_owns_pid(s, window_pid(hwnd))
 }
 
@@ -230,9 +210,7 @@ guide_was_down: bool
 guide_down :: proc() -> bool {
 	down := xinput_guide_down()
 	for i in 0 ..< MAX_PADS {
-		if rl.IsGamepadAvailable(i32(i)) && rl.IsGamepadButtonDown(i32(i), .MIDDLE) {
-			down = true
-		}
+		if rl.IsGamepadAvailable(i32(i)) && rl.IsGamepadButtonDown(i32(i), .MIDDLE) do down = true
 	}
 	return down
 }
@@ -243,9 +221,7 @@ guide_reset :: proc() {
 
 // `poll` refreshes raylib's pad state; only needed while no frames are being drawn.
 guide_pressed :: proc(poll := true) -> bool {
-	if poll {
-		rl.PollInputEvents()
-	}
+	if poll do rl.PollInputEvents()
 	down := guide_down()
 	pressed := down && !guide_was_down
 	guide_was_down = down
@@ -274,9 +250,7 @@ pause_labels :: proc(s: ^Session) -> [3]string {
 // Shows Saber on top of the running program. Returns true when the session should end.
 pause_menu :: proc(s: ^Session) -> bool {
 	target := foreground_window()
-	if !session_owns_window(s, target) {
-		target = s.main_hwnd
-	}
+	if !session_owns_window(s, target) do target = s.main_hwnd
 	shot, has_shot := capture_screen()
 	defer if has_shot {
 		rl.UnloadTexture(shot)
@@ -305,26 +279,16 @@ pause_menu :: proc(s: ^Session) -> bool {
 		} else {
 			if !proc_alive(s.handle) {
 				session_refresh_pids(s)
-				if s.pid_count == 0 {
-					done, end_session = true, true
-				}
+				if s.pid_count == 0 do done, end_session = true, true
 			}
-			if input.up {
-				app.pause_sel = (app.pause_sel + 2) % 3
-				sfx_click()
-			}
-			if input.down {
-				app.pause_sel = (app.pause_sel + 1) % 3
-				sfx_click()
-			}
+			nav_list(&app.pause_sel, len(Pause_Choice))
 			if guide_pressed(false) || input.cancel || input.power {
 				app.pause_sel = int(Pause_Choice.Resume)
 				input.confirm = true
 			}
 			if input.confirm {
 				switch Pause_Choice(app.pause_sel) {
-				case .Resume:
-					done = true
+				case .Resume: done = true
 				case .Home:
 					s.detached = true
 					done, end_session = true, true
@@ -355,16 +319,11 @@ pause_menu :: proc(s: ^Session) -> bool {
 draw_pause_overlay :: proc(s: ^Session, shot: rl.Texture2D, has_shot: bool, w, h: f32, closing: bool) {
 	app.pause_t = smooth_to(app.pause_t, 1, 12)
 	rl.ClearBackground(COL_BG)
-	if has_shot {
-		draw_texture_cover(shot, {0, 0, w, h})
-	}
-	rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, u8(150 * app.pause_t)))
-
+	if has_shot do draw_texture_cover(shot, {0, 0, w, h})
+	dim_screen(w, h, 150 * app.pause_t)
 	labels := pause_labels(s)
 	sub := fmt.tprintf("%s  ·  %s", format_playtime(int(rl.GetTime() - s.started)), clock_label())
-	if closing {
-		sub = "Closing…"
-	}
+	if closing do sub = "Closing…"
 	if clicked := draw_modal_menu(s.title, sub, labels[:], app.pause_sel, app.pause_t, w, h, !closing); clicked >= 0 {
 		app.pause_sel = clicked
 		input.confirm = true // handled next frame through the same path as the pad

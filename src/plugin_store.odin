@@ -67,6 +67,8 @@ Store_Plugin :: struct {
 	req:         ^Http_Request, // running payload download
 	spec:        App_Spec,
 	job:         ^App_Job,
+	toml:        [App_Toml_Key]string, // cached keys of its APP/apps toml (app_store_toml_get)
+	toml_gen:    int,                  // apps_gen + 1 when they were read
 }
 
 store: struct {
@@ -81,7 +83,7 @@ store: struct {
 }
 
 store_dir :: proc() -> string {
-	return path_join({app.exe_dir, "plugins", ".store"})
+	return tjoin({app.exe_dir, "plugins", ".store"})
 }
 
 store_raw_url :: proc(repo: ^Store_Repo, path: string) -> string {
@@ -114,6 +116,7 @@ store_clear :: proc() {
 		delete(p.prefix)
 		delete(p.step)
 		app_spec_free(&p.spec)
+		for v in p.toml do delete(v)
 		delete(p.name)
 		delete(p.version)
 		delete(p.author)
@@ -151,13 +154,13 @@ store_refresh :: proc() {
 	store.armed = -1
 	seen := make(map[string]bool, allocator = context.temp_allocator)
 	for d in plugin_dir_list() {
-		data, err := os.read_entire_file(path_join({d, "pluginrepos.txt"}), context.temp_allocator)
+		data, err := os.read_entire_file(tjoin({d, "pluginrepos.txt"}), context.temp_allocator)
 		if err != nil do continue
 		it := string(data)
 		for line in strings.split_lines_iterator(&it) {
 			r, ok := store_parse_repo(line)
 			if !ok do continue
-			key := strings.to_lower(fmt.tprintf("%s/%s", r.owner, r.name), context.temp_allocator)
+			key := ascii_lower(fmt.tprintf("%s/%s", r.owner, r.name), context.temp_allocator)
 			if seen[key] do continue
 			seen[key] = true
 			append(&store.repos, r)
@@ -189,16 +192,25 @@ store_on_tree :: proc(req: ^Http_Request) {
 		plugin_logf("store: %s/%s: %s", repo.owner, repo.name, repo.err)
 		return
 	}
-	Tree :: struct {
-		tree: []struct {
-			path: string,
-			kind: string `json:"type"`,
-		},
+	// {"tree": [{"path": ..., "type": "blob" | "tree", ...}]}; json.parse, not unmarshal (no reflection code in the exe)
+	Entry :: struct {
+		path, kind: string,
 	}
-	t: Tree
-	if json.unmarshal(req.body, &t, allocator = context.temp_allocator) != nil {
+	root, perr := json.parse(req.body, allocator = context.temp_allocator)
+	nodes, _ := root.(json.Object)["tree"].(json.Array)
+	if perr != nil || nodes == nil {
 		repo.err = strings.clone("Unexpected reply from GitHub")
 		return
+	}
+	t: struct {
+		tree: [dynamic]Entry,
+	}
+	t.tree = make([dynamic]Entry, 0, len(nodes), context.temp_allocator)
+	for n in nodes {
+		o, _ := n.(json.Object)
+		path, _ := o["path"].(json.String)
+		kind, _ := o["type"].(json.String)
+		append(&t.tree, Entry{path, kind})
 	}
 	// Plugins/<name>/plugin.lua, <name>/plugin.lua (older repos), Apps/<name>/app.lua
 	for e in t.tree {
@@ -206,12 +218,9 @@ store_on_tree :: proc(req: ^Http_Request) {
 		parts := strings.split(e.path, "/", context.temp_allocator)
 		kind: Store_Kind
 		switch {
-		case len(parts) == 2 && parts[1] == "plugin.lua" && !strings.equal_fold(parts[0], "plugins") && !strings.equal_fold(parts[0], "apps"):
-			kind = .Plugin
-		case len(parts) == 3 && strings.equal_fold(parts[0], "plugins") && parts[2] == "plugin.lua":
-			kind = .Plugin
-		case len(parts) == 3 && strings.equal_fold(parts[0], "apps") && parts[2] == "app.lua":
-			kind = .App
+		case len(parts) == 2 && parts[1] == "plugin.lua" && !eq_fold(parts[0], "plugins") && !eq_fold(parts[0], "apps"): kind = .Plugin
+		case len(parts) == 3 && eq_fold(parts[0], "plugins") && parts[2] == "plugin.lua": kind = .Plugin
+		case len(parts) == 3 && eq_fold(parts[0], "apps") && parts[2] == "app.lua": kind = .App
 		case:
 			continue
 		}
@@ -277,14 +286,14 @@ store_art_cache :: proc(idx: int, what, ext: string) -> string {
 	p := &store.plugins[idx]
 	repo := &store.repos[p.repo]
 	suffix := what == "icon" ? "" : fmt.tprintf("_%s", what)
-	return path_join({store_dir(), "icons", fmt.tprintf("%s_%s_%v_%s%s%s", repo.owner, repo.name, p.kind, p.folder, suffix, ext)})
+	return tjoin({store_dir(), "icons", fmt.tprintf("%s_%s_%v_%s%s%s", repo.owner, repo.name, p.kind, p.folder, suffix, ext)})
 }
 
 // ".png" / ".jpg" from a URL (query stripped), ".png" when unsure
 url_ext :: proc(url: string) -> string {
 	u := url
 	if i := strings.index_any(u, "?#"); i >= 0 do u = u[:i]
-	ext := strings.to_lower(filepath.ext(u), context.temp_allocator)
+	ext := ascii_lower(filepath.ext(u), context.temp_allocator)
 	switch ext {
 	case ".png", ".jpg", ".jpeg", ".webp", ".bmp": return ext
 	}
@@ -345,7 +354,7 @@ lua_string_field :: proc(src, key: string) -> string {
 // The loaded (or turned off) plugin with this folder name, if any.
 store_installed :: proc(p: ^Store_Plugin) -> ^Plugin {
 	if p.kind != .Plugin do return nil
-	for &q in plugins do if strings.equal_fold(q.file, p.folder) do return &q
+	for &q in plugins do if eq_fold(q.file, p.folder) do return &q
 	return nil
 }
 
@@ -368,7 +377,7 @@ store_list :: proc(kind: Store_Kind) -> []int {
 
 // Where p's repo files are staged: .store/stage/<plugins|apps>/<folder>/<path inside the folder>.
 store_stage_dir :: proc(p: ^Store_Plugin) -> string {
-	return path_join({store_dir(), "stage", p.kind == .App ? "apps" : "plugins", p.folder})
+	return tjoin({store_dir(), "stage", p.kind == .App ? "apps" : "plugins", p.folder})
 }
 
 store_rel :: proc(p: ^Store_Plugin, repo_path: string) -> string {
@@ -403,7 +412,7 @@ store_next_file :: proc(idx: int) {
 	}
 	f := pop(&p.queue)
 	repo := &store.repos[p.repo]
-	http_start_native(store_raw_url(repo, f), path_join({store_stage_dir(p), store_rel(p, f)}), store_on_file, {store.gen, idx})
+	http_start_native(store_raw_url(repo, f), tjoin({store_stage_dir(p), store_rel(p, f)}), store_on_file, {store.gen, idx})
 }
 
 store_on_file :: proc(req: ^Http_Request) {
@@ -439,9 +448,10 @@ store_finish_install :: proc(p: ^Store_Plugin) {
 	}
 	os.remove_all(stage)
 	repo := &store.repos[p.repo]
-	_ = os.write_entire_file(path_join({dest_root, p.folder, STORE_MARKER}), transmute([]u8)fmt.tprintf("%s/%s\n", repo.owner, repo.name))
+	_ = os.write_entire_file(tjoin({dest_root, p.folder, STORE_MARKER}), transmute([]u8)fmt.tprintf("%s/%s\n", repo.owner, repo.name))
 	p.state = .Installed
 	if q := store_installed(p); q != nil {
+		plugin_check_downloaded(q)
 		set_status("%s updated: restart Saber to apply (Settings > Restart Saber)", p.name)
 	} else {
 		dir := path_join({dest_root, p.folder})
@@ -454,10 +464,14 @@ store_finish_install :: proc(p: ^Store_Plugin) {
 STORE_MARKER :: ".saber_store"
 COL_STORE_OK :: rl.Color{64, 196, 104, 255}
 
-// Installed from the store into APP/plugins (built-in plugins have no marker).
+// Installed from the store into APP/plugins (built-in plugins have no marker). Checked when the
+// plugin loads and after a store update (plugin_check_downloaded), not every frame.
 plugin_is_downloaded :: proc(p: ^Plugin) -> bool {
-	root := path_join({app.exe_dir, "plugins"})
-	return strings.equal_fold(filepath.dir(p.dir), root) && os.exists(path_join({p.dir, STORE_MARKER}))
+	return p.downloaded
+}
+
+plugin_check_downloaded :: proc(p: ^Plugin) {
+	p.downloaded = eq_fold(filepath.dir(p.dir), tjoin({app.exe_dir, "plugins"})) && os.exists(tjoin({p.dir, STORE_MARKER}))
 }
 
 // Unloads a store-installed plugin and deletes its folder.
@@ -483,7 +497,7 @@ plugin_delete :: proc(idx: int) {
 	if p.has_icon do rl.UnloadTexture(p.icon)
 	name := strings.clone(p.name, context.temp_allocator)
 	err := os.remove_all(p.dir)
-	for &sp in store.plugins do if sp.kind == .Plugin && strings.equal_fold(sp.folder, p.file) do sp.state = .Available
+	for &sp in store.plugins do if sp.kind == .Plugin && eq_fold(sp.folder, p.file) do sp.state = .Available
 	plugin_logf("store: deleted %s (%s)", p.file, p.dir)
 	ordered_remove(&plugins, idx)
 	app.plugin_sel = clamp(app.plugin_sel, 0, max(0, len(plugins) - 1))
@@ -528,36 +542,26 @@ store_on_open :: proc() {
 }
 
 // ---------------------------------------------------------------------------
-// UI (shared by GET PLUGINS and GET APPS; `kind` picks the entries)
+// UI of GET PLUGINS (GET APPS is a card grid: app_store_ui.odin)
 
-handle_store_input :: proc(kind: Store_Kind) {
-	list := store_list(kind)
-	sel := &store.sel[kind]
-	n := 1 + len(list)
+handle_store_input :: proc() {
+	sel := &store.sel[.Plugin]
+	n := 1 + store_count(.Plugin)
 	sel^ = clamp(sel^, 0, n - 1)
-	old := sel^
-	if input.up && sel^ > 0 {
-		sel^ -= 1
+	if (input.up && sel^ > 0) || (input.down && sel^ < n - 1) {
+		sel^ += input.up ? -1 : 1
 		sfx_click()
 	}
-	if input.down && sel^ < n - 1 {
-		sel^ += 1
-		sfx_click()
-	}
-	if sel^ != old do store.armed = -1
-	if input.confirm {
-		handle_store_click(kind, sel^)
-	} else if input.action && kind == .App && sel^ > 0 {
-		app_store_remove_press(list[sel^ - 1])
-	}
+	if input.confirm do handle_store_click(sel^)
 }
 
-handle_store_click :: proc(kind: Store_Kind, i: int) {
+// Row 0 is Refresh, then the plugins.
+handle_store_click :: proc(i: int) {
 	if i == 0 {
 		store_refresh()
 		sfx_click()
 	} else {
-		store_install(store_list(kind)[i - 1])
+		store_install(store_list(.Plugin)[i - 1])
 	}
 }
 
@@ -586,9 +590,36 @@ store_plugin_status :: proc(p: ^Store_Plugin) -> string {
 	return "Installed"
 }
 
-draw_store :: proc(kind: Store_Kind, w, h, y0, bottom: f32) {
-	list := store_list(kind)
-	sel := &store.sel[kind]
+// "v1.2  ·  by someone  ·  extra" (empty parts left out)
+byline :: proc(version, author: string, extra := "") -> string {
+	parts := make([dynamic]string, context.temp_allocator)
+	if version != "" do append(&parts, fmt.tprintf("v%s", version))
+	if author != "" do append(&parts, fmt.tprintf("by %s", author))
+	if extra != "" do append(&parts, extra)
+	return strings.join(parts[:], "  ·  ", context.temp_allocator)
+}
+
+store_repo_name :: proc(i: int) -> string {
+	return fmt.tprintf("%s/%s", store.repos[i].owner, store.repos[i].name)
+}
+
+// Each repo with how many plugins / apps it has (or its error), from y down to `bottom`.
+draw_store_repos :: proc(kind: Store_Kind, x, y, iw, bottom: f32) {
+	y := y
+	for &repo, ri in store.repos {
+		if y > bottom - 40 do break
+		draw_t_fit(store_repo_name(ri), x, y, iw * 0.55, 16, COL_TEXT, false)
+		count := 0
+		for &p in store.plugins do if p.repo == ri && p.kind == kind do count += 1
+		note := repo.err != "" ? repo.err : store.pending > 0 ? "..." : fmt.tprintf("%d %s(s)", count, kind == .App ? "app" : "plugin")
+		draw_t_fit(note, x + iw * 0.55, y, iw * 0.45, 16, repo.err != "" ? COL_ACCENT : COL_MUTED, false)
+		y += 26
+	}
+}
+
+draw_store :: proc(w, h, y0, bottom: f32) {
+	list := store_list(.Plugin)
+	sel := &store.sel[.Plugin]
 	n := 1 + len(list)
 	sel^ = clamp(sel^, 0, n - 1)
 	// keep the selection in view
@@ -601,31 +632,21 @@ draw_store :: proc(kind: Store_Kind, w, h, y0, bottom: f32) {
 		is_sel := i == sel^
 		if mouse_over(r) && rl.IsMouseButtonPressed(.LEFT) {
 			if is_sel {
-				handle_store_click(kind, i)
+				handle_store_click(i)
 			} else {
 				sel^ = i
-				store.armed = -1
 				sfx_click()
 			}
 		}
-		draw_panel(r, is_sel)
-		if is_sel do rl.DrawRectangleRounded({r.x + 8, r.y + 16, 3, r.height - 32}, 1, 4, COL_ACCENT)
-		tx := r.x + 24
 		if i == 0 {
-			draw_t_fit("Refresh", tx, r.y + 11, r.width - 40, 19, is_sel ? COL_TEXT : COL_MUTED, is_sel)
-			draw_t_fit(store.message, tx, r.y + 37, r.width - 40, 14, COL_MUTED, is_sel)
+			draw_list_row(r, is_sel, "Refresh", store.message)
 			continue
 		}
 		p := &store.plugins[list[i - 1]]
-		if p.has_icon {
-			draw_texture_fit(p.icon, r.x + 14, r.y + 10, 44, 44)
-			tx = r.x + 72
-		}
-		draw_store_badge(r.x + r.width - 26, r.y + r.height * 0.5, p)
-		draw_t_fit(p.name, tx, r.y + 11, r.width - tx + r.x - 52, 19, is_sel ? COL_TEXT : COL_MUTED, is_sel)
-		sub := fmt.tprintf("%s/%s", store.repos[p.repo].owner, store.repos[p.repo].name)
+		sub := store_repo_name(p.repo)
 		if st := store_plugin_status(p); st != "" do sub = fmt.tprintf("%s  ·  %s", st, sub)
-		draw_t_fit(sub, tx, r.y + 37, r.width - tx + r.x - 52, 14, COL_MUTED, false)
+		draw_list_row(r, is_sel, p.name, sub, p.icon, p.has_icon, 52)
+		draw_store_badge(r.x + r.width - 26, r.y + r.height * 0.5, p)
 	}
 
 	// detail
@@ -634,105 +655,78 @@ draw_store :: proc(kind: Store_Kind, w, h, y0, bottom: f32) {
 	x := r.x + 28
 	iw := r.width - 56
 	y := r.y + 24
-	what := kind == .App ? "app" : "plugin"
 	if sel^ == 0 {
-		draw_t(kind == .App ? "GET APPS" : "GET PLUGINS", x, y, 28, COL_TEXT)
-		y += 44
-		draw_t_fit(fmt.tprintf("%ss from the GitHub repos listed in plugins/pluginrepos.txt.", kind == .App ? "Apps" : "Plugins"), x, y, iw, 16, COL_TEXT, false)
-		y += 28
-		draw_t_fit(fmt.tprintf("Pick one to download just that %s. Press A here to reload the lists.", what), x, y, iw, 16, COL_MUTED, false)
-		y += 40
-		for &repo, ri in store.repos {
-			if y > r.y + r.height - 40 do break
-			draw_t_fit(fmt.tprintf("%s/%s", repo.owner, repo.name), x, y, iw * 0.5, 16, COL_TEXT, false)
-			count := 0
-			for &p in store.plugins do if p.repo == ri && p.kind == kind do count += 1
-			note := repo.err != "" ? repo.err : store.pending > 0 ? "..." : fmt.tprintf("%d %s(s)", count, what)
-			draw_t_fit(note, x + iw * 0.5, y, iw * 0.5, 16, repo.err != "" ? COL_ACCENT : COL_MUTED, false)
-			y += 26
-		}
+		draw_t("GET PLUGINS", x, y, 28, COL_TEXT)
+		draw_t_fit("Plugins from the GitHub repos listed in plugins/pluginrepos.txt.", x, y + 44, iw, 16, COL_TEXT, false)
+		draw_t_fit("Pick one to download just that plugin. Press A here to reload the lists.", x, y + 72, iw, 16, COL_MUTED, false)
+		draw_store_repos(.Plugin, x, y + 112, iw, r.y + r.height)
 		return
 	}
 	idx := list[sel^ - 1]
 	p := &store.plugins[idx]
-	tx := x
-	if p.has_icon {
-		draw_texture_fit(p.icon, x, y - 4, 64, 64)
-		tx = x + 80
-	}
-	draw_t_fit(p.name, tx, y, iw - (tx - x), 28, COL_TEXT, true)
-	y += 40
-	byline := make([dynamic]string, context.temp_allocator)
-	if p.version != "" do append(&byline, fmt.tprintf("v%s", p.version))
-	if p.author != "" do append(&byline, fmt.tprintf("by %s", p.author))
-	append(&byline, fmt.tprintf("%s/%s", store.repos[p.repo].owner, store.repos[p.repo].name))
-	draw_t_fit(strings.join(byline[:], "  ·  ", context.temp_allocator), tx, y, iw - (tx - x), 15, COL_ACCENT, false)
-	y += p.has_icon ? 40 : 28
+	y = draw_detail_head(x, y, iw, p.name, byline(p.version, p.author, store_repo_name(p.repo)), p.icon, p.has_icon)
 	if p.description != "" {
 		draw_t_fit(p.description, x, y, iw, 16, COL_TEXT, true)
 		y += 30
 	}
-	if kind == .App {
-		if p.link || app_store_linked(p) {
-			draw_t_fit("Uses the copy already installed on this PC (nothing is downloaded)", x, y, iw, 15, COL_MUTED, false)
-		} else {
-			draw_t(fmt.tprintf("Installs to APP/apps/%s", p.folder), x, y, 15, COL_MUTED)
-		}
+	draw_t(fmt.tprintf("%d file(s), installs to APP/plugins/%s", len(p.files), p.folder), x, y, 15, COL_MUTED)
+	y += 26
+	if q := store_installed(p); q != nil && q.version != "" {
+		draw_t(fmt.tprintf("Installed: v%s", q.version), x, y, 15, COL_MUTED)
 		y += 26
-		if host := url_host(p.spec.download); host != "" {
-			draw_t_fit(fmt.tprintf("Downloads from %s", host), x, y, iw, 15, COL_MUTED, false)
-			y += 26
-		}
-		if iv := app_store_installed_version(p); iv != "" {
-			draw_t(fmt.tprintf("Installed: v%s", iv), x, y, 15, COL_MUTED)
-			y += 26
-		}
-	} else {
-		draw_t(fmt.tprintf("%d file(s), installs to APP/plugins/%s", len(p.files), p.folder), x, y, 15, COL_MUTED)
-		y += 26
-		if q := store_installed(p); q != nil && q.version != "" {
-			draw_t(fmt.tprintf("Installed: v%s", q.version), x, y, 15, COL_MUTED)
-			y += 26
-		}
 	}
 	if p.state == .Failed && p.err != "" {
 		draw_t_fit(p.err, x, y, iw, 15, COL_ACCENT, false)
 		y += 26
 	}
 
-	y += 14
-	ar := rl.Rectangle{x, y, iw, ACTION_ROW_H}
-	label := "Download"
 	st := store_plugin_status(p)
+	label := "Download"
 	switch {
-	case p.state == .Installing:        label = st
+	case p.state == .Installing:           label = st
 	case strings.has_prefix(st, "Update"): label = "Update"
-	case st == "Installed" || st == "Restart to apply": label = p.link ? "Find again" : "Reinstall"
-	case p.link:                        label = "Find on PC"
+	case st == "Installed" || st == "Restart to apply": label = "Reinstall"
 	}
-	draw_panel(ar, true)
-	draw_t_fit(label, ar.x + 18, ar.y + 9, iw - 140, 18, COL_TEXT, true)
-	desc := "Downloads only this plugin's files"
-	if kind == .App do desc = p.link ? "Looks for it on this PC and adds it to APPS" : "Downloads the app and adds it to APPS"
-	if !online_enabled() do desc = "Needs Online Mode (Settings)"
-	draw_t_fit(desc, ar.x + 18, ar.y + 33, iw - 140, 14, COL_MUTED, false)
-	if p.state != .Installing {
-		draw_t_right(label, ar.x + ar.width - 44, ar.y + 19, 17, COL_TEXT)
-		draw_glyph("A", ar.x + ar.width - 26, ar.y + ar.height * 0.5)
-	}
-	if mouse_over(ar) && rl.IsMouseButtonPressed(.LEFT) do store_install(idx)
+	desc := online_enabled() ? "Downloads only this plugin's files" : "Needs Online Mode (Settings)"
+	if draw_action_row({x, y + 14, iw, ACTION_ROW_H}, label, desc, true, p.state == .Installing ? "" : label) do store_install(idx)
+}
 
-	if kind == .App && p.state != .Installing && app_store_installed(p) {
-		rr := rl.Rectangle{x, y + ACTION_ROW_H + 10, iw, ACTION_ROW_H}
-		armed := store.armed == idx
-		draw_panel(rr, armed)
-		draw_t_fit(armed ? "Press X again to remove" : "Remove", rr.x + 18, rr.y + 9, iw - 140, 18, armed ? COL_ACCENT : COL_TEXT, armed)
-		rm_desc := app_store_linked(p) ? fmt.tprintf("Removes the APPS card only (%s stays installed)", p.name) : fmt.tprintf("Deletes APP/apps/%s and its APPS card", p.folder)
-		draw_t_fit(rm_desc, rr.x + 18, rr.y + 33, iw - 140, 14, COL_MUTED, false)
-		draw_t_right("Remove", rr.x + rr.width - 44, rr.y + 19, 17, COL_TEXT)
-		draw_glyph("X", rr.x + rr.width - 26, rr.y + rr.height * 0.5)
-		if mouse_over(rr) && rl.IsMouseButtonPressed(.LEFT) do app_store_remove_press(idx)
+// A list row: optional icon, title and a muted second line; `right` keeps room for a badge.
+draw_list_row :: proc(r: rl.Rectangle, sel: bool, title, sub: string, icon := rl.Texture2D{}, has_icon := false, right: f32 = 16, hi := true) {
+	draw_panel(r, sel && hi)
+	if sel do rl.DrawRectangleRounded({r.x + 8, r.y + 16, 3, r.height - 32}, 1, 4, COL_ACCENT)
+	tx := r.x + 24
+	if has_icon {
+		draw_texture_fit(icon, r.x + 14, r.y + 10, 44, 44)
+		tx = r.x + 72
 	}
+	draw_t_fit(title, tx, r.y + 11, r.width - tx + r.x - right, 19, sel ? COL_TEXT : COL_MUTED, sel)
+	draw_t_fit(sub, tx, r.y + 37, r.width - tx + r.x - right, 14, COL_MUTED, false)
+}
+
+// Icon, name and byline at the top of a detail panel; returns the y under them.
+draw_detail_head :: proc(x, y, iw: f32, name, by: string, icon: rl.Texture2D, has_icon: bool) -> f32 {
+	tx := x
+	if has_icon {
+		draw_texture_fit(icon, x, y - 4, 64, 64)
+		tx = x + 80
+	}
+	draw_t_fit(name, tx, y, iw - (tx - x), 28, COL_TEXT, true)
+	draw_t_fit(by, tx, y + 40, iw - (tx - x), 15, COL_ACCENT, false)
+	return y + 40 + (has_icon ? 40 : 28)
+}
+
+// A wide button: title and description on the left; with a `hint`, its glyph and label on the
+// right. True when clicked.
+draw_action_row :: proc(r: rl.Rectangle, title, desc: string, focused: bool, hint := "", key := "A", title_col := rl.Color{}) -> bool {
+	draw_panel(r, focused)
+	draw_t_fit(title, r.x + 18, r.y + 9, r.width - 140, 18, title_col.a != 0 ? title_col : focused ? COL_TEXT : COL_MUTED, focused)
+	draw_t_fit(desc, r.x + 18, r.y + 33, r.width - 140, 14, COL_MUTED, false)
+	if hint != "" {
+		draw_t_right(hint, r.x + r.width - 44, r.y + 19, 17, COL_TEXT)
+		draw_glyph(key, r.x + r.width - 26, r.y + r.height * 0.5)
+	}
+	return mouse_over(r) && rl.IsMouseButtonPressed(.LEFT)
 }
 
 // "https://github.com/a/b/..." -> "github.com"

@@ -55,7 +55,7 @@ dc_disc_game :: proc(letter: rune, label: string) -> (Game, bool) {
 	serial := strings.trim_space(string(ip[0x40:0x4A]))
 	title := strings.trim_space(string(ip[0x80:0x100]))
 	if serial == "" do serial = "DREAMCAST"
-	g := new_disc_game(letter, label, .DC, strings.to_upper(serial, context.temp_allocator), title)
+	g := new_disc_game(letter, label, .DC, ascii_upper(serial, context.temp_allocator), title)
 	plugins_apply(&g)
 	return g, true
 }
@@ -129,7 +129,7 @@ dc_prepare :: proc(g: ^Game) -> (cue_path: string, ok: bool, err: string) {
 	if !present do return "", false, fmt.tprintf("No disc in %c:", letter)
 	dir := path_join({dc_cache_root(), fmt.tprintf("%08X", vol)})
 	cue := path_join({dir, "disc.cue"})
-	if os.exists(path_join({dir, "complete"})) && os.exists(cue) do return cue, true, ""
+	if os.exists(tjoin({dir, "complete"})) && os.exists(cue) do return cue, true, ""
 
 	// keep only one copy: Dreamcast CD-Rs are up to 700 MB each
 	os.make_directory_all(dc_cache_root())
@@ -157,7 +157,7 @@ dc_prepare :: proc(g: ^Game) -> (cue_path: string, ok: bool, err: string) {
 	ripped, rip_ok, rip_err := dc_rip(h, dir, progress, &draw, strict = false)
 	if !rip_ok do return "", false, rip_err
 	delete(ripped)
-	_ = os.write_entire_file(path_join({dir, "complete"}), "")
+	_ = os.write_entire_file(tjoin({dir, "complete"}), "")
 	retro_log_line("[dc] copied %c: to %s", letter, dir)
 	return cue, true, ""
 }
@@ -184,7 +184,7 @@ dc_rip :: proc(h: Disc_Handle, dir: string, progress: Rip_Progress, data: rawptr
 	defer delete(buf)
 	for &t in tracks {
 		name := fmt.tprintf("track%02d.bin", t.number)
-		f, ferr := os.open(path_join({dir, name}), {.Write, .Create, .Trunc})
+		f, ferr := os.open(tjoin({dir, name}), {.Write, .Create, .Trunc})
 		if ferr != nil do return "", false, "Couldn't write the disc copy (disk full?)"
 		for s := 0; s < t.length; {
 			n := min(DC_RIP_CHUNK, t.length - s)

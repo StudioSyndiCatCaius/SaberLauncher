@@ -42,11 +42,10 @@ reg_locate_values :: proc(spec: string) -> (out: [2]string) {
 	first := strings.index_byte(s, '\\')
 	last := strings.last_index_byte(s, '\\')
 	if first < 0 || last <= first do return
-	root_name := strings.to_upper(s[:first], context.temp_allocator)
+	root_name := ascii_upper(s[:first], context.temp_allocator)
 	subkey, name := s[first + 1:last], s[last + 1:]
 	switch root_name {
-	case "HKCU", "HKEY_CURRENT_USER":
-		out[0] = reg_read_value(win.HKEY_CURRENT_USER, subkey, name, 0)
+	case "HKCU", "HKEY_CURRENT_USER": out[0] = reg_read_value(win.HKEY_CURRENT_USER, subkey, name, 0)
 	case "HKLM", "HKEY_LOCAL_MACHINE":
 		out[0] = reg_read_value(win.HKEY_LOCAL_MACHINE, subkey, name, RRF_SUBKEY_WOW6464KEY)
 		out[1] = reg_read_value(win.HKEY_LOCAL_MACHINE, subkey, name, RRF_SUBKEY_WOW6432KEY)

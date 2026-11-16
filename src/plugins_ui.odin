@@ -21,7 +21,7 @@ plugins_toggle_page :: proc() {
 
 handle_plugins_input :: proc() {
 	if app.plugin_page == 1 {
-		handle_store_input(.Plugin)
+		handle_store_input()
 		return
 	}
 	n := len(plugins)
@@ -109,23 +109,14 @@ plugin_delete_press :: proc(idx: int) {
 
 draw_delete_row :: proc(p: ^Plugin, x, y, iw: f32) {
 	idx := plugin_delete_row(p)
-	ar := rl.Rectangle{x, y, iw, ACTION_ROW_H}
 	focused := app.plugin_focus == 1 && app.plugin_action == idx
 	armed := focused && app.plugin_delete_armed
-	if mouse_over(ar) && rl.IsMouseButtonPressed(.LEFT) {
+	desc := armed ? "Press A again to delete its folder (settings and data too)" : "Downloaded from the store: removes it from APP/plugins"
+	if draw_action_row({x, y, iw, ACTION_ROW_H}, armed ? "Delete Plugin?" : "Delete Plugin", desc, focused, !focused ? "" : armed ? "Confirm" : "Delete", title_col = armed ? COL_WARN : {}) {
 		if !focused do app.plugin_delete_armed = false
 		app.plugin_focus = 1
 		app.plugin_action = idx
 		plugin_delete_press(app.plugin_sel)
-		return
-	}
-	draw_panel(ar, focused)
-	draw_t_fit(armed ? "Delete Plugin?" : "Delete Plugin", ar.x + 18, ar.y + 9, iw - 140, 18, armed ? COL_WARN : focused ? COL_TEXT : COL_MUTED, focused)
-	desc := armed ? "Press A again to delete its folder (settings and data too)" : "Downloaded from the store: removes it from APP/plugins"
-	draw_t_fit(desc, ar.x + 18, ar.y + 33, iw - 140, 14, COL_MUTED, false)
-	if focused {
-		draw_t_right(armed ? "Confirm" : "Delete", ar.x + ar.width - 44, ar.y + 19, 17, COL_TEXT)
-		draw_glyph("A", ar.x + ar.width - 26, ar.y + ar.height * 0.5)
 	}
 }
 
@@ -142,7 +133,7 @@ run_plugin_action :: proc(p: ^Plugin, a: ^Plugin_Action) {
 pretty_key :: proc(key: string) -> string {
 	s, _ := strings.replace_all(key, "_", " ", context.temp_allocator)
 	if s == "" do return s
-	return strings.concatenate({strings.to_upper(s[:1], context.temp_allocator), s[1:]}, context.temp_allocator)
+	return strings.concatenate({ascii_upper(s[:1], context.temp_allocator), s[1:]}, context.temp_allocator)
 }
 
 draw_plugins :: proc(w, h: f32) {
@@ -151,7 +142,7 @@ draw_plugins :: proc(w, h: f32) {
 	y0 := top + 36
 	bottom := h - FOOTER_H - 24
 	if app.plugin_page == 1 {
-		draw_store(.Plugin, w, h, y0, bottom)
+		draw_store(w, h, y0, bottom)
 		return
 	}
 	if len(plugins) == 0 {
@@ -171,20 +162,10 @@ draw_plugins :: proc(w, h: f32) {
 			app.plugin_action = 0
 			sfx_click()
 		}
-		draw_panel(r, sel && app.plugin_focus == 0)
-		if sel {
-			rl.DrawRectangleRounded({r.x + 8, r.y + 16, 3, r.height - 32}, 1, 4, COL_ACCENT)
-		}
-		tx := r.x + 24
-		if p.has_icon {
-			draw_texture_fit(p.icon, r.x + 14, r.y + 10, 44, 44)
-			tx = r.x + 72
-		}
-		draw_t_fit(p.name, tx, r.y + 11, r.width - tx + r.x - 16, 19, sel ? COL_TEXT : COL_MUTED, sel)
 		sub := p.file
 		if !p.enabled do sub = fmt.tprintf("%s  ·  OFF", p.file)
-		if p.platform != "" do sub = fmt.tprintf("%s  ·  %s", p.file, strings.to_upper(p.platform, context.temp_allocator))
-		draw_t_fit(sub, tx, r.y + 37, r.width - tx + r.x - 16, 14, COL_MUTED, false)
+		if p.platform != "" do sub = fmt.tprintf("%s  ·  %s", p.file, ascii_upper(p.platform, context.temp_allocator))
+		draw_list_row(r, sel, p.name, sub, p.icon, p.has_icon, hi = app.plugin_focus == 0)
 	}
 
 	// detail
@@ -193,20 +174,7 @@ draw_plugins :: proc(w, h: f32) {
 	draw_panel(r, false, with_alpha(COL_PANEL_SOLID, 214))
 	x := r.x + 28
 	iw := r.width - 56
-	y := r.y + 24
-	tx := x
-	if p.has_icon {
-		draw_texture_fit(p.icon, x, y - 4, 64, 64)
-		tx = x + 80
-	}
-	draw_t_fit(p.name, tx, y, iw - (tx - x), 28, COL_TEXT, true)
-	y += 40
-	byline := make([dynamic]string, context.temp_allocator)
-	if p.version != "" do append(&byline, fmt.tprintf("v%s", p.version))
-	if p.author != "" do append(&byline, fmt.tprintf("by %s", p.author))
-	append(&byline, p.file)
-	draw_t_fit(strings.join(byline[:], "  ·  ", context.temp_allocator), tx, y, iw - (tx - x), 15, COL_ACCENT, false)
-	y += p.has_icon ? 40 : 28
+	y := draw_detail_head(x, r.y + 24, iw, p.name, byline(p.version, p.author, p.file), p.icon, p.has_icon)
 	if p.description != "" {
 		draw_t_fit(p.description, x, y, iw, 16, COL_TEXT, false)
 		y += 30
@@ -240,7 +208,7 @@ draw_plugins :: proc(w, h: f32) {
 		return
 	}
 
-	if p.platform != "" do kv("Platform", strings.to_upper(p.platform, context.temp_allocator), x, &y, iw)
+	if p.platform != "" do kv("Platform", ascii_upper(p.platform, context.temp_allocator), x, &y, iw)
 	if p.game_count > 0 do kv("Games", fmt.tprintf("%d known serials", p.game_count), x, &y, iw)
 	for line in p.system {
 		if y > r.y + r.height * 0.55 do break
@@ -259,20 +227,13 @@ draw_plugins :: proc(w, h: f32) {
 		ar := rl.Rectangle{x, y, iw, ACTION_ROW_H}
 		if ar.y + ar.height > r.y + r.height - 16 do break
 		focused := app.plugin_focus == 1 && app.plugin_action == i + 1
-		if mouse_over(ar) && rl.IsMouseButtonPressed(.LEFT) {
-			app.plugin_focus = 1
-			app.plugin_action = i + 1
-			run_plugin_action(p, &a)
-		}
-		draw_panel(ar, focused)
-		draw_t_fit(a.name, ar.x + 18, ar.y + 9, iw - 140, 18, focused ? COL_TEXT : COL_MUTED, focused)
 		desc := a.description
 		if !a.runnable do desc = desc != "" ? fmt.tprintf("%s  (not implemented)", desc) : "Not implemented yet"
 		if a.online && !online_enabled() do desc = "Needs Online Mode (Settings)"
-		draw_t_fit(desc, ar.x + 18, ar.y + 33, iw - 140, 14, COL_MUTED, false)
-		if focused {
-			draw_t_right("Run", ar.x + ar.width - 44, ar.y + 19, 17, COL_TEXT)
-			draw_glyph("A", ar.x + ar.width - 26, ar.y + ar.height * 0.5)
+		if draw_action_row(ar, a.name, desc, focused, focused ? "Run" : "") {
+			app.plugin_focus = 1
+			app.plugin_action = i + 1
+			run_plugin_action(p, &a)
 		}
 		y += ACTION_ROW_H + ROW_GAP
 	}
@@ -342,8 +303,6 @@ draw_checkbox :: proc(row: rl.Rectangle, checked, focused: bool) -> bool {
 	} else {
 		draw_glass(box, 8, COL_PANEL, 0.2, COL_ACCENT, focused ? 0.5 : 0, refract = 4)
 	}
-	if focused {
-		draw_t_right(checked ? "On" : "Off", box.x - 12, row.y + (row.height - 17) * 0.5, 17, COL_TEXT)
-	}
+	if focused do draw_t_right(checked ? "On" : "Off", box.x - 12, row.y + (row.height - 17) * 0.5, 17, COL_TEXT)
 	return mouse_over(row) && rl.IsMouseButtonPressed(.LEFT)
 }

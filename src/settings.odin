@@ -68,43 +68,23 @@ settings_load :: proc(path: string) -> Settings {
 	if data, err := os.read_entire_file(path, context.allocator); err == nil {
 		defer delete(data)
 		text := string(data)
-		if v, found := ini_get(text, "ui_theme"); found {
-			s.ui_theme = strings.clone(v)
-		}
-		if v, found := ini_get(text, "bkg"); found {
-			s.bkg = strings.clone(v)
-		}
-		if v, found := ini_get(text, "bgm"); found {
-			s.bgm = strings.clone(v)
-		}
-		if v, found := ini_get(text, "font"); found && v != "" {
-			s.font = strings.clone(v)
-		}
-		if v, found := ini_get(text, "plugin_dirs"); found {
-			s.plugin_dirs = strings.clone(v)
-		}
+		ini_str(text, "ui_theme", &s.ui_theme)
+		ini_str(text, "bkg", &s.bkg)
+		ini_str(text, "bgm", &s.bgm)
+		ini_str(text, "font", &s.font, nonempty = true)
+		ini_str(text, "plugin_dirs", &s.plugin_dirs)
+		ini_str(text, "autostart_app", &s.autostart_app)
+		ini_str(text, "plugins_off", &s.plugins_off)
+		s.online_mode = ini_bool(text, "online", false)
+		s.shell_startup = ini_bool(text, "shell_startup", true)
 		if v, found := ini_get(text, "ignore_drives"); found {
-			for c in strings.to_upper(v, context.temp_allocator) do if c >= 'A' && c <= 'Z' do s.ignore_drives |= 1 << u32(c - 'A')
-		}
-		if v, found := ini_get(text, "online"); found {
-			s.online_mode = v == "1" || strings.equal_fold(v, "true")
+			for ch in transmute([]u8)v do if c := upper_byte(ch); c >= 'A' && c <= 'Z' do s.ignore_drives |= 1 << u32(c - 'A')
 		}
 		if v, found := ini_get(text, "save_states"); found {
-			for key, m in SAVE_MODE_KEYS do if strings.equal_fold(v, key) do s.save_mode = m
-		}
-		if v, found := ini_get(text, "shell_startup"); found {
-			s.shell_startup = v == "1" || strings.equal_fold(v, "true")
-		}
-		if v, found := ini_get(text, "autostart_app"); found {
-			s.autostart_app = strings.clone(v)
-		}
-		if v, found := ini_get(text, "plugins_off"); found {
-			s.plugins_off = strings.clone(v)
+			for key, m in SAVE_MODE_KEYS do if eq_fold(v, key) do s.save_mode = m
 		}
 		if v, found := ini_get(text, "volume"); found {
-			if n, ok := strconv.parse_f32(v); ok {
-				s.volume = clamp(n, 0, 1)
-			}
+			if n, ok := strconv.parse_f32(v); ok do s.volume = clamp(n, 0, 1)
 		}
 	}
 	// The system (registry / autostart entry) is the source of truth; the ini value is informational.
@@ -137,13 +117,11 @@ save_settings :: proc() {
 }
 
 paths_equal :: proc(a, b: string) -> bool {
-	if a == "" || b == "" {
-		return false
-	}
+	if a == "" || b == "" do return false
 	norm :: proc(p: string) -> string {
 		c, _ := filepath.clean(strings.trim(strings.trim_space(p), `"`), context.temp_allocator)
 		c, _ = strings.replace_all(c, "/", "\\", context.temp_allocator)
 		return c
 	}
-	return strings.equal_fold(norm(a), norm(b))
+	return eq_fold(norm(a), norm(b))
 }

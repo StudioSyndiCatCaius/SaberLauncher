@@ -139,10 +139,7 @@ online_update :: proc() {
 			continue
 		}
 		ordered_remove(&http_requests, i)
-		if r.worker != nil {
-			thread.join(r.worker)
-			thread.destroy(r.worker)
-		}
+		thread_end(&r.worker)
 		if r.ok && sync.atomic_load(&online_gen) != r.gen {
 			r.ok = false // finished just as the killswitch flipped
 			r.err = strings.clone("Online Mode was turned off")
@@ -159,10 +156,8 @@ http_deliver :: proc(r: ^Http_Request) {
 	lua_rawgeti(L, LUA_REGISTRYINDEX, i64(r.callback))
 	lua_pushboolean(L, r.ok ? 1 : 0)
 	switch {
-	case !r.ok:
-		lua_pushstring(L, strings.clone_to_cstring(r.err, context.temp_allocator))
-	case r.path != "":
-		lua_pushstring(L, strings.clone_to_cstring(r.path, context.temp_allocator))
+	case !r.ok: lua_pushstring(L, strings.clone_to_cstring(r.err, context.temp_allocator))
+	case r.path != "": lua_pushstring(L, strings.clone_to_cstring(r.path, context.temp_allocator))
 	case:
 		lua_pushlstring(L, raw_data(r.body), c.size_t(len(r.body)))
 	}
@@ -190,10 +185,7 @@ http_free :: proc(r: ^Http_Request) {
 online_shutdown :: proc() {
 	sync.atomic_add(&online_gen, 1)
 	for r in http_requests {
-		if r.worker != nil {
-			thread.join(r.worker)
-			thread.destroy(r.worker)
-		}
+		thread_end(&r.worker)
 		r.callback = LUA_NOREF // Lua states are about to close
 		http_free(r)
 	}
@@ -230,11 +222,6 @@ lua_http_download :: proc "c" (L: ^lua_State) -> c.int {
 		lua_pushstring(L, "Http_Download: missing path")
 		return lua_error(L)
 	}
-	if !filepath.is_abs(path) {
-		lua_getglobal(L, "PLUGIN_DIR") // set before the plugin's code runs, so this works during load too
-		path = path_join({lua_string(L, -1), path})
-		lua_pop(L, 1)
-	}
-	http_start(L, lua_string(L, 1), path, dialog_ref_arg(L, 3))
+	http_start(L, lua_string(L, 1), lua_plugin_path(L, path), dialog_ref_arg(L, 3))
 	return 0
 }

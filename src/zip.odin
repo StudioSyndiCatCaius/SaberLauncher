@@ -58,13 +58,10 @@ zip_extract :: proc(data: []byte, wanted: []string) -> (files: map[string][]byte
 
 		out: []byte
 		switch method {
-		case 0:
-			out = raw
+		case 0: out = raw
 		case 8:
 			buf: bytes.Buffer
-			if zlib.inflate_from_byte_array_raw(raw, &buf, expected_output_size = size) != nil {
-				return files, "cannot inflate entry"
-			}
+			if zlib.inflate_from_byte_array_raw(raw, &buf, expected_output_size = size) != nil do return files, "cannot inflate entry"
 			out = bytes.buffer_to_bytes(&buf)
 		case:
 			return files, "unsupported compression method"

@@ -35,13 +35,13 @@ Plugin_Setting_Kind :: enum {
 }
 
 Plugin_Setting :: struct {
-	key:     string,
+	key:         string,
 	name:        string,
 	description: string,
-	kind:    Plugin_Setting_Kind,
-	options: [dynamic]string, // Choice
-	value:   int,             // Bool: 0/1, Choice: option index
-	order:   int,
+	kind:        Plugin_Setting_Kind,
+	options:     [dynamic]string, // Choice
+	value:       int,             // Bool: 0/1, Choice: option index
+	order:       int,
 }
 
 // Reads PLUGIN.settings (table on top of the stack is PLUGIN) and the saved values.
@@ -62,7 +62,7 @@ plugin_load_settings :: proc(p: ^Plugin) {
 		if s.name == "" do s.name = strings.clone(key)
 		s.order = strconv.parse_int(lua_field_string(L, -1, "order")) or_else 0
 		s.description = strings.clone(lua_field_string(L, -1, "description"))
-		kind := strings.to_lower(lua_field_string(L, -1, "type"), context.temp_allocator)
+		kind := ascii_lower(lua_field_string(L, -1, "type"), context.temp_allocator)
 		if kind == "choice" || kind == "enum" {
 			s.kind = .Choice
 			if lua_getfield(L, -1, "options") == LUA_TTABLE {
@@ -97,14 +97,13 @@ plugin_load_settings :: proc(p: ^Plugin) {
 		return a.key < b.key
 	})
 
-	data, err := os.read_entire_file(path_join({p.dir, "settings.ini"}), context.temp_allocator)
+	data, err := os.read_entire_file(tjoin({p.dir, "settings.ini"}), context.temp_allocator)
 	if err != nil do return
 	for &s in p.settings {
 		v, found := ini_get(string(data), s.key)
 		if !found do continue
 		switch s.kind {
-		case .Bool:
-			s.value = v == "1" || strings.equal_fold(v, "true") ? 1 : 0
+		case .Bool: s.value = v == "1" || eq_fold(v, "true") ? 1 : 0
 		case .Choice:
 			for o, i in s.options do if o == v do s.value = i
 		}
@@ -122,12 +121,12 @@ setting_value_label :: proc(s: ^Plugin_Setting) -> string {
 plugin_change_setting :: proc(p: ^Plugin, s: ^Plugin_Setting, step: int) {
 	switch s.kind {
 	case .Bool:   s.value = 1 - s.value
-	case .Choice: s.value = (s.value + step + len(s.options)) % len(s.options)
+	case .Choice: s.value = cycle(s.value, step, len(s.options))
 	}
 	sb := strings.builder_make(context.temp_allocator)
 	fmt.sbprintf(&sb, "[settings]\n")
 	for &o in p.settings do fmt.sbprintf(&sb, "%s=%s\n", o.key, o.kind == .Bool ? (o.value != 0 ? "1" : "0") : o.options[o.value])
-	_ = os.write_entire_file(path_join({p.dir, "settings.ini"}), strings.to_string(sb))
+	_ = os.write_entire_file(tjoin({p.dir, "settings.ini"}), strings.to_string(sb))
 	sfx_click()
 	changed_setting = s
 	plugin_call_hook(p, "on_setting", 2, proc(L: ^lua_State) {
@@ -151,7 +150,7 @@ lua_plugins_get_setting :: proc "c" (L: ^lua_State) -> c.int {
 	context = runtime.default_context()
 	name := lua_string(L, 1)
 	for &p in plugins {
-		if strings.equal_fold(p.file, name) || strings.equal_fold(p.name, name) do return push_setting(L, &p, lua_string(L, 2))
+		if eq_fold(p.file, name) || eq_fold(p.name, name) do return push_setting(L, &p, lua_string(L, 2))
 	}
 	lua_pushnil(L)
 	return 1
@@ -256,15 +255,12 @@ lua_set_art :: proc "c" (L: ^lua_State) -> c.int {
 	serial := lua_string(L, 1)
 	path := lua_type(L, 2) == LUA_TSTRING ? lua_string(L, 2) : ""
 	n := 0
-	for &g in app.drive_games {
-		if !game_identified(&g) || !strings.equal_fold(g.disc_serial, serial) do continue
-		game_set_box(&g, path)
-		n += 1
-	}
-	for &g in app.library_games {
-		if !game_identified(&g) || !strings.equal_fold(g.disc_serial, serial) do continue
-		game_set_box(&g, path)
-		n += 1
+	for list in ([2][]Game{app.drive_games[:], app.library_games[:]}) {
+		for &g in list {
+			if !game_identified(&g) || !eq_fold(g.disc_serial, serial) do continue
+			game_set_box(&g, path)
+			n += 1
+		}
 	}
 	lua_pushinteger(L, i64(n))
 	return 1
@@ -278,10 +274,7 @@ game_set_box :: proc(g: ^Game, path: string) {
 		g.box_img, _ = load_image_smooth(path)
 		return
 	}
-	if g.has_box {
-		rl.UnloadTexture(g.box)
-		g.has_box = false
-	}
+	unload_tex(&g.box, &g.has_box)
 	delete(g.box_file)
 	g.box_file = strings.clone(path)
 	if path != "" do g.box, g.has_box = load_texture_smooth(path)
@@ -304,16 +297,9 @@ lua_disc_games :: proc "c" (L: ^lua_State) -> c.int {
 // List_Dir(path)
 lua_list_dir :: proc "c" (L: ^lua_State) -> c.int {
 	context = runtime.default_context()
-	path := lua_string(L, 1)
-	if !filepath.is_abs(path) {
-		lua_getglobal(L, "PLUGIN_DIR")
-		path = path_join({lua_string(L, -1), path})
-		lua_pop(L, 1)
-	}
 	lua_createtable(L, 0, 0)
-	fis, err := os.read_all_directory_by_path(path, context.allocator)
-	if err != nil do return 1
-	defer os.file_info_slice_delete(fis, context.allocator)
+	fis, ok := list_dir(lua_plugin_path(L, lua_string(L, 1)))
+	if !ok do return 1
 	i: i64 = 1
 	for fi in fis {
 		if fi.type != .Regular do continue
@@ -328,15 +314,7 @@ lua_list_dir :: proc "c" (L: ^lua_State) -> c.int {
 // (relative paths = plugin folder). Runs on the main thread: meant for a few MB at a time.
 lua_unzip :: proc "c" (L: ^lua_State) -> c.int {
 	context = runtime.default_context()
-	paths: [2]string
-	for &p, i in paths {
-		p = lua_string(L, c.int(i + 1))
-		if p != "" && !filepath.is_abs(p) {
-			lua_getglobal(L, "PLUGIN_DIR")
-			p = path_join({lua_string(L, -1), p})
-			lua_pop(L, 1)
-		}
-	}
+	paths := [2]string{lua_plugin_path(L, lua_string(L, 1)), lua_plugin_path(L, lua_string(L, 2))}
 	fail :: proc(L: ^lua_State, msg: string) -> c.int {
 		lua_pushnil(L)
 		lua_pushstring(L, strings.clone_to_cstring(msg, context.temp_allocator))
@@ -353,9 +331,7 @@ lua_unzip :: proc "c" (L: ^lua_State) -> c.int {
 	for name, content in files {
 		out := path_join({paths[1], name})
 		os.make_directory_all(filepath.dir(out))
-		if os.write_entire_file(out, content) != nil {
-			return fail(L, fmt.tprintf("can't write %s (in use?)", name))
-		}
+		if os.write_entire_file(out, content) != nil do return fail(L, fmt.tprintf("can't write %s (in use?)", name))
 	}
 	lua_pushboolean(L, 1)
 	return 1

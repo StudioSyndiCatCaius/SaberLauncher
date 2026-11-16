@@ -85,8 +85,10 @@ cd_read_toc :: proc(h: Disc_Handle) -> (toc: Cd_Toc, ok: bool) {
 	return toc, toc.leadout > 0
 }
 
-// Opens (or re-opens after a swap) the disc in `letter`. Returns the new .cue path.
-cd_open :: proc(letter: u8) -> (cue_path: string, ok: bool) {
+// Opens (or re-opens after a swap) the disc in `letter` as a raw .bin behind a .cue
+// (PS1), or with `iso` as a plain .iso of its 2048-byte sectors (DVD-based systems).
+// Returns the new virtual path.
+cd_open :: proc(letter: u8, iso := false) -> (path: string, ok: bool) {
 	sync.mutex_lock(&cd.lock)
 	defer sync.mutex_unlock(&cd.lock)
 	cd_close_locked()
@@ -94,20 +96,25 @@ cd_open :: proc(letter: u8) -> (cue_path: string, ok: bool) {
 	cd.gen += 1
 	cd.handle, cd.opened = disc_open(letter)
 	if !cd.opened do return "", false
-	toc, toc_ok := cd_read_toc(cd.handle)
-	if !toc_ok {
+	cd.toc = {}
+	if iso {
+		cd.toc.leadout, ok = iso_volume_sectors(cd.handle)
+	} else {
+		cd.toc, ok = cd_read_toc(cd.handle)
+	}
+	if !ok {
 		disc_close(cd.handle)
 		cd.opened = false
 		return "", false
 	}
-	cd.toc = toc
-	cd.cooked = disc_profile(cd.handle) >= 0x10
-	if cd.cooked do retro_log_line("[disc] DVD/BD medium: synthesizing raw sectors from 2048-byte reads")
 	for &s in cd.cache do s.block = -1
-
-	cd.cue = cd_cue_text(&toc, fmt.tprintf("disc%d.bin", cd.gen))
+	cd.iso = iso
+	cd.cooked = !iso && disc_profile(cd.handle) >= 0x10
+	if cd.cooked do retro_log_line("[disc] DVD/BD medium: synthesizing raw sectors from 2048-byte reads")
+	if iso do retro_log_line("[disc] %c: as .iso, %d sectors", letter, cd.toc.leadout)
+	else do cd.cue = cd_cue_text(&cd.toc, fmt.tprintf("disc%d.bin", cd.gen))
 	cd.ok = true
-	return cd_virtual_path(letter, cd.gen, "cue"), true
+	return fmt.aprintf("%s://%c/disc%d.%s", VIRTUAL_SCHEME, letter, cd.gen, iso ? "iso" : "cue"), true
 }
 
 // The .cue for a single-file raw image of `toc` (PlayStation discs: data in MODE2/2352). Caller deletes.
@@ -130,30 +137,6 @@ iso_volume_sectors :: proc(h: Disc_Handle) -> (sectors: int, ok: bool) {
 	return sectors, sectors > 16
 }
 
-// Opens the disc in `letter` as a plain .iso of its 2048-byte sectors (DVD-based systems).
-cd_open_iso :: proc(letter: u8) -> (iso_path: string, ok: bool) {
-	sync.mutex_lock(&cd.lock)
-	defer sync.mutex_unlock(&cd.lock)
-	cd_close_locked()
-	cd.letter = letter
-	cd.gen += 1
-	cd.handle, cd.opened = disc_open(letter)
-	if !cd.opened do return "", false
-	sectors, has_pvd := iso_volume_sectors(cd.handle)
-	if !has_pvd {
-		disc_close(cd.handle)
-		cd.opened = false
-		return "", false
-	}
-	cd.toc = {}
-	cd.toc.leadout = sectors
-	cd.iso = true
-	cd.cooked = false
-	for &s in cd.cache do s.block = -1
-	cd.ok = true
-	retro_log_line("[disc] %c: as .iso, %d sectors", letter, cd.toc.leadout)
-	return cd_virtual_path(letter, cd.gen, "iso"), true
-}
 
 cd_close :: proc() {
 	sync.mutex_lock(&cd.lock)
@@ -170,9 +153,6 @@ cd_close_locked :: proc() {
 	cd.cue = ""
 }
 
-cd_virtual_path :: proc(letter: u8, gen: int, ext: string) -> string {
-	return fmt.aprintf("%s://%c/disc%d.%s", VIRTUAL_SCHEME, letter, gen, ext)
-}
 
 cd_sector_size :: proc() -> int {
 	return cd.iso ? ISO_SECTOR : RAW_SECTOR
@@ -349,7 +329,7 @@ vfs_iface := Vfs_Interface {
 // "saber-disc://F/disc3.bin" -> (.Bin, 3). Cores may join the .bin name with either slash.
 vfs_classify :: proc(path: string) -> (kind: Vfs_Kind, gen: int) {
 	p, _ := strings.replace_all(path, "\\", "/", context.temp_allocator)
-	p = strings.to_lower(p, context.temp_allocator)
+	p = ascii_lower(p, context.temp_allocator)
 	prefix := fmt.tprintf("%s://%c/disc", VIRTUAL_SCHEME, cd.letter | 0x20)
 	if !strings.has_prefix(p, prefix) do return .Real, 0
 	rest := p[len(prefix):]
@@ -372,7 +352,7 @@ vfs_get_path :: proc "c" (stream: rawptr) -> cstring {
 
 vfs_open :: proc "c" (path: cstring, mode: c.uint, hints: c.uint) -> rawptr {
 	context = runtime.default_context()
-	defer free_all(context.temp_allocator)
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // only what this call allocates: the core may call in from the main thread mid-frame
 	if path == nil do return nil
 	p := string(path)
 	kind, gen := vfs_classify(p)
@@ -513,7 +493,7 @@ vfs_rename :: proc "c" (old_path, new_path: cstring) -> c.int {
 
 vfs_stat :: proc "c" (path: cstring, size: ^i32) -> c.int {
 	context = runtime.default_context()
-	defer free_all(context.temp_allocator)
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // only what this call allocates: the core may call in from the main thread mid-frame
 	if path == nil do return 0
 	p := string(path)
 	kind, gen := vfs_classify(p)
@@ -586,15 +566,11 @@ iso_read_root_file :: proc(letter: u8, name: string, max_size := 64 * 1024, allo
 	read :: proc(ctx: rawptr, lba: u32, buf: []byte) -> bool {
 		return disc_read_user((^Disc_Handle)(ctx)^, int(lba), buf)
 	}
-	return iso_find_root_file(read, &h, name, max_size, allocator)
+	return iso_find_file(read, &h, name, max_size, allocator)
 }
 
-// Walks the ISO9660 root directory; `read` fetches whole 2048-byte user sectors starting at lba.
-iso_find_root_file :: proc(read: proc(ctx: rawptr, lba: u32, buf: []byte) -> bool, h: rawptr, name: string, max_size: int, allocator := context.allocator) -> (data: []byte, ok: bool) {
-	return iso_find_file(read, h, name, max_size, allocator)
-}
-
-// Like iso_find_root_file, but `path` may name subfolders: "PS3_GAME/PARAM.SFO".
+// A file of an ISO9660 filesystem by its path ("SYSTEM.CNF", "PS3_GAME/PARAM.SFO");
+// `read` fetches whole 2048-byte user sectors starting at lba.
 iso_find_file :: proc(read: proc(ctx: rawptr, lba: u32, buf: []byte) -> bool, h: rawptr, path: string, max_size: int, allocator := context.allocator) -> (data: []byte, ok: bool) {
 	le32 :: proc(b: []byte) -> u32 {return u32(b[0]) | u32(b[1]) << 8 | u32(b[2]) << 16 | u32(b[3]) << 24}
 
@@ -619,7 +595,7 @@ iso_find_file :: proc(read: proc(ctx: rawptr, lba: u32, buf: []byte) -> bool, h:
 			id := string(dir[i + 33:][:min(int(dir[i + 32]), len(dir) - i - 33)])
 			if semi := strings.index_byte(id, ';'); semi >= 0 do id = id[:semi]
 			is_dir := dir[i + 25] & 2 != 0
-			if strings.equal_fold(id, part) && is_dir != last {
+			if eq_fold(id, part) && is_dir != last {
 				dir_lba, dir_len = le32(dir[i + 2:]), le32(dir[i + 10:])
 				found = true
 				break
