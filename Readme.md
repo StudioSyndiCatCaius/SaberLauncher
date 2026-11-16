@@ -18,7 +18,7 @@ Saber is a free minimal Game Launcher & Frontend with support for running games 
 | ![Home](res/screenshots/home.png) Home: inserted games | ![Games](res/screenshots/games.png) Games library |
 | ![Apps](res/screenshots/apps.png) Apps | ![Plugins](res/screenshots/plugins.png) Plugins |
 | ![Get Plugins](res/screenshots/get_plugins.png) Plugin store | ![Settings](res/screenshots/settings.png) Settings |
-
+ 
 
 ### Off-The-Disc Play Support
 
