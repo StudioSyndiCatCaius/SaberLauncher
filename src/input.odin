@@ -26,6 +26,7 @@ Input :: struct {
 	power:                 bool, // Select / Back
 	extra:                 bool, // Y
 	action:                bool, // X: a game's actions menu (install.odin)
+	menu:                  bool, // Start / Backspace: Home's options menu (Start also sets power elsewhere)
 	using_pad:             bool,
 	mouse_eaten:           bool, // a modal took this frame's mouse: screens below ignore hover/clicks
 	repeat_dir:            Nav_Dir,
@@ -37,7 +38,7 @@ input: Input
 eat_input :: proc() {
 	input.up, input.down, input.left, input.right = false, false, false, false
 	input.confirm, input.cancel, input.menu_l, input.menu_r = false, false, false, false
-	input.power, input.extra, input.action = false, false, false
+	input.power, input.extra, input.action, input.menu = false, false, false, false
 }
 
 input_poll :: proc() {
@@ -65,6 +66,7 @@ input_poll :: proc() {
 		if rl.IsGamepadButtonPressed(p, .LEFT_TRIGGER_1) { input.menu_l = true }
 		if rl.IsGamepadButtonPressed(p, .RIGHT_TRIGGER_1) { input.menu_r = true }
 		if rl.IsGamepadButtonPressed(p, .MIDDLE_LEFT) || rl.IsGamepadButtonPressed(p, .MIDDLE_RIGHT) { input.power = true }
+		if rl.IsGamepadButtonPressed(p, .MIDDLE_RIGHT) { input.menu = true }
 		if rl.IsGamepadButtonPressed(p, .RIGHT_FACE_UP) { input.extra = true }
 		if rl.IsGamepadButtonPressed(p, .RIGHT_FACE_LEFT) { input.action = true }
 	}
@@ -80,6 +82,7 @@ input_poll :: proc() {
 	if rl.IsKeyPressed(.ESCAPE) || rl.IsKeyPressed(.TAB) { input.power = true }
 	if rl.IsKeyPressed(.F5) || rl.IsKeyPressed(.Y) { input.extra = true }
 	if rl.IsKeyPressed(.X) { input.action = true }
+	if rl.IsKeyPressed(.BACKSPACE) { input.menu = true } // also cancel; Home has nothing to go back to
 
 	dir := Nav_Dir.None
 	if dy != 0 {
@@ -153,7 +156,7 @@ nav_grid :: proc(sel: ^int, count, cols: int) -> bool {
 SCREEN_ORDER :: [SCREEN_COUNT]Screen{.Main, .Library, .Movies, .Apps, .Plugins, .Settings}
 
 go_screen :: proc(next: Screen) {
-	if next == app.screen do return
+	if next == app.screen || !tab_visible(next) do return
 	dir := int(next) - int(app.screen)
 	if dir > SCREEN_COUNT / 2 { dir -= SCREEN_COUNT }
 	if dir < -SCREEN_COUNT / 2 { dir += SCREEN_COUNT }
@@ -168,7 +171,12 @@ go_screen :: proc(next: Screen) {
 
 cycle_screen :: proc(delta: int) {
 	order := SCREEN_ORDER
-	go_screen(order[cycle(int(app.screen), delta, SCREEN_COUNT)])
+	i := int(app.screen)
+	for _ in 0 ..< SCREEN_COUNT {
+		i = cycle(i, delta, SCREEN_COUNT)
+		if tab_visible(order[i]) do break
+	}
+	go_screen(order[i])
 }
 
 update_swipe :: proc() {

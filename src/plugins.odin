@@ -15,7 +15,7 @@ package saber
 //   }
 //
 // `game` passed to on_game: { serial, platform, label, title }.
-// Lua API: saber.log(msg), saber.version, plus globals PLUGIN_DIR, Dialog_Info / Dialog_Process / Dialog_Menu (plugin_dialogs.odin), Online / Http_Get / Http_Download / Http_Pending (online.odin). Errors go to APP/plugins/plugins.log.
+// Lua API: saber.log(msg), saber.version, plus globals PLUGIN_DIR, Dialog_Info / Dialog_Process / Dialog_Menu (plugin_dialogs.odin), UI_Open / UI_SearchBar / UI_Grid... + Play_Rom (plugin_ui.odin), Online / Http_Get / Http_Download / Http_Pending (online.odin). Errors go to APP/plugins/plugins.log.
 // Earlier sources win: games table first, then on_game, plugins in file-name order.
 
 import "base:runtime"
@@ -143,6 +143,7 @@ plugins_shutdown :: proc() {
 	for &d in plugin_dialogs do dialog_free(&d)
 	clear(&plugin_dialogs)
 	for p in plugins {
+		if p.L != nil do plugin_view_forget(p.L)
 		if p.L != nil do lua_close(p.L)
 		if p.has_icon do rl.UnloadTexture(p.icon)
 	}
@@ -176,6 +177,14 @@ PLUGIN_API := [?]struct {
 	{"Http_Pending", lua_http_pending},
 	{"Register_App", lua_register_app},
 	{"Unregister_App", lua_unregister_app},
+	{"UI_Open", lua_ui_open},
+	{"UI_Close", lua_ui_close},
+	{"UI_Title", lua_ui_title},
+	{"UI_Text", lua_ui_text},
+	{"UI_SearchBar", lua_ui_search_bar},
+	{"UI_Grid", lua_ui_grid},
+	{"UI_Hints", lua_ui_hints},
+	{"Play_Rom", lua_play_rom},
 }
 
 lua_set_global_string :: proc(L: ^lua_State, name: cstring, value: string) {
@@ -407,6 +416,8 @@ plugins_apply :: proc(g: ^Game, from_ini := false) {
 		lua_settop(L, top)
 	}
 
+	// a picture named like the ROM beside it ("Game.gba" + "Game.png") beats plugin art
+	if side := rom_side_cover(g.rom_path); side != "" do m.box = side
 	if m.box != "" && os.exists(m.box) && !(from_ini && g.has_box) do game_set_box(g, m.box)
 	if !from_ini {
 		if m.title != "" {

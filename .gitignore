@@ -20,6 +20,8 @@ AGENTS.md
 /plugins/*/settings.ini
 /plugins/*/covers/
 /plugins/*/tmp/
+/plugins/ArchiveNES/roms/
+/plugins/ArchiveNES/roms.txt
 /plugins/*.log
 ReleaseLatest.py
 release.bat

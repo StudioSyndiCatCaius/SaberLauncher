@@ -100,6 +100,7 @@ main :: proc() {
 	app.movies_dir = path_join({app.exe_dir, "movies"})
 	app.settings_path = path_join({app.exe_dir, "Saber.ini"})
 	app.settings = settings_load(app.settings_path)
+	app.screen = home_tab()
 	app.selected_drive = 0
 	app.swipe_t = 1
 
@@ -143,6 +144,7 @@ main :: proc() {
 		install_update()
 		bios_job_poll()
 		theme_update()
+		autochange_update()
 		if rl.IsKeyPressed(.F11) do rl.ToggleBorderlessWindowed()
 		input_poll()
 		online_update()
@@ -180,9 +182,11 @@ main :: proc() {
 		draw_install_card(w, h)
 		draw_power_dialog(w, h)
 		draw_game_menu(w, h)
+		draw_home_menu(w, h)
 		draw_app_menu(w, h)
 		draw_bios_menu(w, h)
 		draw_file_explorer(w, h)
+		draw_plugin_view(w, h)
 		draw_plugin_dialog(w, h)
 		emu_menu_draw(w, h)
 		glass.source = .Wall
@@ -370,7 +374,7 @@ draw_menus :: proc(w, h: f32) {
 
 // A modal is on screen (fading in or out included).
 dialog_visible :: proc() -> bool {
-	return app.power_open || app.power_t >= 0.02 || plugin_dialog_open() || emu_menu.open || emu_menu.t >= 0.02 || game_menu.open || game_menu.t >= 0.02 || app_menu.open || app_menu.t >= 0.02 || bios_menu.open || bios_menu.t >= 0.02 || explorer.open || explorer.t >= 0.02
+	return app.power_open || app.power_t >= 0.02 || plugin_dialog_open() || emu_menu.open || emu_menu.t >= 0.02 || game_menu.open || game_menu.t >= 0.02 || home_menu.open || home_menu.t >= 0.02 || app_menu.open || app_menu.t >= 0.02 || bios_menu.open || bios_menu.t >= 0.02 || explorer.open || explorer.t >= 0.02 || pview.open || pview.t >= 0.02
 }
 
 input_locked :: proc() -> bool {
@@ -395,6 +399,10 @@ handle_app_input :: proc() {
 		eat_input()
 		return
 	}
+	if plugin_view_play_pending() {
+		eat_input()
+		return
+	}
 	// The front modal takes the frame's input, and (except the power dialog and the dropdown,
 	// which share the screen's mouse) the mouse too, so a click can't reach a card below.
 	modal: proc()
@@ -402,13 +410,17 @@ handle_app_input :: proc() {
 	switch {
 	case emu_menu.open:        modal = emu_menu_input
 	case plugin_dialog_open(): modal = handle_plugin_dialog_input
+	case pview.open:           modal = plugin_view_input
 	case power_blocking():     modal, mouse = handle_power_input, false
 	case app.swipe_t < 1:      return
 	case game_menu.open:       modal = game_menu_input
+	case home_menu.open:       modal = home_menu_input
 	case app_menu.open:        modal = app_menu_input
 	case explorer.open:        modal = explorer_input
 	case bios_menu.open:       modal = bios_menu_input
 	case drives_menu.open:     modal = drives_menu_input
+	case tabs_menu.open:       modal = tabs_menu_input
+	case bkg_picker.open:      modal = bkg_picker_input
 	case app.dropdown_open:    modal, mouse = handle_dropdown_input, false
 	}
 	if modal != nil {
@@ -419,6 +431,7 @@ handle_app_input :: proc() {
 	}
 	handled := true
 	switch {
+	case input.menu && app.screen == .Main: home_menu_open() // Start on Home: options, not power
 	case input.power: open_power_dialog()
 	case input.menu_l || input.menu_r: cycle_screen(input.menu_l ? -1 : 1)
 	case input.cancel && app.screen == .Plugins && (app.plugin_focus == 1 || app.plugin_page == 1):
@@ -427,9 +440,9 @@ handle_app_input :: proc() {
 		sfx_back()
 	case input.cancel && app.screen == .Apps && app.apps_page == 1: apps_toggle_page()
 	case input.cancel:
-		if app.screen != .Main {
+		if app.screen != home_tab() {
 			sfx_back()
-			go_screen(.Main)
+			go_screen(home_tab())
 		}
 	case:
 		handled = false
@@ -450,13 +463,17 @@ handle_app_input :: proc() {
 	switch app.screen {
 	case .Main:
 		if len(app.drive_games) > 0 {
-			if input.left && app.selected_drive > 0 {
-				app.selected_drive -= 1
-				sfx_click()
-			}
-			if input.right && app.selected_drive < len(app.drive_games) - 1 {
-				app.selected_drive += 1
-				sfx_click()
+			if cols := home_grid_cols(); cols > 0 {
+				nav_grid(&app.selected_drive, len(app.drive_games), cols)
+			} else {
+				if input.left && app.selected_drive > 0 {
+					app.selected_drive -= 1
+					sfx_click()
+				}
+				if input.right && app.selected_drive < len(app.drive_games) - 1 {
+					app.selected_drive += 1
+					sfx_click()
+				}
 			}
 			if input.confirm {
 				activate_item(.Main, app.selected_drive)
@@ -486,11 +503,14 @@ handle_app_input :: proc() {
 Settings_Row :: enum {
 	Ui_Theme,
 	Wallpaper,
+	Wallpaper_Auto,
 	Music,
+	Music_Auto,
 	Volume,
 	Font,
 	Online_Mode,
 	Ignored_Drives,
+	Visible_Tabs,
 	Emulation,
 	Save_States,
 	Launch_Mode,
@@ -512,18 +532,25 @@ settings_change :: proc(row: Settings_Row, step: int) {
 	fwd := step == 0 ? 1 : step
 	switch row {
 	case .Ui_Theme:    cycle_ui_theme(fwd)
-	case .Wallpaper:   cycle_bkg(fwd)
+	case .Wallpaper:
+		if step == 0 do bkg_picker_open()
+		else do cycle_bkg(step)
 	case .Music:       cycle_bgm(fwd)
+	case .Wallpaper_Auto, .Music_Auto:
+		st := row == .Wallpaper_Auto ? &app.settings.bkg_auto : &app.settings.bgm_auto
+		auto_set_mode(st, Auto_Change(cycle(int(st.mode), fwd, len(Auto_Change))))
+		sfx_click()
 	case .Font:        cycle_font(fwd)
 	case .Online_Mode: set_online_mode(!app.settings.online_mode)
 	case .Volume:
 		if step == 0 do return
 		set_volume(app.settings.volume + f32(step) * 0.05)
 		sfx_click()
-	case .Ignored_Drives, .Emulation, .Save_States, .Launch_Mode, .Updates, .Desktop, .Restart:
+	case .Ignored_Drives, .Visible_Tabs, .Emulation, .Save_States, .Launch_Mode, .Updates, .Desktop, .Restart:
 		if step != 0 do return // these only open / run something
 		#partial switch row {
 		case .Ignored_Drives: drives_menu_open()
+		case .Visible_Tabs:   tabs_menu_open()
 		case .Emulation:      emu_open(false)
 		case .Save_States:    open_dropdown(.Save_Mode)
 		case .Launch_Mode:    open_dropdown()

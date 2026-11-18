@@ -492,6 +492,7 @@ plugin_delete :: proc(idx: int) {
 			r.callback = LUA_NOREF
 			r.L = nil
 		}
+		plugin_view_forget(p.L)
 		lua_close(p.L)
 	}
 	if p.has_icon do rl.UnloadTexture(p.icon)

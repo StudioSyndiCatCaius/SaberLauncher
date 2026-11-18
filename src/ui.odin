@@ -265,8 +265,12 @@ draw_header :: proc(w: f32) {
 	size: f32 = 17
 	gap: f32 = 36
 	total: f32 = 0
-	for label in TAB_LABELS do total += measure_t(label, size)
-	total += gap * f32(SCREEN_COUNT - 1)
+	shown := 0
+	for label, s in TAB_LABELS do if tab_visible(s) {
+		total += measure_t(label, size)
+		shown += 1
+	}
+	total += gap * f32(shown - 1)
 	x := (w - total) * 0.5
 	ty: f32 = 33
 	if app.tab_w > 0 {
@@ -276,6 +280,7 @@ draw_header :: proc(w: f32) {
 	}
 	draw_glyph("LB", x - 64, ty + 9)
 	for label, s in TAB_LABELS {
+		if !tab_visible(s) do continue
 		tw := measure_t(label, size)
 		r := rl.Rectangle{x - 10, 16, tw + 20, HEADER_H - 24}
 		active := s == app.screen
@@ -316,9 +321,11 @@ draw_footer :: proc(w, h: f32) {
 	switch {
 	case plugin_dialog_open():
 		// the dialog draws its own hints
+	case pview.open: // so does a plugin view
 	case explorer.open: explorer_hints(w, h)
-	case app.power_open, game_menu.open, bios_menu.open, app_menu.open: draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Back"}})
-	case drives_menu.open: draw_hints(w, h, []Hint{{"A", "Toggle"}, {"B", "Done"}})
+	case app.power_open, game_menu.open, home_menu.open, bios_menu.open, app_menu.open: draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Back"}})
+	case bkg_picker.open: draw_hints(w, h, []Hint{{"A", "Set Background"}, {"B", "Back"}})
+	case drives_menu.open, tabs_menu.open: draw_hints(w, h, []Hint{{"A", "Toggle"}, {"B", "Done"}})
 	case app.dropdown_open: draw_hints(w, h, []Hint{{"A", "Choose"}, {"B", "Close"}})
 	case app.screen == .Plugins && app.plugin_page == 1:
 		draw_hints(w, h, []Hint{{"A", store.sel[.Plugin] == 0 ? "Refresh" : "Download"}, {"B", "Plugins"}, {"Y", "Installed"}, {"LB / RB", "Menus"}})
@@ -343,7 +350,7 @@ draw_footer :: proc(w, h: f32) {
 		}
 	case app.screen == .Settings: draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Home"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
 	case app.screen == .Main:
-		draw_hints(w, h, []Hint{{"A", "Play"}, {"X", "Actions"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
+		draw_hints(w, h, []Hint{{"A", "Play"}, {"X", "Actions"}, {"Y", "Rescan"}, {"START", "Options"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
 	case app.screen == .Library:
 		draw_hints(w, h, []Hint{{"A", "Play"}, {"X", "Actions"}, {"B", "Home"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}})
 	case app.screen == .Apps:
@@ -516,6 +523,11 @@ draw_main :: proc(w, h: f32) {
 	info_h: f32 = 130
 	area_top := top + 40
 	area_h := bottom - area_top - info_h
+	if cols := home_grid_cols(); cols > 0 {
+		draw_main_grid(cols, w, area_top, area_h)
+		draw_main_info(w, area_top + area_h + 24)
+		return
+	}
 	card_h := area_h
 	card_w := (card_h - TITLE_STRIP) / 1.4
 	gap: f32 = 40
@@ -578,8 +590,18 @@ draw_main :: proc(w, h: f32) {
 		if k > 0.02 do rl.DrawRectangleRounded(r, roundness(r, RADIUS), 8, with_alpha(COL_SHADE, u8(110 * k * alpha)))
 	}
 
-	g := &app.drive_games[sel]
-	iy := area_top + card_h + 24
+	if mouse_over({0, area_top, w, card_h}) && rl.IsMouseButtonPressed(.RIGHT) && !input.mouse_eaten && !home_cards_hovered() do home_menu_open()
+	draw_main_info(w, area_top + card_h + 24)
+}
+
+home_cards_hovered :: proc() -> bool {
+	for &g in app.drive_games do if mouse_over(g.last_rect) do return true
+	return false
+}
+
+// The focused Home game's title and facts, under the cards.
+draw_main_info :: proc(w, iy: f32) {
+	g := &app.drive_games[clamp(app.selected_drive, 0, len(app.drive_games) - 1)]
 	draw_t_center(g.title, w * 0.5, iy, 30, COL_TEXT)
 	meta := fmt.tprintf("%s  ·  played %s", g.drive_label, format_playtime(g.playtime_seconds))
 	if g.tags != "" do meta = fmt.tprintf("%s  ·  %s", g.tags, meta)
@@ -593,6 +615,84 @@ draw_main :: proc(w, h: f32) {
 		draw_t_center(strings.join(parts[:], "  ·  ", context.temp_allocator), w * 0.5, iy + 68, 16, COL_MUTED)
 	}
 }
+
+// Columns of Home's grid; 0 = the one-row carousel (setting Unlimited). Card size depends
+// only on the setting, never on how many games are inserted.
+home_grid_cols :: proc() -> int {
+	return max(app.settings.home_per_row, 0)
+}
+
+// Home with "Max Games per Row" set: rows of `cols` cards, each card's glass hugging its box
+// art, packed with a fixed gap; the grid is centred, rows fill from its left edge. One card height for the whole grid: the
+// widest cover still lets `cols` cards fit the width, and it stays well under the area's
+// height so the rows above / below the focused (vertically centred) one peek in, faded.
+draw_main_grid :: proc(cols: int, w, area_top, area_h: f32) {
+	n := len(app.drive_games)
+	sel := clamp(app.selected_drive, 0, n - 1)
+	gap: f32 = 22
+	view_h := area_h - 10 // room for the focus ring under a row
+
+	aspect_of :: proc(g: ^Game) -> f32 {
+		if g.has_box && g.box.height > 0 do return clamp(f32(g.box.width) / f32(g.box.height), 0.5, 1.6)
+		return 1 / 1.4 // no art: the usual box shape
+	}
+	max_aspect: f32 = 1 / 1.4
+	for &g in app.drive_games do max_aspect = max(max_aspect, aspect_of(&g))
+	slot_w := (w - PAD * 2 - gap * f32(cols - 1)) / f32(cols)
+	art_h := min((slot_w - 16) / max_aspect, view_h * HOME_GRID_MAX_H - 16 - TITLE_STRIP)
+	card_h := art_h + 16 + TITLE_STRIP
+	row_h := card_h + gap
+
+	// focused row centred, clamped so the first / last row sit at the edges
+	total_rows := (n + cols - 1) / cols
+	content_h := f32(total_rows) * row_h - gap
+	target := f32(sel / cols) * row_h - (view_h - card_h) * 0.5
+	target = content_h <= view_h ? (content_h - view_h) * 0.5 : clamp(target, 0, content_h - view_h)
+	app.scroll[.Main] = smooth_to(app.scroll[.Main], target, 14)
+
+	// the grid as a whole is centred on its widest row; each row fills from that left edge
+	grid_w: f32 = 0
+	for row in 0 ..< total_rows {
+		row_w := -gap
+		for i in row * cols ..< min(row * cols + cols, n) do row_w += art_h * aspect_of(&app.drive_games[i]) + 16 + gap
+		grid_w = max(grid_w, row_w)
+	}
+	grid_left := (w - grid_w) * 0.5
+
+	draw_drive_ghosts()
+	push_clip({0, area_top - 12, w, area_h + 12})
+	hit := false
+	for row in 0 ..< total_rows {
+		a, b := row * cols, min(row * cols + cols, n)
+		x := grid_left
+		y := area_top + f32(row) * row_h - app.scroll[.Main]
+		// rows fade with how much of them is in view; follows the smooth scroll, so it eases too
+		vis_top, vis_bot := max(y, area_top), min(y + card_h, area_top + view_h)
+		frac := clamp((vis_bot - vis_top) / card_h, 0, 1)
+		frac = frac * frac * (3 - 2 * frac) // smoothstep
+		row_alpha := 0.35 + 0.65 * frac
+		for i in a ..< b {
+			g := &app.drive_games[i]
+			cw := art_h * aspect_of(g) + 16
+			g.anim_t = min(1, g.anim_t + rl.GetFrameTime() * 2.4)
+			pop := ease_out_back(g.anim_t)
+			alpha := min(1, g.anim_t * 1.6) * row_alpha
+			scale := 0.6 + 0.4 * pop
+			r := rl.Rectangle{x + cw * (1 - scale) * 0.5, y + card_h * (1 - scale) * 0.5 + (1 - g.anim_t) * 40, cw * scale, card_h * scale}
+			x += cw + gap
+			g.last_rect = r
+			g.has_slot = false // back in the carousel, cards start from their slot again
+			if r.y + r.height < area_top - 12 || r.y > area_top + area_h do continue
+			if mouse_over(r) do hit = true
+			card_mouse(.Main, i, r)
+			draw_card(card_for(.Main, i), r, i == sel, cw < 200 ? 15 : 18, alpha)
+		}
+	}
+	pop_clip()
+	if !hit && !input.mouse_eaten && mouse_over({0, area_top, w, area_h}) && rl.IsMouseButtonPressed(.RIGHT) do home_menu_open()
+}
+
+HOME_GRID_MAX_H :: 0.7 // a card's share of the grid's height at most: neighbour rows peek in
 
 // ---------------------------------------------------------------------------
 // Grid pages (games / movies / apps)
@@ -730,11 +830,14 @@ draw_detail :: proc(s: Screen, i: int, r: rl.Rectangle) {
 SETTINGS_LABELS := [Settings_Row]string {
 	.Ui_Theme    = "UI theme",
 	.Wallpaper   = "Wallpaper",
+	.Wallpaper_Auto = "Wallpaper autochange",
 	.Music       = "Theme music",
+	.Music_Auto  = "Music autochange",
 	.Volume      = "Music volume",
 	.Font        = "Font",
 	.Online_Mode = "Online Mode",
 	.Ignored_Drives = "Ignored drives",
+	.Visible_Tabs = "Visible Tabs",
 	.Emulation   = "Emulation",
 	.Save_States = "Save states",
 	.Launch_Mode = "Launch mode",
@@ -746,6 +849,7 @@ SETTINGS_LABELS := [Settings_Row]string {
 // What the rows that open something show on their right.
 SETTINGS_ACTION_LABELS := #partial [Settings_Row]string {
 	.Ignored_Drives = "None",
+	.Visible_Tabs   = "All",
 	.Emulation      = "Open settings",
 	.Desktop        = "Open Explorer",
 	.Restart        = "Restart",
@@ -753,12 +857,15 @@ SETTINGS_ACTION_LABELS := #partial [Settings_Row]string {
 
 SETTINGS_HELP := [Settings_Row]string {
 	.Ui_Theme    = "Menu colors inspired by classic consoles.",
-	.Wallpaper   = "Images from APP/assets/bkg.",
+	.Wallpaper   = "Images from APP/assets/bkg. A opens a picker; Left / Right cycles.",
+	.Wallpaper_Auto = "Picks a random wallpaper each period, never repeating until all were shown.",
 	.Music       = "Tracks from APP/assets/bgm.",
+	.Music_Auto  = "Picks a random track each period, never repeating until all were played.",
 	.Volume      = "Background music level.",
 	.Font        = "Bundled fonts from APP/assets/fonts, then Windows fonts.",
 	.Online_Mode = "Lets plugins use the internet (e.g. cover downloads). Turning it off stops all online activity at once.",
 	.Ignored_Drives = "Hard drives (besides the system drive) that are never scanned for games.",
+	.Visible_Tabs = "Choose which tabs show in the header. Settings is always visible.",
 	.Emulation   = "Video, audio, controls and emulator cores for console games.",
 	.Save_States = "",
 	.Launch_Mode = "",
@@ -810,7 +917,7 @@ draw_settings :: proc(w, h: f32) {
 		r := rl.Rectangle{x, y + f32(i) * step, pw, ROW_H}
 		focused := app.settings_focus == i
 		if r.y + r.height < list.y || r.y > list.y + list.height do continue
-		if !app.dropdown_open && !drives_menu.open && mouse_over(r) && mouse_over(list) && app.settings_focus != i {
+		if !app.dropdown_open && !drives_menu.open && !tabs_menu.open && !bkg_picker.open && mouse_over(r) && mouse_over(list) && app.settings_focus != i {
 			app.settings_focus = i
 			hover_enter(fmt.tprintf("set-%d", i))
 		}
@@ -825,6 +932,10 @@ draw_settings :: proc(w, h: f32) {
 		case .Ui_Theme: d = draw_stepper(val, app.settings.ui_theme, index_of_ui_theme(app.settings.ui_theme), len(UI_THEMES), focused)
 		case .Wallpaper:
 			d = draw_stepper(val, app.settings.bkg != "" ? app.settings.bkg : "None", index_of_name(theme.bkg_files[:], app.settings.bkg), len(theme.bkg_files), focused)
+			if d == 0 && clicked && !app.dropdown_open && !drives_menu.open && !tabs_menu.open && !bkg_picker.open && mouse_over(val) do bkg_picker_open()
+		case .Wallpaper_Auto, .Music_Auto:
+			m := row == .Wallpaper_Auto ? app.settings.bkg_auto.mode : app.settings.bgm_auto.mode
+			d = draw_stepper(val, AUTO_CHANGE_NAMES[m], int(m), len(Auto_Change), focused)
 		case .Music:
 			d = draw_stepper(val, app.settings.bgm != "" ? filepath.stem(app.settings.bgm) : "None", index_of_name(theme.bgm_files[:], app.settings.bgm), len(theme.bgm_files), focused)
 		case .Font: d = draw_stepper(val, ui_font_name, max(index_of_font(app.settings.font), 0), len(font_choices), focused)
@@ -836,13 +947,14 @@ draw_settings :: proc(w, h: f32) {
 			else do launch_row = r
 			draw_select_box(val, save ? SAVE_MODE_NAMES[app.settings.save_mode] : LAUNCH_MODE_NAMES[app.settings.launch_mode], focused)
 			if !app.dropdown_open && mouse_over(val) && clicked do settings_change(row, 0)
-		case .Ignored_Drives, .Emulation, .Updates, .Desktop, .Restart:
+		case .Ignored_Drives, .Visible_Tabs, .Emulation, .Updates, .Desktop, .Restart:
 			label := SETTINGS_ACTION_LABELS[row]
 			if row == .Updates do label = UPDATE_STATUS[update_get_state()]
 			if row == .Ignored_Drives && app.settings.ignore_drives != 0 do label = drive_letters(app.settings.ignore_drives, ", ")
+			if row == .Visible_Tabs && app.settings.hidden_tabs != {} do label = fmt.tprintf("%d hidden", card(app.settings.hidden_tabs))
 			draw_t_right(label, val.x + val.width - 40, val.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
 			draw_glyph("A", val.x + val.width - 26, val.y + val.height * 0.5)
-			if !drives_menu.open && mouse_over(r) && clicked do settings_change(row, 0)
+			if !drives_menu.open && !tabs_menu.open && !bkg_picker.open && mouse_over(r) && clicked do settings_change(row, 0)
 		}
 		if d != 0 do settings_change(row, d)
 	}
@@ -850,11 +962,13 @@ draw_settings :: proc(w, h: f32) {
 	help := SETTINGS_HELP[Settings_Row(app.settings_focus)]
 	if Settings_Row(app.settings_focus) == .Launch_Mode do help = LAUNCH_MODE_HELP[app.settings.launch_mode]
 	if Settings_Row(app.settings_focus) == .Save_States do help = SAVE_MODE_HELP[app.settings.save_mode]
-	if !app.dropdown_open && !drives_menu.open do draw_t(help, x + 4, y + f32(SETTINGS_ROWS) * step + 8, 16, COL_MUTED)
+	if !app.dropdown_open && !drives_menu.open && !tabs_menu.open && !bkg_picker.open do draw_t(help, x + 4, y + f32(SETTINGS_ROWS) * step + 8, 16, COL_MUTED)
 	pop_clip()
 
 	draw_dropdown(app.dropdown_kind == .Save_Mode ? save_row : launch_row)
 	drives_menu_draw(w, h)
+	tabs_menu_draw(w, h)
+	bkg_picker_draw(w, h)
 }
 
 // "< value  2/5 >" control (count 0: no counter); returns -1 / +1 when an arrow is clicked.

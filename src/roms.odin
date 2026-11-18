@@ -185,6 +185,29 @@ rom_game :: proc(fi: os.File_Info, label: string, platform: Retro_Platform, seri
 	return g
 }
 
+// "<dir>\<rom stem>.png|.jpg|.jpeg" next to a ROM, "" if none (temp).
+rom_side_cover :: proc(rom_path: string) -> string {
+	if rom_path == "" do return ""
+	base := rom_path[:len(rom_path) - len(filepath.ext(rom_path))]
+	for ext in ([]string{".png", ".jpg", ".jpeg"}) {
+		p := fmt.tprintf("%s%s", base, ext)
+		if os.exists(p) do return p
+	}
+	return ""
+}
+
+// A cartridge ROM whose start reads as zeros: a bad copy / burn (the core would just refuse it).
+rom_is_blank :: proc(path: string) -> bool {
+	f, err := os.open(path)
+	if err != nil do return false
+	defer os.close(f)
+	buf: [64 * 1024]byte
+	n, _ := os.read_at(f, buf[:], 0)
+	if n <= 0 do return false
+	for b in buf[:n] do if b != 0 do return false
+	return true
+}
+
 // A .cue whose first track holds a PlayStation filesystem (SYSTEM.CNF with BOOT=).
 cue_game :: proc(fi: os.File_Info, label: string) -> (Game, bool) {
 	serial, ok := cue_ps1_serial(fi.fullpath)

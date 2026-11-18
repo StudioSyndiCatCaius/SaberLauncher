@@ -577,7 +577,13 @@ retro_play :: proc(g: ^Game) -> (ok: bool, err: string) {
 		retro.core.deinit()
 		cd_close()
 		if g.platform == .PS3 do return false, "RPCS3 couldn't load this game (needs PS3UPDAT.PUP in APP\\libretro\\system\\rpcs3\\firmware)"
-		if is_rom do return false, "The emulator couldn't load this game (missing BIOS in APP\\libretro\\system?)"
+		if is_rom {
+			// cartridge ROMs only: disc images legitimately start with zeros (ISO system area)
+			if _, cart_rom := rom_platform(ext_lower(g.rom_path)); cart_rom && rom_is_blank(g.rom_path) {
+				return false, "This ROM file is blank (all zeros): the copy is damaged, burn / copy it again"
+			}
+			return false, "The emulator couldn't load this game (bad ROM, or missing BIOS in APP\\libretro\\system?)"
+		}
 		bios_dir := g.platform == .PS2 ? "system\\pcsx2\\bios" : "system"
 		return false, fmt.tprintf("The emulator couldn't boot this disc (missing BIOS in APP\\libretro\\%s?)", bios_dir)
 	}
