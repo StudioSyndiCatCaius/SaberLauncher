@@ -4,8 +4,9 @@ package saber
 // Plugins only get internet through these functions, and only while it's on:
 //
 //   Online()                                  -> true when Online Mode is on
-//   Http_Get(url, function(ok, body, status) end)            -- body = error text when not ok
-//   Http_Download(url, path, function(ok, err, status) end)  -- relative paths = the plugin's folder
+//   Http_Get(url, function(ok, body, status) end [, headers])            -- body = error text when not ok
+//   Http_Download(url, path, function(ok, err, status) end [, headers])  -- relative paths = the plugin's folder
+//   headers: { ["Authorization"] = "Bearer ...", ... } sent with the request
 //   Http_Pending()                            -> requests still running (handy for Dialog_Process)
 //
 // Requests run on worker threads; callbacks fire from the main loop. Turning Online Mode
@@ -48,6 +49,7 @@ Http_Request :: struct {
 	callback: c.int,
 	url:      string,
 	path:     string, // "" = keep the body in memory (Http_Get)
+	headers:  string, // extra request headers, "Name: value" CRLF lines
 	gen:      u64,
 	on_done:  proc(r: ^Http_Request), // Odin callers (plugin store): called instead of a Lua callback
 	user:     [2]int,
@@ -68,12 +70,13 @@ http_pending :: proc() -> int {
 	return len(http_requests)
 }
 
-http_start :: proc(L: ^lua_State, url, path: string, callback: c.int) {
+http_start :: proc(L: ^lua_State, url, path: string, callback: c.int, headers := "") {
 	r := new(Http_Request)
 	r.L = L
 	r.callback = callback
 	r.url = strings.clone(url)
 	r.path = strings.clone(path)
+	r.headers = strings.clone(headers)
 	r.gen = sync.atomic_load(&online_gen)
 	append(&http_requests, r)
 	if !online_enabled() {
@@ -163,8 +166,7 @@ http_deliver :: proc(r: ^Http_Request) {
 	}
 	lua_pushinteger(L, i64(r.status))
 	if lua_pcall(L, 3, 0, 0) != LUA_OK {
-		p := plugin_for_state(L)
-		name := p != nil ? p.name : "Plugin"
+		name := lua_owner_name(L)
 		msg := lua_string(L, -1)
 		plugin_logf("%s: http callback: %s", name, msg)
 		set_status("%s: %s", name, msg)
@@ -176,6 +178,7 @@ http_free :: proc(r: ^Http_Request) {
 	if r.callback != LUA_NOREF do luaL_unref(r.L, LUA_REGISTRYINDEX, r.callback)
 	delete(r.url)
 	delete(r.path)
+	delete(r.headers)
 	delete(r.body)
 	delete(r.err)
 	free(r)
@@ -210,7 +213,7 @@ lua_http_pending :: proc "c" (L: ^lua_State) -> c.int {
 // Http_Get(url, callback)
 lua_http_get :: proc "c" (L: ^lua_State) -> c.int {
 	context = runtime.default_context()
-	http_start(L, lua_string(L, 1), "", dialog_ref_arg(L, 2))
+	http_start(L, lua_string(L, 1), "", dialog_ref_arg(L, 2), lua_headers_arg(L, 3))
 	return 0
 }
 
@@ -222,6 +225,22 @@ lua_http_download :: proc "c" (L: ^lua_State) -> c.int {
 		lua_pushstring(L, "Http_Download: missing path")
 		return lua_error(L)
 	}
-	http_start(L, lua_string(L, 1), lua_plugin_path(L, path), dialog_ref_arg(L, 3))
+	http_start(L, lua_string(L, 1), lua_plugin_path(L, path), dialog_ref_arg(L, 3), lua_headers_arg(L, 4))
 	return 0
+}
+
+// A { name = value } table as "name: value" CRLF lines (temp); "" when absent.
+lua_headers_arg :: proc(L: ^lua_State, idx: c.int) -> string {
+	if lua_type(L, idx) != LUA_TTABLE do return ""
+	b := strings.builder_make(context.temp_allocator)
+	lua_pushnil(L)
+	for lua_next(L, idx) != 0 {
+		if lua_type(L, -2) == LUA_TSTRING {
+			k := lua_string(L, -2)
+			v := lua_string(L, -1)
+			if strings.index_any(k, "\r\n:") < 0 && strings.index_any(v, "\r\n") < 0 do fmt.sbprintf(&b, "%s: %s\r\n", k, v)
+		}
+		lua_pop(L, 1)
+	}
+	return strings.to_string(b)
 }

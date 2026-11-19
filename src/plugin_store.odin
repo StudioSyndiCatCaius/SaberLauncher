@@ -479,20 +479,7 @@ plugin_delete :: proc(idx: int) {
 	p := &plugins[idx]
 	if !plugin_is_downloaded(p) do return
 	if p.L != nil {
-		// drop everything still pointing into its Lua state
-		for i := len(plugin_dialogs) - 1; i >= 0; i -= 1 {
-			if plugin_dialogs[i].L == p.L {
-				dialog_free(&plugin_dialogs[i])
-				ordered_remove(&plugin_dialogs, i)
-			}
-		}
-		for r in http_requests {
-			if r.L != p.L do continue
-			if r.callback != LUA_NOREF do luaL_unref(r.L, LUA_REGISTRYINDEX, r.callback)
-			r.callback = LUA_NOREF
-			r.L = nil
-		}
-		plugin_view_forget(p.L)
+		lua_state_forget(p.L) // drop everything still pointing into its Lua state
 		lua_close(p.L)
 	}
 	if p.has_icon do rl.UnloadTexture(p.icon)

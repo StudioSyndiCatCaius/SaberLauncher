@@ -18,10 +18,23 @@ package saber
 //   picked, focused = UI_Grid(id, count, opts, tile)
 //       a scrolling tile grid filling the rest of the page. tile(i) is called only for the visible
 //       tiles and returns { title=, sub=, image=<png/jpg path>, badge=, progress=0..1 }.
-//       opts: { cols = 6, aspect = 1.0 (art height / width) }. picked = the 1-based index activated
+//       opts: { cols = 6, aspect = 1.0 (art height / width), cover = false (fill + crop the art) }. picked = the 1-based index activated
 //       this frame (A / click on the selected tile), else nil; focused = the selected index (nil if empty).
 //       The selection resets to the first tile whenever count changes.
 //   UI_Hints({ {"A", "Play"}, {"B", "Close"} })   footer hints for this frame.
+//   picked = UI_Sidebar(id, items [, { width = 320 }])
+//       a scrolling column on the left of the rest of the page (widgets after it go to its right).
+//       items: { { text = "Genre", header = true }, { text = "Action", checked = true, count = 12, radio = false }, ... }
+//       picked = the 1-based index of the row activated this frame (A / click), else nil.
+//       Right moves to the page; Left from the page's first column comes back.
+//   pressed = UI_Button(id, label)  a full-width button (A / click).
+//   UI_Image(path [, { height = 240, cover = true }])   a picture across the page.
+//   UI_Progress(fraction [, label])   a progress bar (fraction < 0 = unknown, animated).
+//   UI_Back() -> true when B / Esc was pressed this frame; the view then stays open (sub-pages).
+//   sel, changed = UI_Tabs(id, { "Play", "Browse" }, sel)   a tab bar (sel is 1-based); LB / RB or a click
+//       switch tabs. In a channel it is drawn as a full header above the page (channel name left, clock
+//       right, like Saber's own header); in a plugin view on the menus, as a row at the top of the page.
+//   Open_Url(url)  opens a web page in the default browser.   Clipboard() -> the clipboard's text ("" if none).
 //
 // Up / Down move between widgets; images are loaded a few per frame and cached until the view closes.
 
@@ -45,6 +58,7 @@ View_Grid :: struct {
 View_Image :: struct {
 	tex:  rl.Texture2D,
 	ok:   bool,
+	sh:   Thumb_Shader, // .glsl/.frag/.fs "images": live Shadertoy-style shaders (ok stays false)
 	used: u64, // frame it was last drawn
 }
 
@@ -76,7 +90,13 @@ Plugin_View :: struct {
 	loads:     int,
 	frames:    u64,
 	play:      string, // Play_Rom path (heap), started by handle_app_input
+	back_req:    bool, // B / Esc this frame: closes the view unless the frame called UI_Back
+	back_caught: bool,
+	side_id:   string, // this frame's sidebar (temp): Left from the page focuses it
+	focus_req: string, // focus this widget after the frame (temp)
 	play_plat: string,
+	screen_w:  f32,
+	tab_x, tab_w: f32, // UI_Tabs lens animation
 }
 
 pview: Plugin_View
@@ -88,20 +108,16 @@ plugin_view_input :: proc() {
 	pview.inp = input
 	if pview.editing && !pview.osk do pview.inp = {} // the keyboard is typing: WASD, Backspace, Esc are text keys
 	if pview.editing do return
-	if input.cancel || input.power {
-		sfx_back()
-		pview.close_req = true
-	}
+	if input.cancel || input.power do pview.back_req = true // handled after the frame (UI_Back)
 }
 
 plugin_view_open :: proc(L: ^lua_State, frame, on_close: c.int) {
 	plugin_view_close()
-	p := plugin_for_state(L)
 	pview.open = true
 	pview.L = L
 	pview.frame = frame
 	pview.on_close = on_close
-	pview.name = strings.clone(p != nil ? p.name : "Plugin")
+	pview.name = strings.clone(lua_owner_name(L))
 	sfx_click()
 }
 
@@ -125,14 +141,16 @@ plugin_view_close :: proc() {
 		}
 	}
 	pview.L = nil
+	pview.tab_x, pview.tab_w = 0, 0
 	pview.frame, pview.on_close = LUA_NOREF, LUA_NOREF
 	delete(pview.name)
 	delete(pview.focus)
 	pview.name, pview.focus = "", ""
 	for k in pview.grids do delete(k)
 	clear(&pview.grids)
-	for k, img in pview.images {
+	for k, &img in pview.images {
 		if img.ok do rl.UnloadTexture(img.tex)
+		thumb_shader_unload(&img.sh)
 		delete(k)
 	}
 	clear(&pview.images)
@@ -194,18 +212,24 @@ view_set_focus :: proc(id: string) {
 	pview.editing = false
 }
 
-// Cached texture of an image file; a few are loaded per frame.
-view_image :: proc(path: string) -> (rl.Texture2D, bool) {
-	if path == "" do return {}, false
+// Cached texture of an image file; a few are loaded per frame. A .glsl/.frag/.fs path gives a shader
+// instead (draw it with thumb_shader_draw).
+view_image :: proc(path: string) -> (rl.Texture2D, bool, ^Thumb_Shader) {
+	if path == "" do return {}, false, nil
 	if img, found := &pview.images[path]; found {
 		img.used = pview.frames
-		return img.tex, img.ok
+		return img.tex, img.ok, img.sh.ok ? &img.sh : nil
 	}
-	if pview.loads >= 4 do return {}, false
+	if pview.loads >= 4 do return {}, false, nil
 	pview.loads += 1
-	tex, ok := load_texture_smooth(path, 384)
-	pview.images[strings.clone(path)] = {tex, ok, pview.frames}
-	return tex, ok
+	if has_ext(path, ".glsl", ".frag", ".fs") {
+		pview.images[strings.clone(path)] = {sh = thumb_shader_load(path), used = pview.frames}
+	} else {
+		tex, ok := load_texture_smooth(path, 384)
+		pview.images[strings.clone(path)] = {tex = tex, ok = ok, used = pview.frames}
+	}
+	img := &pview.images[path]
+	return img.tex, img.ok, img.sh.ok ? &img.sh : nil
 }
 
 // Drops images not drawn for a while once the cache gets big.
@@ -216,6 +240,7 @@ view_images_trim :: proc() {
 	for k in old {
 		img := pview.images[k]
 		if img.ok do rl.UnloadTexture(img.tex)
+		thumb_shader_unload(&img.sh)
 		delete_key(&pview.images, k)
 		delete(k)
 	}
@@ -224,9 +249,13 @@ view_images_trim :: proc() {
 draw_plugin_view :: proc(w, h: f32) {
 	if !modal_fade(&pview.t, pview.open) do return
 	page := rl.Rectangle{0, HEADER_H, w, h - HEADER_H - FOOTER_H}
-	r := modal_panel(page, w - 48, page.height - 32, pview.t)
+	// in a channel, wider margins so more of the channel's background shows around the page
+	mx, my: f32 = 48, 32
+	if scene == .Channel do mx, my = max(48, w * 0.08), 64
+	r := modal_panel(page, w - mx, page.height - my, pview.t)
 	if pview.t < 0.5 || !pview.open do return
 
+	pview.screen_w = w
 	pview.x = r.x + 28
 	pview.y = r.y + 24
 	pview.w = r.width - 56
@@ -234,6 +263,7 @@ draw_plugin_view :: proc(w, h: f32) {
 	pview.order = make([dynamic]string, context.temp_allocator)
 	pview.hints = make([dynamic]Hint, context.temp_allocator)
 	pview.move = 0
+	pview.side_id, pview.focus_req = "", ""
 	pview.loads = 0
 	pview.osk_bar = nil
 
@@ -241,7 +271,10 @@ draw_plugin_view :: proc(w, h: f32) {
 	top := lua_gettop(L)
 	pview.in_frame = true
 	lua_rawgeti(L, LUA_REGISTRYINDEX, i64(pview.frame))
-	if lua_pcall(L, 0, 0, 0) != LUA_OK {
+	lua_watch_begin(L)
+	frame_status := lua_pcall(L, 0, 0, 0)
+	lua_watch_end()
+	if frame_status != LUA_OK {
 		msg := lua_string(L, -1)
 		plugin_logf("%s: UI frame: %s", pview.name, msg)
 		set_status("%s: %s", pview.name, msg)
@@ -252,12 +285,22 @@ draw_plugin_view :: proc(w, h: f32) {
 	if bar, ok := pview.osk_bar.?; ok && pview.editing && pview.osk do draw_osk(bar)
 	pview.inp = {}
 	pview.frames += 1
+	if pview.back_req {
+		if !pview.back_caught {
+			sfx_back()
+			pview.close_req = true
+		}
+		pview.back_req, pview.back_caught = false, false
+	}
 	pview.edit_new = false
 
 	// focus: step between widgets, or fall back to the first one
 	at := -1
 	for id, i in pview.order do if id == pview.focus do at = i
-	if len(pview.order) > 0 {
+	if pview.focus_req != "" && pview.focus_req != pview.focus {
+		view_set_focus(pview.focus_req)
+		sfx_click()
+	} else if len(pview.order) > 0 {
 		if at < 0 {
 			view_set_focus(pview.order[0])
 		} else if pview.move != 0 {
@@ -352,6 +395,7 @@ lua_ui_search_bar :: proc "c" (L: ^lua_State) -> c.int {
 			sfx_click()
 		case inp.down: pview.move = 1
 		case inp.up:   pview.move = -1
+		case inp.left && pview.side_id != "": pview.focus_req = pview.side_id
 		}
 	} else if focused && pview.editing && !pview.edit_new {
 		// keyboard
@@ -481,10 +525,14 @@ lua_ui_grid :: proc "c" (L: ^lua_State) -> c.int {
 	count := max(int(lua_tonumberx(L, 2, nil)), 0)
 	cols := 6
 	aspect: f32 = 1
+	cover := false
 	if lua_type(L, 3) == LUA_TTABLE {
 		if lua_getfield(L, 3, "cols") == LUA_TNUMBER do cols = clamp(int(lua_tonumberx(L, -1, nil)), 1, 16)
 		lua_pop(L, 1)
 		if lua_getfield(L, 3, "aspect") == LUA_TNUMBER do aspect = clamp(f32(lua_tonumberx(L, -1, nil)), 0.3, 3)
+		lua_pop(L, 1)
+		lua_getfield(L, 3, "cover")
+		cover = lua_toboolean(L, -1) != 0
 		lua_pop(L, 1)
 	}
 	has_fn := lua_type(L, 4) == LUA_TFUNCTION
@@ -506,6 +554,7 @@ lua_ui_grid :: proc "c" (L: ^lua_State) -> c.int {
 		if count > 0 {
 			i := clamp(gs.sel, 0, count - 1)
 			if inp.left && i % cols > 0 do i -= 1
+			else if inp.left && pview.side_id != "" do pview.focus_req = pview.side_id
 			if inp.right && i + 1 < count && (i + 1) % cols != 0 do i += 1
 			if inp.up {
 				if i - cols >= 0 do i -= cols
@@ -523,6 +572,8 @@ lua_ui_grid :: proc "c" (L: ^lua_State) -> c.int {
 			if inp.confirm do picked = gs.sel
 		} else if inp.up {
 			pview.move = -1
+		} else if inp.left && pview.side_id != "" {
+			pview.focus_req = pview.side_id
 		}
 	}
 
@@ -530,7 +581,7 @@ lua_ui_grid :: proc "c" (L: ^lua_State) -> c.int {
 	sb: f32 = 14 // scrollbar lane
 	cell_w := (area.width - sb - gap * f32(cols - 1)) / f32(cols)
 	art_h := (cell_w - 16) * aspect
-	cell_h := art_h + 16 + TITLE_STRIP
+	cell_h := art_h + 16 + TITLE_STRIP + 22 // title + subtitle lines
 	row_h := cell_h + gap
 	rows := (count + cols - 1) / cols
 	content := f32(rows) * row_h - gap
@@ -593,10 +644,8 @@ lua_ui_grid :: proc "c" (L: ^lua_State) -> c.int {
 			}
 			lua_pop(L, 1)
 		}
-		tex, has_tex := view_image(image)
-		draw_card({tex = tex, has_tex = has_tex, title = title, contain = true, badge = badge, tag = sub}, r, hi)
-		art := card_art_rect(r, hi)
-		if !has_tex do draw_initials_tile(title, art)
+		tex, has_tex, sh := view_image(image)
+		art := draw_view_tile(r, hi, title, sub, badge, tex, has_tex, cover, sh)
 		if progress >= 0 {
 			t := clamp(progress, 0, 1)
 			rl.DrawRectangleRounded(art, roundness(art, RADIUS - 4), 6, with_alpha(COL_SHADE, 160))
@@ -672,11 +721,11 @@ lua_ui_close :: proc "c" (L: ^lua_State) -> c.int {
 lua_ui_title :: proc "c" (L: ^lua_State) -> c.int {
 	context = runtime.default_context()
 	if !view_in_frame(L) do return view_frame_error(L, "UI_Title")
-	draw_t_fit(lua_string(L, 1), pview.x, pview.y, pview.w, 28, COL_TEXT, true)
-	pview.y += 40
+	draw_t_fit(lua_string(L, 1), pview.x, pview.y, pview.w, 34, COL_TEXT, true)
+	pview.y += 46
 	if lua_type(L, 2) == LUA_TSTRING || lua_type(L, 2) == LUA_TNUMBER {
-		draw_t_fit(lua_string(L, 2), pview.x, pview.y, pview.w, 15, COL_MUTED, false)
-		pview.y += 26
+		draw_t_fit(lua_string(L, 2), pview.x, pview.y, pview.w, 19, COL_MUTED, false)
+		pview.y += 30
 	}
 	pview.y += 10
 	return 0
@@ -692,12 +741,366 @@ lua_ui_text :: proc "c" (L: ^lua_State) -> c.int {
 	case "accent": col = COL_ACCENT
 	case "warn":   col = COL_WARN
 	}
-	for line in wrap_text(lua_string(L, 1), 17, pview.w) {
-		draw_t(line, pview.x, pview.y, 17, col)
-		pview.y += 24
+	for line in wrap_text(lua_string(L, 1), 19, pview.w) {
+		draw_t(line, pview.x, pview.y, 19, col)
+		pview.y += 28
 	}
 	pview.y += 8
 	return 0
+}
+
+// A grid tile: glass card, art (fit or cover), title + subtitle under it. Returns the art rect.
+draw_view_tile :: proc(r: rl.Rectangle, hi: bool, title, sub, badge: string, tex: rl.Texture2D, has_tex, cover: bool, sh: ^Thumb_Shader = nil) -> rl.Rectangle {
+	box := r
+	if hi do box.y -= 6
+	draw_panel(box, hi)
+	art := rl.Rectangle{box.x + 8, box.y + 8, box.width - 16, box.height - 16 - TITLE_STRIP - 22}
+	if sh != nil {
+		thumb_shader_draw(sh, art, RADIUS - 6)
+	} else if has_tex {
+		if !cover do rl.DrawRectangleRounded(art, roundness(art, RADIUS - 4), 6, with_alpha(COL_SHADE, 70))
+		draw_texture_rounded(tex, art, RADIUS - 6, cover ? 1 : 2)
+	} else {
+		draw_initials_tile(title, art)
+	}
+	if badge != "" {
+		tw := min(measure_t(badge, 13), art.width - 28)
+		pill := rl.Rectangle{art.x + art.width - tw - 24, art.y + 8, tw + 16, 24}
+		rl.DrawRectangleRounded(pill, 1, 8, with_alpha(COL_ACCENT, 235))
+		draw_t_fit(badge, pill.x + 8, pill.y + 5, tw, 13, rl.Color{16, 18, 24, 255}, false)
+	}
+	ty := art.y + art.height + 10
+	draw_t_fit(title, box.x + 14, ty, box.width - 28, 19, hi ? COL_TEXT : with_alpha(COL_TEXT, 220), hi)
+	if sub != "" do draw_t_fit(sub, box.x + 14, ty + 26, box.width - 28, 15, COL_MUTED, false)
+	if hi do draw_focus_ring(box)
+	return art
+}
+
+Side_Row :: struct {
+	text:    string,
+	header:  bool,
+	checked: bool,
+	radio:   bool,
+	count:   int,
+}
+
+side_first_option :: proc(rows: []Side_Row, from, dir: int) -> int {
+	for i := from; i >= 0 && i < len(rows); i += dir do if !rows[i].header do return i
+	return -1
+}
+
+// UI_Sidebar(id, items [, { width = 320 }]) -> picked
+lua_ui_sidebar :: proc "c" (L: ^lua_State) -> c.int {
+	context = runtime.default_context()
+	if !view_in_frame(L) do return view_frame_error(L, "UI_Sidebar")
+	id := strings.clone(lua_string(L, 1), context.temp_allocator)
+	rows := make([dynamic]Side_Row, context.temp_allocator)
+	if lua_type(L, 2) == LUA_TTABLE {
+		for i in 1 ..= int(lua_rawlen(L, 2)) {
+			if lua_rawgeti(L, 2, i64(i)) == LUA_TTABLE {
+				r := Side_Row{text = lua_field_string(L, -1, "text"), count = -1}
+				lua_getfield(L, -1, "header")
+				r.header = lua_toboolean(L, -1) != 0
+				lua_pop(L, 1)
+				lua_getfield(L, -1, "checked")
+				r.checked = lua_toboolean(L, -1) != 0
+				lua_pop(L, 1)
+				lua_getfield(L, -1, "radio")
+				r.radio = lua_toboolean(L, -1) != 0
+				lua_pop(L, 1)
+				if lua_getfield(L, -1, "count") == LUA_TNUMBER do r.count = int(lua_tonumberx(L, -1, nil))
+				lua_pop(L, 1)
+				append(&rows, r)
+			} else {
+				append(&rows, Side_Row{header = true})
+			}
+			lua_pop(L, 1)
+		}
+	}
+	width: f32 = 320
+	if lua_type(L, 3) == LUA_TTABLE {
+		if lua_getfield(L, 3, "width") == LUA_TNUMBER do width = f32(lua_tonumberx(L, -1, nil))
+		lua_pop(L, 1)
+	}
+	width = clamp(width, 160, pview.w * 0.45)
+
+	area := rl.Rectangle{pview.x, pview.y, width, pview.bottom - pview.y}
+	pview.x += width + 28
+	pview.w -= width + 28
+	pview.side_id = id
+	focused := view_focusable(id)
+	gs, found := &pview.grids[id]
+	if !found {
+		pview.grids[strings.clone(id)] = {sel = -1}
+		gs = &pview.grids[id]
+	}
+	n := len(rows)
+	if gs.sel < 0 || gs.sel >= n || rows[gs.sel].header {
+		gs.sel = side_first_option(rows[:], clamp(gs.sel, 0, max(n - 1, 0)), 1)
+		if gs.sel < 0 do gs.sel = side_first_option(rows[:], n - 1, -1)
+	}
+	picked := -1
+	inp := pview.inp
+	if focused && !pview.editing {
+		if inp.up && gs.sel >= 0 {
+			if j := side_first_option(rows[:], gs.sel - 1, -1); j >= 0 {
+				gs.sel = j
+				gs.follow = true
+				sfx_click()
+			} else {
+				pview.move = -1
+			}
+		}
+		if inp.down && gs.sel >= 0 {
+			if j := side_first_option(rows[:], gs.sel + 1, 1); j >= 0 {
+				gs.sel = j
+				gs.follow = true
+				sfx_click()
+			}
+		}
+		if inp.right do pview.move = 1
+		if inp.confirm && gs.sel >= 0 do picked = gs.sel
+	}
+
+	draw_glass(area, RADIUS, COL_PANEL_SOLID, 0.5, COL_ACCENT, focused ? 0.25 : 0, refract = 4)
+	HEAD_H :: 40
+	ROW_H :: 44
+	content: f32 = 12
+	ys := make([]f32, n, context.temp_allocator)
+	for r, i in rows {
+		ys[i] = content
+		content += r.header ? HEAD_H : ROW_H
+	}
+	content += 12
+	view_h := area.height
+	max_scroll := max(content - view_h, 0)
+	if mouse_over(area, true) {
+		if wheel := rl.GetMouseWheelMove(); wheel != 0 {
+			gs.target -= wheel * ROW_H * 2
+			gs.follow = false
+		}
+	}
+	if gs.follow && gs.sel >= 0 {
+		y := ys[gs.sel]
+		top := y // keep the group's header in view with its first option
+		if gs.sel > 0 && rows[gs.sel - 1].header do top = ys[gs.sel - 1]
+		if top < gs.target do gs.target = top
+		if y + ROW_H + 12 > gs.target + view_h do gs.target = y + ROW_H + 12 - view_h
+	}
+	gs.target = clamp(gs.target, 0, max_scroll)
+	gs.scroll = smooth_to(gs.scroll, gs.target, 14)
+
+	push_clip({area.x, area.y + 4, area.width, area.height - 8})
+	for r, i in rows {
+		y := area.y + ys[i] - gs.scroll
+		if y + ROW_H < area.y || y > area.y + area.height do continue
+		if r.header {
+			if r.text != "" do draw_t(ascii_upper(r.text, context.temp_allocator), area.x + 20, y + 16, 15, COL_ACCENT)
+			continue
+		}
+		row := rl.Rectangle{area.x + 8, y, area.width - 16, ROW_H - 4}
+		hi := focused && i == gs.sel
+		if mouse_over(row, true) && mouse_over(area, true) {
+			hover_enter(fmt.tprintf("pside-%s-%d", id, i))
+			if rl.IsMouseButtonPressed(.LEFT) {
+				view_set_focus(id)
+				gs.sel = i
+				picked = i
+			}
+		}
+		if hi do draw_glass(row, 12, mix_color(COL_PANEL_HI, COL_ACCENT, 0.3), 0.45, COL_ACCENT, 0.6, refract = 2)
+		bx := row.x + 14
+		cy := row.y + row.height * 0.5
+		box_col := r.checked ? COL_ACCENT : COL_MUTED
+		if r.radio {
+			rl.DrawRing({bx + 9, cy}, 7.5, 9.5, 0, 360, 24, box_col)
+			if r.checked do rl.DrawCircleV({bx + 9, cy}, 4.5, COL_ACCENT)
+		} else {
+			b := rl.Rectangle{bx, cy - 9, 18, 18}
+			if r.checked {
+				dark := rl.Color{16, 18, 24, 255}
+				rl.DrawRectangleRounded(b, 0.35, 6, COL_ACCENT)
+				rl.DrawLineEx({b.x + 4, b.y + 9.5}, {b.x + 7.5, b.y + 13}, 2.5, dark)
+				rl.DrawLineEx({b.x + 7.5, b.y + 13}, {b.x + 14, b.y + 5}, 2.5, dark)
+			} else {
+				rl.DrawRectangleRoundedLinesEx(b, 0.35, 6, 1.5, box_col)
+			}
+		}
+		count_w: f32 = 0
+		if r.count >= 0 {
+			cs := fmt.tprintf("%d", r.count)
+			count_w = measure_t(cs, 15) + 12
+			draw_t_right(cs, row.x + row.width - 12, cy - 8, 15, COL_MUTED)
+		}
+		draw_t_fit(r.text, bx + 30, cy - 10, row.x + row.width - (bx + 30) - count_w - 8, 18, hi || r.checked ? COL_TEXT : with_alpha(COL_TEXT, 200), hi)
+	}
+	pop_clip()
+	if max_scroll > 0 {
+		track := rl.Rectangle{area.x + area.width - 6, area.y + 14, 3, area.height - 28}
+		th := max(track.height * view_h / content, 24)
+		rl.DrawRectangleRounded({track.x, track.y + (track.height - th) * gs.scroll / max_scroll, track.width, th}, 1, 4, with_alpha(COL_ACCENT, 160))
+	}
+
+	if picked >= 0 {
+		sfx_click()
+		lua_pushinteger(L, i64(picked + 1))
+	} else {
+		lua_pushnil(L)
+	}
+	return 1
+}
+
+// UI_Image(path [, { height = 240, cover = true }])
+lua_ui_image :: proc "c" (L: ^lua_State) -> c.int {
+	context = runtime.default_context()
+	if !view_in_frame(L) do return view_frame_error(L, "UI_Image")
+	height: f32 = 240
+	cover := true
+	if lua_type(L, 2) == LUA_TTABLE {
+		if lua_getfield(L, 2, "height") == LUA_TNUMBER do height = f32(lua_tonumberx(L, -1, nil))
+		lua_pop(L, 1)
+		if lua_getfield(L, 2, "cover") == LUA_TBOOLEAN do cover = lua_toboolean(L, -1) != 0
+		lua_pop(L, 1)
+	}
+	height = clamp(height, 20, max(pview.bottom - pview.y, 20))
+	r := rl.Rectangle{pview.x, pview.y, pview.w, height}
+	pview.y += height + 18
+	tex, ok, sh := view_image(lua_string(L, 1))
+	if sh != nil {
+		thumb_shader_draw(sh, r, RADIUS)
+	} else if ok {
+		if !cover do rl.DrawRectangleRounded(r, roundness(r, RADIUS), 8, with_alpha(COL_SHADE, 90))
+		draw_texture_rounded(tex, r, RADIUS, cover ? 1 : 2)
+	} else {
+		rl.DrawRectangleRounded(r, roundness(r, RADIUS), 8, with_alpha(COL_TINT, 14))
+	}
+	return 0
+}
+
+// UI_Progress(fraction [, label])
+lua_ui_progress :: proc "c" (L: ^lua_State) -> c.int {
+	context = runtime.default_context()
+	if !view_in_frame(L) do return view_frame_error(L, "UI_Progress")
+	frac := f32(lua_tonumberx(L, 1, nil))
+	w := min(pview.w, 720)
+	if lua_type(L, 2) == LUA_TSTRING || lua_type(L, 2) == LUA_TNUMBER {
+		draw_t_fit(lua_string(L, 2), pview.x, pview.y, w, 18, COL_TEXT, false)
+		pview.y += 28
+	}
+	bar := rl.Rectangle{pview.x, pview.y, w, 10}
+	pview.y += 10 + 20
+	rl.DrawRectangleRounded(bar, 1, 8, COL_FAINT)
+	if frac >= 0 {
+		t := clamp(frac, 0, 1)
+		if t > 0 do rl.DrawRectangleRounded({bar.x, bar.y, max(bar.height, bar.width * t), bar.height}, 1, 8, COL_ACCENT)
+	} else {
+		s := f32(rl.GetTime()) * 1.2
+		f := s - f32(int(s))
+		rl.DrawRectangleRounded({bar.x + (bar.width - bar.width * 0.3) * f, bar.y, bar.width * 0.3, bar.height}, 1, 8, COL_ACCENT)
+	}
+	return 0
+}
+
+// UI_Back() -> true when B / Esc was pressed this frame (and keeps the view open)
+lua_ui_back :: proc "c" (L: ^lua_State) -> c.int {
+	context = runtime.default_context()
+	if !view_in_frame(L) do return view_frame_error(L, "UI_Back")
+	hit := pview.back_req && !pview.editing
+	if hit && !pview.back_caught {
+		pview.back_caught = true
+		sfx_back()
+	}
+	lua_pushboolean(L, hit ? 1 : 0)
+	return 1
+}
+
+// UI_Button(id, label) -> pressed
+lua_ui_button :: proc "c" (L: ^lua_State) -> c.int {
+	context = runtime.default_context()
+	if !view_in_frame(L) do return view_frame_error(L, "UI_Button")
+	id := strings.clone(lua_string(L, 1), context.temp_allocator)
+	label := strings.clone(lua_string(L, 2), context.temp_allocator)
+	r := rl.Rectangle{pview.x, pview.y, min(pview.w, 520), 54}
+	pview.y += 54 + 14
+	focused := view_focusable(id)
+	pressed := false
+	if focused && !pview.editing {
+		switch {
+		case pview.inp.confirm:
+			pressed = true
+			sfx_click()
+		case pview.inp.down: pview.move = 1
+		case pview.inp.up:   pview.move = -1
+		}
+	}
+	if mouse_over(r, true) && !focused && rl.GetMouseDelta() != {} do view_set_focus(id)
+	if ui_button(fmt.tprintf("pview-btn-%s", id), r, label, focused, true) do pressed = true
+	lua_pushboolean(L, pressed ? 1 : 0)
+	return 1
+}
+
+// sel, changed = UI_Tabs(id, labels, sel)
+lua_ui_tabs :: proc "c" (L: ^lua_State) -> c.int {
+	context = runtime.default_context()
+	if !view_in_frame(L) do return view_frame_error(L, "UI_Tabs")
+	labels := make([dynamic]string, context.temp_allocator)
+	if lua_type(L, 2) == LUA_TTABLE {
+		for i in 1 ..= int(lua_rawlen(L, 2)) {
+			lua_rawgeti(L, 2, i64(i))
+			append(&labels, strings.clone(lua_string(L, -1), context.temp_allocator))
+			lua_pop(L, 1)
+		}
+	}
+	if len(labels) == 0 {
+		lua_pushinteger(L, 1)
+		lua_pushboolean(L, 0)
+		return 2
+	}
+	sel := clamp(int(lua_tonumberx(L, 3, nil)) - 1, 0, len(labels) - 1)
+	old := sel
+	if !pview.editing {
+		if pview.inp.menu_l && sel > 0 do sel -= 1
+		if pview.inp.menu_r && sel < len(labels) - 1 do sel += 1
+	}
+
+	hit := -1
+	if scene == .Channel {
+		// a full header strip in the channel's empty header area
+		w := pview.screen_w
+		a := clamp(pview.t, 0, 1)
+		draw_soft_shadow({0, 0, w, HEADER_H}, 0, 0.8 * a)
+		draw_glass({-60, -60, w + 120, HEADER_H + 60}, 0, COL_PANEL_SOLID, ui_theme_light ? 0.40 : 0.28, refract = 10)
+		rl.DrawRectangleRounded({PAD, 28, 4, 28}, 1, 4, COL_ACCENT)
+		draw_t_fit(pview.name, PAD + 16, 24, w * 0.5 - 220 - PAD, 32, COL_TEXT, true)
+		hit = draw_tab_row(labels[:], sel, w * 0.5, 33, &pview.tab_x, &pview.tab_w)
+		draw_t_right(clock_label(), w - PAD, 26, 26, COL_TEXT)
+	} else {
+		hit = draw_tab_row(labels[:], sel, pview.x + pview.w * 0.5, pview.y + 17, &pview.tab_x, &pview.tab_w)
+		pview.y += 64
+	}
+	if hit >= 0 do sel = hit
+	if sel != old do sfx_click()
+	lua_pushinteger(L, i64(sel + 1))
+	lua_pushboolean(L, sel != old ? 1 : 0)
+	return 2
+}
+
+lua_open_url :: proc "c" (L: ^lua_State) -> c.int {
+	context = runtime.default_context()
+	url := lua_string(L, 1)
+	if !strings.has_prefix(url, "https://") && !strings.has_prefix(url, "http://") {
+		lua_pushstring(L, "Open_Url: only http(s) links")
+		return lua_error(L)
+	}
+	open_url(url)
+	return 0
+}
+
+lua_clipboard :: proc "c" (L: ^lua_State) -> c.int {
+	context = runtime.default_context()
+	clip := rl.GetClipboardText()
+	lua_pushstring(L, clip != nil ? clip : "")
+	return 1
 }
 
 // UI_Hints({ {"A", "Play"}, ... })

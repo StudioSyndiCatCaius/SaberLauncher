@@ -10,6 +10,7 @@ import rl "vendor:raylib"
 Screen :: enum {
 	Main,
 	Library,
+	Channels,
 	Movies,
 	Apps,
 	Plugins,
@@ -65,7 +66,7 @@ App :: struct {
 	dropdown_kind:   Dropdown_Kind,
 	pending_open:    Maybe([2]int), // {screen, item} clicked while drawing; opened by handle_app_input
 	dropdown_t:      f32,
-	slider_drag:     bool,
+	slider_drag:     int, // id of the settings slider being dragged, 0 = none
 	power_open:      bool,
 	power_sel:       int,
 	power_confirm:   Power_Action, // .Cancel = none pending; otherwise awaiting Yes/No
@@ -138,13 +139,17 @@ main :: proc() {
 
 	for !app.quit {
 		if rl.WindowShouldClose() && !app.in_shell do break // Alt+F4; ignored as a shell so the session never ends on a black screen
+		// global: runs in every scene
 		keep_fullscreen()
-		poll_drive_changes()
+		poll_drive_changes() // detection; scans wait for the Menu scene
 		drive_scan_update()
 		install_update()
+		downloads_update()
+		batches_update()
 		bios_job_poll()
-		theme_update()
-		autochange_update()
+		scene_fade_update()
+		channels_update() // starts / stops channels (switches the scene), feeds channel music
+		scene_update()
 		if rl.IsKeyPressed(.F11) do rl.ToggleBorderlessWindowed()
 		input_poll()
 		online_update()
@@ -152,50 +157,13 @@ main :: proc() {
 		update_poll()
 		handle_app_input()
 
-		w := f32(rl.GetScreenWidth())
-		h := f32(rl.GetScreenHeight())
-
-		// Glass backdrops: the wallpaper for menu panels, and under a dialog the
-		// menus too, which are then drawn once into the capture instead of twice.
-		update_swipe()
-		under_dialog := false
-		if glass_capture_begin(w, h) {
-			draw_wallpaper(w, h)
-			glass_capture_end(.Wall)
-			if dialog_visible() {
-				glass_capture_begin(w, h)
-				draw_menus(w, h)
-				glass_capture_end(.Over)
-				under_dialog = true
-			}
-		}
-
-		rl.BeginDrawing()
-		if under_dialog {
-			glass_draw_scene()
-		} else {
-			draw_wallpaper(w, h)
-			draw_menus(w, h)
-		}
-		glass.source = under_dialog ? .Over : .Wall
-		draw_drive_scan_card(w, h)
-		draw_install_card(w, h)
-		draw_power_dialog(w, h)
-		draw_game_menu(w, h)
-		draw_home_menu(w, h)
-		draw_app_menu(w, h)
-		draw_bios_menu(w, h)
-		draw_file_explorer(w, h)
-		draw_plugin_view(w, h)
-		draw_plugin_dialog(w, h)
-		emu_menu_draw(w, h)
-		glass.source = .Wall
-		rl.EndDrawing()
-
+		scene_draw(f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight()))
 		free_all(context.temp_allocator)
 	}
 
 	install_shutdown()
+	downloads_shutdown()
+	batches_shutdown()
 	bios_job_cancel()
 	drive_scan_shutdown()
 	bios_art_unload()
@@ -204,6 +172,7 @@ main :: proc() {
 	unload_all_apps()
 	unload_all_movies()
 	app_store_shutdown()
+	channels_shutdown()
 	online_shutdown()
 	plugins_shutdown()
 	font_shutdown()
@@ -218,6 +187,12 @@ main :: proc() {
 // `Saber.exe --play-rom F:\game.nes` the ROM game at that path.
 play_disc_from_args :: proc() {
 	args := os.args
+	// --channel <folder>: open that channel (APP/channels/<folder>) right away
+	for i in 1 ..< len(args) - 1 {
+		if args[i] != "--channel" do continue
+		for ch, ci in chan.list do if eq_fold(ch.folder, args[i + 1]) do chan.start_req = ci
+		if chan.start_req < 0 do set_status("No channel %s", args[i + 1])
+	}
 	for i in 1 ..< len(args) - 1 {
 		if args[i] == "--play-rom" && args[i + 1] != "" {
 			for &g, gi in app.drive_games {
@@ -280,7 +255,7 @@ poll_drive_changes :: proc() {
 			set_status("Disc change detected…")
 		}
 	}
-	if app.drive_rescan_at != 0 && now >= app.drive_rescan_at {
+	if app.drive_rescan_at != 0 && now >= app.drive_rescan_at && scene == .Menu { // a channel defers scans (and their plugin hooks)
 		app.drive_rescan_at = 0
 		drive_scan_start(app.drive_scan_kind)
 		app.drive_scan_kind = .Drive
@@ -320,6 +295,7 @@ rescan_all :: proc(drives_async := false) {
 	}
 	scan_apps(&app.shell_apps, app.apps_dir)
 	scan_movies(&app.movies, app.movies_dir)
+	channels_scan()
 	for s in Screen.Main ..= Screen.Apps do clamp_selection(s)
 	app.drive_mask = current_drive_mask()
 	app.portable_mask = portable_drive_mask(app.drive_mask)
@@ -374,7 +350,7 @@ draw_menus :: proc(w, h: f32) {
 
 // A modal is on screen (fading in or out included).
 dialog_visible :: proc() -> bool {
-	return app.power_open || app.power_t >= 0.02 || plugin_dialog_open() || emu_menu.open || emu_menu.t >= 0.02 || game_menu.open || game_menu.t >= 0.02 || home_menu.open || home_menu.t >= 0.02 || app_menu.open || app_menu.t >= 0.02 || bios_menu.open || bios_menu.t >= 0.02 || explorer.open || explorer.t >= 0.02 || pview.open || pview.t >= 0.02
+	return app.power_open || app.power_t >= 0.02 || plugin_dialog_open() || emu_menu.open || emu_menu.t >= 0.02 || game_menu.open || game_menu.t >= 0.02 || home_menu.open || home_menu.t >= 0.02 || app_menu.open || app_menu.t >= 0.02 || bios_menu.open || bios_menu.t >= 0.02 || explorer.open || explorer.t >= 0.02 || pview.open || pview.t >= 0.02 || chan.preview || chan.preview_t >= 0.02
 }
 
 input_locked :: proc() -> bool {
@@ -389,6 +365,11 @@ open_power_dialog :: proc() {
 }
 
 handle_app_input :: proc() {
+	if scene_fading() { // nothing reacts mid-transition
+		eat_input()
+		input.mouse_eaten = true
+		return
+	}
 	if game_menu_update() {
 		eat_input()
 		return
@@ -412,7 +393,9 @@ handle_app_input :: proc() {
 	case plugin_dialog_open(): modal = handle_plugin_dialog_input
 	case pview.open:           modal = plugin_view_input
 	case power_blocking():     modal, mouse = handle_power_input, false
+	case channel_running():    modal, mouse = channel_input, false
 	case app.swipe_t < 1:      return
+	case chan.preview:         modal = channel_preview_input
 	case game_menu.open:       modal = game_menu_input
 	case home_menu.open:       modal = home_menu_input
 	case app_menu.open:        modal = app_menu_input
@@ -495,6 +478,7 @@ handle_app_input :: proc() {
 		} else if input.action && app.screen == .Apps && len(app.shell_apps) > 0 {
 			app_menu_open(sel^)
 		}
+	case .Channels: handle_channels_input()
 	case .Plugins: handle_plugins_input()
 	case .Settings: handle_settings_input()
 	}
@@ -507,6 +491,7 @@ Settings_Row :: enum {
 	Music,
 	Music_Auto,
 	Volume,
+	Wallpaper_Opacity,
 	Font,
 	Online_Mode,
 	Ignored_Drives,
@@ -546,6 +531,10 @@ settings_change :: proc(row: Settings_Row, step: int) {
 		if step == 0 do return
 		set_volume(app.settings.volume + f32(step) * 0.05)
 		sfx_click()
+	case .Wallpaper_Opacity:
+		if step == 0 do return
+		set_bkg_opacity(app.settings.bkg_opacity + f32(step) * 0.05)
+		sfx_click()
 	case .Ignored_Drives, .Visible_Tabs, .Emulation, .Save_States, .Launch_Mode, .Updates, .Desktop, .Restart:
 		if step != 0 do return // these only open / run something
 		#partial switch row {
@@ -570,6 +559,11 @@ restart_saber :: proc() {
 	sfx_click()
 	app.restart = true
 	app.quit = true
+}
+
+set_bkg_opacity :: proc(v: f32) {
+	app.settings.bkg_opacity = clamp(f32(int(v * 100 + 0.5)) / 100, 0, 1)
+	save_settings()
 }
 
 set_volume :: proc(v: f32) {

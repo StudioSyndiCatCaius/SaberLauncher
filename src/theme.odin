@@ -5,6 +5,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import rl "vendor:raylib"
+import "vendor:raylib/rlgl"
 
 Theme :: struct {
 	bkg_dir:     string,
@@ -14,6 +15,7 @@ Theme :: struct {
 	bgm_files:   [dynamic]string,
 	bkg_tex:     rl.Texture2D,
 	has_bkg:     bool,
+	bkg_shader:  Bkg_Shader,
 	music:       rl.Music,
 	has_music:   bool,
 	sfx:         [Sfx]rl.Sound,
@@ -22,6 +24,10 @@ Theme :: struct {
 }
 
 theme: Theme
+
+// the menu music begins 0.5 s after the first menu frame
+theme_music_since: f64
+theme_music_ready: bool
 
 // Active palette; set by apply_ui_theme from UI_THEMES.
 COL_BG: rl.Color
@@ -106,6 +112,8 @@ cycle_ui_theme :: proc(delta: int) {
 }
 
 IMG_EXTS :: []string{".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+SHADER_EXTS :: []string{".glsl", ".frag", ".fs"}
+BKG_EXTS :: []string{".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".glsl", ".frag", ".fs"}
 MUS_EXTS :: []string{".mp3", ".ogg", ".wav", ".flac"}
 
 // Card art is drawn well below its native size; mipmaps keep it from shimmering.
@@ -160,6 +168,7 @@ theme_init :: proc() {
 
 theme_shutdown :: proc() {
 	unload_tex(&theme.bkg_tex, &theme.has_bkg)
+	bkg_shader_unload(&theme.bkg_shader)
 	unload_bgm()
 	for s, i in theme.sfx do if theme.has_sfx[i] do rl.UnloadSound(s)
 	glass_shutdown()
@@ -168,7 +177,7 @@ theme_shutdown :: proc() {
 refresh_media_lists :: proc() {
 	clear(&theme.bkg_files)
 	clear(&theme.bgm_files)
-	collect_media(&theme.bkg_files, theme.bkg_dir, IMG_EXTS)
+	collect_media(&theme.bkg_files, theme.bkg_dir, BKG_EXTS)
 	collect_media(&theme.bgm_files, theme.bgm_dir, MUS_EXTS)
 	slice.sort_by(theme.bkg_files[:], proc(a, b: string) -> bool { return a < b })
 	slice.sort_by(theme.bgm_files[:], proc(a, b: string) -> bool { return a < b })
@@ -200,6 +209,7 @@ unload_bgm :: proc() {
 
 theme_apply_bkg :: proc(name: string) {
 	unload_tex(&theme.bkg_tex, &theme.has_bkg)
+	bkg_shader_unload(&theme.bkg_shader)
 	if len(theme.bkg_files) == 0 {
 		app.settings.bkg = ""
 		return
@@ -207,7 +217,70 @@ theme_apply_bkg :: proc(name: string) {
 	idx := index_of_name(theme.bkg_files[:], name)
 	app.settings.bkg = theme.bkg_files[idx]
 	path := path_join({theme.bkg_dir, app.settings.bkg})
-	theme.bkg_tex, theme.has_bkg = load_texture_smooth(path, 2560)
+	if has_ext(path, ..SHADER_EXTS) {
+		theme.bkg_shader = bkg_shader_load(path)
+	} else {
+		theme.bkg_tex, theme.has_bkg = load_texture_smooth(path, 2560)
+	}
+}
+
+// Shadertoy-style wallpaper: the file defines mainImage(out vec4, in vec2)
+// and gets iResolution (vec3, pixels), iTime (seconds), iMouse (vec4).
+Bkg_Shader :: struct {
+	shader:                   rl.Shader,
+	ok:                       bool,
+	loc_res, loc_time, loc_mouse: i32,
+}
+
+BKG_SHADER_HEAD :: `#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+out vec4 finalColor;
+uniform vec3 iResolution;
+uniform float iTime;
+uniform vec4 iMouse;
+#line 1
+`
+
+BKG_SHADER_TAIL :: `
+void main() {
+	vec2 fc = vec2(fragTexCoord.x, 1.0 - fragTexCoord.y) * iResolution.xy;
+	vec4 col = vec4(0.0, 0.0, 0.0, 1.0);
+	mainImage(col, fc);
+	finalColor = vec4(col.rgb, fragColor.a);
+}
+`
+
+bkg_shader_load :: proc(path: string) -> (b: Bkg_Shader) {
+	src, err := os.read_entire_file(path, context.temp_allocator)
+	if err != nil || len(src) == 0 do return
+	code := strings.concatenate({BKG_SHADER_HEAD, string(src), BKG_SHADER_TAIL}, context.temp_allocator)
+	sh := rl.LoadShaderFromMemory(nil, strings.clone_to_cstring(code, context.temp_allocator))
+	if !rl.IsShaderValid(sh) || sh.id == rlgl.GetShaderIdDefault() do return
+	b.shader, b.ok = sh, true
+	b.loc_res = rl.GetShaderLocation(sh, "iResolution")
+	b.loc_time = rl.GetShaderLocation(sh, "iTime")
+	b.loc_mouse = rl.GetShaderLocation(sh, "iMouse")
+	return
+}
+
+bkg_shader_unload :: proc(b: ^Bkg_Shader) {
+	if b.ok do rl.UnloadShader(b.shader)
+	b.ok = false
+}
+
+bkg_shader_draw :: proc(b: ^Bkg_Shader, r: rl.Rectangle) {
+	white := rl.Texture2D{id = rlgl.GetTextureIdDefault(), width = 1, height = 1, mipmaps = 1, format = .UNCOMPRESSED_R8G8B8A8}
+	res := [3]f32{r.width, r.height, 1}
+	t := f32(rl.GetTime())
+	m := rl.GetMousePosition()
+	mouse := [4]f32{m.x - r.x, r.height - (m.y - r.y), 0, 0}
+	rl.BeginShaderMode(b.shader)
+	rl.SetShaderValue(b.shader, b.loc_res, &res, .VEC3)
+	rl.SetShaderValue(b.shader, b.loc_time, &t, .FLOAT)
+	rl.SetShaderValue(b.shader, b.loc_mouse, &mouse, .VEC4)
+	rl.DrawTexturePro(white, {0, 0, 1, 1}, r, {}, 0, rl.WHITE)
+	rl.EndShaderMode()
 }
 
 theme_apply_bgm :: proc(name: string) {
@@ -224,7 +297,7 @@ theme_apply_bgm :: proc(name: string) {
 	if theme.has_music {
 		theme.music.looping = true
 		rl.SetMusicVolume(theme.music, app.settings.volume)
-		rl.PlayMusicStream(theme.music)
+		if theme_music_ready do rl.PlayMusicStream(theme.music)
 	}
 }
 
@@ -284,7 +357,12 @@ hover_enter :: proc(id: string) -> bool {
 }
 
 theme_update :: proc() {
-	if theme.has_music && !explorer.has_music {
+	if !theme_music_ready {
+		if theme_music_since == 0 do theme_music_since = rl.GetTime()
+		if rl.GetTime() - theme_music_since < 0.5 do return
+		theme_music_ready = true
+	}
+	if theme.has_music && !explorer.has_music && !chan.has_music { // a channel plays its own
 		rl.UpdateMusicStream(theme.music)
 		if !rl.IsMusicStreamPlaying(theme.music) do rl.PlayMusicStream(theme.music)
 	}
@@ -292,16 +370,23 @@ theme_update :: proc() {
 
 theme_pause_for_game :: proc() {
 	if theme.has_music do rl.PauseMusicStream(theme.music)
+	if chan.has_music do rl.PauseMusicStream(chan.music)
 }
 
 theme_resume_after_game :: proc() {
-	if theme.has_music do rl.ResumeMusicStream(theme.music)
+	if chan.has_music {
+		rl.ResumeMusicStream(chan.music)
+	} else if theme.has_music {
+		rl.ResumeMusicStream(theme.music)
+	}
 }
 
 // Wallpaper and its shading; also captured as the glass backdrop.
 draw_wallpaper :: proc(w, h: f32) {
 	rl.ClearBackground(COL_BG)
-	if !theme.has_bkg {
+	if theme.bkg_shader.ok {
+		bkg_shader_draw(&theme.bkg_shader, {0, 0, w, h})
+	} else if !theme.has_bkg {
 		draw_ambient_orbs(w, h)
 	} else {
 		// slow drift; one quad per frame
@@ -317,8 +402,11 @@ draw_wallpaper :: proc(w, h: f32) {
 		rl.DrawTexturePro(theme.bkg_tex, {0, 0, tw, th}, {ox, oy, dw, dh}, {}, 0, rl.WHITE)
 	}
 	// darken for legibility, heavier at the edges
-	rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, ui_theme_light ? 140 : 110))
+	// Wallpaper opacity: 0.5 = this shading as designed, 1 = none, 0 = twice as dark
+	k := 2 * (1 - app.settings.bkg_opacity)
+	sa :: proc(a, k: f32) -> u8 { return u8(clamp(a * k, 0, 255)) }
+	rl.DrawRectangle(0, 0, i32(w), i32(h), with_alpha(COL_SHADE, sa(ui_theme_light ? 140 : 110, k)))
 	band := i32(h * 0.35)
-	rl.DrawRectangleGradientV(0, 0, i32(w), band, with_alpha(COL_SHADE, 170), with_alpha(COL_SHADE, 0))
-	rl.DrawRectangleGradientV(0, i32(h) - band, i32(w), band, with_alpha(COL_SHADE, 0), with_alpha(COL_SHADE, 190))
+	rl.DrawRectangleGradientV(0, 0, i32(w), band, with_alpha(COL_SHADE, sa(170, k)), with_alpha(COL_SHADE, 0))
+	rl.DrawRectangleGradientV(0, i32(h) - band, i32(w), band, with_alpha(COL_SHADE, 0), with_alpha(COL_SHADE, sa(190, k)))
 }

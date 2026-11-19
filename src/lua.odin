@@ -1,5 +1,7 @@
 package saber
 
+import "base:runtime"
+
 import "core:c"
 import "core:path/filepath"
 
@@ -15,6 +17,7 @@ when ODIN_OS == .Windows {
 
 lua_State :: struct {}
 lua_CFunction :: #type proc "c" (L: ^lua_State) -> c.int
+lua_Hook :: #type proc "c" (L: ^lua_State, ar: rawptr)
 
 LUA_OK :: 0
 LUA_REGISTRYINDEX :: -1000000 - 1000 // -LUAI_MAXSTACK - 1000
@@ -32,6 +35,8 @@ foreign liblua {
 	luaL_newstate :: proc() -> ^lua_State ---
 	luaL_openlibs :: proc(L: ^lua_State) ---
 	lua_close :: proc(L: ^lua_State) ---
+	lua_atpanic :: proc(L: ^lua_State, panicf: lua_CFunction) -> lua_CFunction ---
+	lua_sethook :: proc(L: ^lua_State, f: lua_Hook, mask, count: c.int) ---
 	luaL_loadfilex :: proc(L: ^lua_State, filename: cstring, mode: cstring) -> c.int ---
 	luaL_loadbufferx :: proc(L: ^lua_State, buf: [^]u8, size: c.size_t, name: cstring, mode: cstring) -> c.int ---
 	lua_rawgeti :: proc(L: ^lua_State, idx: c.int, n: i64) -> c.int ---
@@ -97,4 +102,18 @@ lua_string :: proc(L: ^lua_State, idx: c.int) -> string {
 	s := lua_tolstring(L, idx, &n)
 	if s == nil do return ""
 	return string((cast([^]u8)s)[:n])
+}
+
+// A Lua error outside any pcall ends the process (abort); this at least records why.
+lua_panic_log :: proc "c" (L: ^lua_State) -> c.int {
+	context = runtime.default_context()
+	crash_log_line("Lua panic (%s): %s", lua_owner_name(L), lua_string(L, -1))
+	return 0
+}
+
+// luaL_newstate + the panic logger: every Lua state Saber makes.
+lua_new_state :: proc() -> ^lua_State {
+	L := luaL_newstate()
+	if L != nil do lua_atpanic(L, lua_panic_log)
+	return L
 }

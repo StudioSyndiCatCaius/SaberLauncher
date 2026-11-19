@@ -31,6 +31,8 @@ foreign kernel32_crash {
 	SetStdHandle :: proc(nStdHandle: win.DWORD, hHandle: win.HANDLE) -> win.BOOL ---
 	GetModuleHandleExW :: proc(dwFlags: win.DWORD, lpModuleName: rawptr, phModule: ^win.HMODULE) -> win.BOOL ---
 	SetErrorMode :: proc(uMode: win.UINT) -> win.UINT ---
+	RtlCaptureStackBackTrace :: proc(FramesToSkip, FramesToCapture: win.DWORD, BackTrace: [^]rawptr, BackTraceHash: ^win.DWORD) -> win.WORD ---
+	GetCurrentThreadId :: proc() -> win.DWORD ---
 }
 
 SEM_NOGPFAULTERRORBOX :: 0x0002
@@ -123,7 +125,7 @@ crash_filter :: proc "system" (info: ^win.EXCEPTION_POINTERS) -> win.LONG {
 		nl += 1
 	}
 
-	buf: [512]u8
+	buf: [1024]u8
 	n := 0
 	put :: proc "contextless" (buf: []u8, n: ^int, s: string) {
 		for i in 0 ..< len(s) {
@@ -154,6 +156,23 @@ crash_filter :: proc "system" (info: ^win.EXCEPTION_POINTERS) -> win.LONG {
 	if rec.ExceptionCode == win.EXCEPTION_ACCESS_VIOLATION && rec.NumberParameters >= 2 {
 		put(buf[:], &n, uintptr(rec.ExceptionInformation[0]) == 0 ? "  reading 0x" : "  writing 0x")
 		put_hex(buf[:], &n, u64(uintptr(rec.ExceptionInformation[1])), 16)
+	}
+	// the crashing thread's stack (the filter runs on it): Saber.exe frames, symbolize with the matching Saber.pdb
+	put(buf[:], &n, "\r\n    thread 0x")
+	put_hex(buf[:], &n, u64(GetCurrentThreadId()), 5)
+	put(buf[:], &n, "  stack:")
+	frames: [48]rawptr
+	got := int(RtlCaptureStackBackTrace(0, len(frames), raw_data(frames[:]), nil))
+	exe_mod: win.HMODULE
+	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, nil, &exe_mod)
+	shown := 0
+	for i in 0 ..< got {
+		fm: win.HMODULE
+		if !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, frames[i], &fm) || fm != exe_mod do continue
+		put(buf[:], &n, " +0x")
+		put_hex(buf[:], &n, u64(uintptr(frames[i]) - uintptr(fm)), 6)
+		shown += 1
+		if shown >= 24 do break
 	}
 	put(buf[:], &n, "\r\n    while: ")
 	put(buf[:], &n, crash_step_len > 0 ? string(crash_step_buf[:crash_step_len]) : "(nothing noted)")

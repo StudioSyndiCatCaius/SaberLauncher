@@ -184,6 +184,28 @@ PLUGIN_API := [?]struct {
 	{"UI_SearchBar", lua_ui_search_bar},
 	{"UI_Grid", lua_ui_grid},
 	{"UI_Hints", lua_ui_hints},
+	{"UI_Button", lua_ui_button},
+	{"UI_Tabs", lua_ui_tabs},
+	{"UI_Sidebar", lua_ui_sidebar},
+	{"UI_Image", lua_ui_image},
+	{"UI_Progress", lua_ui_progress},
+	{"UI_Back", lua_ui_back},
+	{"Download", lua_download},
+	{"Download_Status", lua_download_status},
+	{"Download_Cancel", lua_download_cancel},
+	{"Batch_Download", lua_batch_download},
+	{"Batch_Status", lua_batch_status},
+	{"Batch_Cancel", lua_batch_cancel},
+	{"Json_Decode", lua_json_decode},
+	{"Inflate", lua_inflate},
+	{"Make_Dir", lua_make_dir},
+	{"List_Dirs", lua_list_dirs},
+	{"Exists", lua_exists},
+	{"Rescan_Library", lua_rescan_library},
+	{"Rescan_Channels", lua_rescan_channels},
+	{"Remove_Dir", lua_remove_dir},
+	{"Open_Url", lua_open_url},
+	{"Clipboard", lua_clipboard},
 	{"Play_Rom", lua_play_rom},
 }
 
@@ -193,7 +215,7 @@ lua_set_global_string :: proc(L: ^lua_State, name: cstring, value: string) {
 }
 
 plugin_load :: proc(path, file, dir: string) {
-	L := luaL_newstate()
+	L := lua_new_state()
 	luaL_openlibs(L)
 	lua_createtable(L, 0, 4)
 	lua_pushcclosure(L, lua_saber_log, 0)

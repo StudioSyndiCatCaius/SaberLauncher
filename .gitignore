@@ -25,3 +25,4 @@ AGENTS.md
 /plugins/*.log
 ReleaseLatest.py
 release.bat
+/_temp

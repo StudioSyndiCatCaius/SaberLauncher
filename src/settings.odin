@@ -54,6 +54,7 @@ Settings :: struct {
 	bgm:         string,
 	font:        string,
 	volume:      f32,
+	bkg_opacity: f32, // 0.5 = default shading; higher shows more wallpaper
 	online_mode: bool, // plugins may use the internet; off = killswitch
 	plugins_off: string, // disabled plugin folder names, ';'-separated; takes effect on restart
 	ignore_drives: u32, // bit per letter (A = bit 0): fixed drives skipped by the game scan
@@ -68,7 +69,7 @@ Settings :: struct {
 }
 
 settings_load :: proc(path: string) -> Settings {
-	s := Settings{volume = 0.7, font = "Arial", save_mode = .Suspend, shell_startup = true}
+	s := Settings{volume = 0.7, bkg_opacity = 0.5, font = "Arial", save_mode = .Suspend, shell_startup = true}
 	if data, err := os.read_entire_file(path, context.allocator); err == nil {
 		defer delete(data)
 		text := string(data)
@@ -101,6 +102,9 @@ settings_load :: proc(path: string) -> Settings {
 		if v, found := ini_get(text, "bgm_auto"); found do s.bgm_auto.mode = auto_parse(v)
 		ini_str(text, "bgm_auto_period", &s.bgm_auto.period)
 		ini_str(text, "bgm_auto_seen", &s.bgm_auto.seen)
+		if v, found := ini_get(text, "bkg_opacity"); found {
+			if n, ok := strconv.parse_f32(v); ok do s.bkg_opacity = clamp(n, 0, 1)
+		}
 		if v, found := ini_get(text, "volume"); found {
 			if n, ok := strconv.parse_f32(v); ok do s.volume = clamp(n, 0, 1)
 		}
@@ -112,13 +116,14 @@ settings_load :: proc(path: string) -> Settings {
 
 settings_save :: proc(path: string, s: Settings) {
 	text := fmt.tprintf(
-		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\nonline=%d\nplugins_off=%s\nplugin_dirs=%s\nignore_drives=%s\nsave_states=%s\nshell_startup=%d\nautostart_app=%s\nhome_per_row=%d\nhidden_tabs=%s\nbkg_auto=%s\nbkg_auto_period=%s\nbkg_auto_seen=%s\nbgm_auto=%s\nbgm_auto_period=%s\nbgm_auto_seen=%s\n",
+		"[saber]\nlaunch_mode=%s\nui_theme=%s\nbkg=%s\nbgm=%s\nfont=%s\nvolume=%.2f\nbkg_opacity=%.2f\nonline=%d\nplugins_off=%s\nplugin_dirs=%s\nignore_drives=%s\nsave_states=%s\nshell_startup=%d\nautostart_app=%s\nhome_per_row=%d\nhidden_tabs=%s\nbkg_auto=%s\nbkg_auto_period=%s\nbkg_auto_seen=%s\nbgm_auto=%s\nbgm_auto_period=%s\nbgm_auto_seen=%s\n",
 		LAUNCH_MODE_KEYS[s.launch_mode],
 		s.ui_theme,
 		s.bkg,
 		s.bgm,
 		s.font,
 		s.volume,
+		s.bkg_opacity,
 		int(s.online_mode),
 		s.plugins_off,
 		s.plugin_dirs,
@@ -153,6 +158,7 @@ SCREEN_KEYS := [Screen]string {
 	.Library  = "games",
 	.Movies   = "movies",
 	.Apps     = "apps",
+	.Channels = "channels",
 	.Plugins  = "plugins",
 	.Settings = "settings",
 }

@@ -16,6 +16,7 @@ bkg_picker: struct {
 	thumbs: [dynamic]rl.Texture2D,
 	tried:  [dynamic]bool,
 	loaded: [dynamic]bool,
+	shaders: [dynamic]Bkg_Shader,
 }
 
 bkg_picker_open :: proc() {
@@ -28,6 +29,7 @@ bkg_picker_open :: proc() {
 	resize(&bkg_picker.thumbs, n)
 	resize(&bkg_picker.tried, n)
 	resize(&bkg_picker.loaded, n)
+	resize(&bkg_picker.shaders, n)
 	bkg_picker.open = true
 	bkg_picker.sel = index_of_name(theme.bkg_files[:], app.settings.bkg)
 	bkg_picker.t = 0
@@ -43,6 +45,8 @@ bkg_picker_close :: proc() {
 
 bkg_picker_free :: proc() {
 	for &tex, i in bkg_picker.thumbs do unload_tex(&tex, &bkg_picker.loaded[i])
+	for &b in bkg_picker.shaders do bkg_shader_unload(&b)
+	clear(&bkg_picker.shaders)
 	clear(&bkg_picker.thumbs)
 	clear(&bkg_picker.tried)
 	clear(&bkg_picker.loaded)
@@ -110,7 +114,12 @@ bkg_picker_draw :: proc(w, h: f32) {
 		if tile.y + th + label_h < grid.y || tile.y > grid.y + grid.height do continue
 		if !bkg_picker.tried[i] && loads < 2 {
 			bkg_picker.tried[i] = true
-			bkg_picker.thumbs[i], bkg_picker.loaded[i] = load_texture_smooth(tjoin({theme.bkg_dir, name}), 480)
+			path := tjoin({theme.bkg_dir, name})
+			if has_ext(name, ..SHADER_EXTS) {
+				bkg_picker.shaders[i] = bkg_shader_load(path)
+			} else {
+				bkg_picker.thumbs[i], bkg_picker.loaded[i] = load_texture_smooth(path, 480)
+			}
 			loads += 1
 		}
 		hit := rl.Rectangle{tile.x, tile.y, tw, th + label_h}
@@ -121,7 +130,9 @@ bkg_picker_draw :: proc(w, h: f32) {
 		focused := i == bkg_picker.sel
 		current := eq_fold(name, app.settings.bkg)
 		draw_panel(tile, focused)
-		if bkg_picker.loaded[i] {
+		if bkg_picker.shaders[i].ok {
+			bkg_shader_draw(&bkg_picker.shaders[i], {tile.x + 4, tile.y + 4, tw - 8, th - 8})
+		} else if bkg_picker.loaded[i] {
 			draw_texture_cover(bkg_picker.thumbs[i], {tile.x + 4, tile.y + 4, tw - 8, th - 8})
 		} else {
 			draw_t_center("...", tile.x + tw * 0.5, tile.y + th * 0.5 - 10, 18, COL_MUTED)

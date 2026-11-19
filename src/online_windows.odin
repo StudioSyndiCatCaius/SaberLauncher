@@ -1,6 +1,7 @@
 package saber
 
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:sync"
 import win "core:sys/windows"
@@ -49,7 +50,8 @@ http_fetch :: proc(r: ^Http_Request, body: ^[dynamic]u8) -> bool {
 		return false
 	}
 	defer InternetCloseHandle(hnet)
-	h := InternetOpenUrlW(hnet, win.utf8_to_wstring(r.url), nil, 0, INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_UI, 0)
+	headers: win.LPCWSTR = r.headers != "" ? win.utf8_to_wstring(r.headers) : nil
+	h := InternetOpenUrlW(hnet, win.utf8_to_wstring(r.url), headers, headers != nil ? 0xFFFFFFFF : 0, INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_UI, 0)
 	if h == nil {
 		r.err = fmt.aprintf("Couldn't connect (error %d)", win.GetLastError())
 		return false
@@ -83,4 +85,66 @@ http_fetch :: proc(r: ^Http_Request, body: ^[dynamic]u8) -> bool {
 		}
 	}
 	return true
+}
+
+// Streams d.url into `part` for downloads.odin, resuming at `offset` (a Range request; a server
+// that answers 200 instead restarts the file). Returns "" on success, else the error.
+download_fetch :: proc(d: ^Download_Job, part: string, offset: i64) -> string {
+	if !load_wininet() do return "wininet.dll unavailable"
+	hnet := InternetOpenW(win.L("Saber/1.0"), 0, nil, nil, 0)
+	if hnet == nil do return "Couldn't start an internet session"
+	defer InternetCloseHandle(hnet)
+	headers := d.headers
+	if offset > 0 do headers = fmt.tprintf("%sRange: bytes=%d-\r\n", headers, offset)
+	wh: win.LPCWSTR = headers != "" ? win.utf8_to_wstring(headers) : nil
+	h := InternetOpenUrlW(hnet, win.utf8_to_wstring(d.url), wh, wh != nil ? 0xFFFFFFFF : 0, INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_UI, 0)
+	if h == nil do return fmt.tprintf("Couldn't connect (error %d)", win.GetLastError())
+	defer InternetCloseHandle(h)
+	status: u32
+	sz := u32(size_of(status))
+	HttpQueryInfoW(h, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &status, &sz, nil)
+	offset := offset
+	switch status {
+	case 206:
+	case 200: offset = 0 // no resume: start over
+	case 416:
+		if offset > 0 { // the .part is already whole
+			sync.atomic_store(&d.got, offset)
+			sync.atomic_store(&d.total, offset)
+			return ""
+		}
+		return "HTTP 416"
+	case: return fmt.tprintf("HTTP %d", status)
+	}
+	length: u64
+	lbuf: [32]u16
+	lsz := u32(size_of(lbuf))
+	// Content-Length as text: files can be over 4 GB
+	if HttpQueryInfoW(h, HTTP_QUERY_CONTENT_LENGTH, &lbuf[0], &lsz, nil) {
+		for ch in lbuf[:lsz / 2] {
+			if ch < '0' || ch > '9' do break
+			length = length * 10 + u64(ch - '0')
+		}
+	}
+	if length > 0 do sync.atomic_store(&d.total, offset + i64(length))
+	sync.atomic_store(&d.got, offset)
+
+	flags: os.File_Flags = {.Write, .Create}
+	flags += offset > 0 ? {.Append} : {.Trunc}
+	f, ferr := os.open(part, flags)
+	if ferr != nil do return fmt.tprintf("Couldn't write %s", part)
+	defer os.close(f)
+	buf := make([]u8, 256 * 1024, context.temp_allocator)
+	got := offset
+	for {
+		if download_killed(d) do return sync.atomic_load(&d.cancel) ? "Cancelled" : "Online Mode was turned off"
+		n: u32
+		if !InternetReadFile(h, raw_data(buf), u32(len(buf)), &n) do return "Connection dropped (it resumes next time)"
+		if n == 0 do break
+		if _, werr := os.write(f, buf[:n]); werr != nil do return "Couldn't write to disk (full?)"
+		got += i64(n)
+		sync.atomic_store(&d.got, got)
+	}
+	if t := sync.atomic_load(&d.total); t > 0 && got < t do return "Connection dropped (it resumes next time)"
+	return ""
 }

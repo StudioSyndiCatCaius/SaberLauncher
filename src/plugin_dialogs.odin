@@ -55,8 +55,20 @@ Plugin_Dialog :: struct {
 
 plugin_dialogs: [dynamic]Plugin_Dialog
 
+// A dialog is up. In the Channel scene only the channel's own dialogs show (moved to the
+// front); plugins' dialogs wait for the Menu.
 plugin_dialog_open :: proc() -> bool {
-	return len(plugin_dialogs) > 0
+	if len(plugin_dialogs) == 0 do return false
+	if scene != .Channel do return true
+	for d, i in plugin_dialogs {
+		if d.L != chan.L do continue
+		if i > 0 {
+			ordered_remove(&plugin_dialogs, i)
+			inject_at(&plugin_dialogs, 0, d)
+		}
+		return true
+	}
+	return false
 }
 
 plugin_for_state :: proc(L: ^lua_State) -> ^Plugin {
@@ -198,7 +210,7 @@ poll_process :: proc(d: ^Plugin_Dialog) {
 }
 
 draw_plugin_dialog :: proc(w, h: f32) {
-	if len(plugin_dialogs) == 0 do return
+	if !plugin_dialog_open() do return
 	d := &plugin_dialogs[0]
 	d.t = smooth_to(d.t, 1, 12)
 	switch d.kind {
@@ -325,8 +337,7 @@ wrap_text :: proc(text: string, size, max_w: f32) -> []string {
 
 dialog_new :: proc(L: ^lua_State, kind: Plugin_Dialog_Kind) -> Plugin_Dialog {
 	d := Plugin_Dialog{kind = kind, L = L, on_select = LUA_NOREF, progress = LUA_NOREF, on_end = LUA_NOREF, items = LUA_NOREF}
-	p := plugin_for_state(L)
-	d.title = strings.clone(p != nil ? p.name : "Plugin")
+	d.title = strings.clone(lua_owner_name(L))
 	d.text = strings.clone(lua_string(L, 1))
 	return d
 }
@@ -364,8 +375,7 @@ lua_dialog_process :: proc "c" (L: ^lua_State) -> c.int {
 lua_dialog_menu :: proc "c" (L: ^lua_State) -> c.int {
 	context = runtime.default_context()
 	if lua_type(L, 2) != LUA_TTABLE {
-		p := plugin_for_state(L)
-		plugin_logf("%s: Dialog_Menu: items must be a table", p != nil ? p.name : "Plugin")
+		plugin_logf("%s: Dialog_Menu: items must be a table", lua_owner_name(L))
 		return 0
 	}
 	d := dialog_new(L, .Menu)

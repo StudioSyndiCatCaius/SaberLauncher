@@ -565,6 +565,7 @@ Game_Menu_Row :: enum {
 	Cancel_Install,
 	Browse, // file explorer on the card's drive (fileexplorer.odin)
 	Plugin, // a plugin's game_actions row (Game_Menu_Item.action)
+	Delete, // Library only: removes the game's folder / ROM file (press twice)
 	Close,
 }
 
@@ -584,6 +585,7 @@ Game_Menu :: struct {
 	title:     string,
 	installed: bool, // already in the library: the row reads "Reinstall"
 	armed:     bool, // "Reinstall" pressed once
+	del_armed: bool, // "Delete from Library" pressed once
 	play:      bool, // Play chosen: launched by game_menu_update, outside the draw pass
 }
 
@@ -597,6 +599,7 @@ game_menu_open :: proc(s: Screen, i: int) {
 	game_menu.title = fmt.bprint(game_menu.title_buf[:], g.title)
 	game_menu.sel = 0
 	game_menu.armed = false
+	game_menu.del_armed = false
 	kind, can, _ := install_kind(g)
 	game_menu.installed = can && install_exists(g, kind)
 	plugins_game_actions_collect(g)
@@ -620,6 +623,7 @@ game_menu_rows :: proc(g: ^Game) -> []Game_Menu_Item {
 	}
 	if g.from_drive && g.drive_letter >= 'A' && g.drive_letter <= 'Z' do append(&rows, Game_Menu_Item{row = .Browse})
 	for _, i in plugin_game_actions do append(&rows, Game_Menu_Item{row = .Plugin, action = i})
+	if game_deletable(g) do append(&rows, Game_Menu_Item{row = .Delete})
 	append(&rows, Game_Menu_Item{row = .Close})
 	return rows[:]
 }
@@ -636,6 +640,7 @@ game_menu_label :: proc(g: ^Game, item: Game_Menu_Item) -> string {
 		return fmt.tprintf("Cancel Install (%d%%)", int(f64(sync.atomic_load(&install.done_bytes)) * 100 / f64(total)))
 	case .Browse: return "Browse Files"
 	case .Plugin: return plugin_game_actions[item.action].name
+	case .Delete: return game_menu.del_armed ? "Press Again to Delete (can't be undone)" : "Delete from Library"
 	case .Close: return "Close"
 	}
 	return ""
@@ -643,6 +648,7 @@ game_menu_label :: proc(g: ^Game, item: Game_Menu_Item) -> string {
 
 game_menu_sub :: proc(g: ^Game) -> string {
 	if install_is(g) do return "Installing to your library…"
+	if game_menu.del_armed do return "Warning: deletes the game's files and saves inside its folder"
 	kind, can, why := install_kind(g)
 	switch {
 	case !g.from_drive:
@@ -677,7 +683,10 @@ game_menu_input :: proc() {
 	}
 	rows := game_menu_rows(g)
 	game_menu.sel = clamp(game_menu.sel, 0, len(rows) - 1)
-	if nav_list(&game_menu.sel, len(rows)) do game_menu.armed = false
+	if nav_list(&game_menu.sel, len(rows)) {
+		game_menu.armed = false
+		game_menu.del_armed = false
+	}
 	if input.cancel || input.action || input.power {
 		game_menu_close()
 		return
@@ -725,8 +734,52 @@ game_menu_choose :: proc(g: ^Game, item: Game_Menu_Item) {
 		game_menu.open = false
 		sfx_click()
 		if msg := plugins_game_action_run(item.action); msg != "" do set_status("%s", msg)
+	case .Delete:
+		if !game_menu.del_armed {
+			game_menu.del_armed = true
+			sfx_click()
+			return
+		}
+		title := fmt.tprint(g.title)
+		if ok, err := game_delete(g); !ok {
+			set_status("%s", err)
+			sfx_back()
+			return
+		}
+		set_status("Deleted %s", title)
+		game_menu_close()
 	case .Close: game_menu_close()
 	}
+}
+
+// path is strictly inside dir (case-insensitive, either slash).
+path_inside :: proc(path, dir: string) -> bool {
+	if dir == "" || len(path) <= len(dir) + 1 do return false
+	if !eq_fold(path[:len(dir)], dir) do return false
+	c := path[len(dir)]
+	return c == '\\' || c == '/'
+}
+
+// Only library games living under GAMES or games_roms can be deleted.
+game_deletable :: proc(g: ^Game) -> bool {
+	if g.from_drive || g.root == "" do return false
+	return path_inside(g.root, app.games_dir) || path_inside(g.root, app.roms_dir)
+}
+
+// Removes a library game (its folder, or the loose ROM file) and rescans GAMES.
+game_delete :: proc(g: ^Game) -> (bool, string) {
+	if !game_deletable(g) do return false, "This game can't be deleted"
+	if install.running do return false, "Wait for the current install to finish"
+	root := strings.clone(g.root, context.temp_allocator)
+	err: os.Error
+	if os.is_dir(root) {
+		err = os.remove_all(root)
+	} else {
+		err = os.remove(root)
+	}
+	rescan_library()
+	if err != nil do return false, "Couldn't delete every file (is it in use?)"
+	return true, ""
 }
 
 draw_game_menu :: proc(w, h: f32) {
@@ -740,7 +793,10 @@ draw_game_menu :: proc(w, h: f32) {
 	labels := make([]string, len(rows), context.temp_allocator)
 	for r, i in rows do labels[i] = game_menu_label(g, r)
 	if clicked := draw_modal_menu(game_menu.title, game_menu_sub(g), labels, game_menu.sel, game_menu.t, w, h, game_menu.open); clicked >= 0 {
-		if clicked != game_menu.sel do game_menu.armed = false
+		if clicked != game_menu.sel {
+			game_menu.armed = false
+			game_menu.del_armed = false
+		}
 		game_menu.sel = clicked
 		game_menu_choose(g, rows[clicked])
 	}

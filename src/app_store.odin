@@ -124,7 +124,7 @@ app_store_installed_version :: proc(p: ^Store_Plugin) -> string {
 
 // Runs app.lua in a throwaway Lua state and reads its table.
 app_spec_read :: proc(path: string) -> (spec: App_Spec, err: string) {
-	L := luaL_newstate()
+	L := lua_new_state()
 	defer lua_close(L)
 	luaL_openlibs(L)
 	lua_set_global_string(L, "SABER_DIR", app.exe_dir)

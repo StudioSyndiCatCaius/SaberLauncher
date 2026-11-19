@@ -86,3 +86,8 @@ start_updater :: proc(args: string) -> bool {
 	r := win.ShellExecuteW(nil, win.L("open"), win.utf8_to_wstring(updater_path()), win.utf8_to_wstring(args), win.utf8_to_wstring(app.exe_dir), win.SW_SHOWNORMAL)
 	return uintptr(rawptr(r)) > 32
 }
+
+// A web page in the default browser.
+open_url :: proc(url: string) {
+	win.ShellExecuteW(nil, win.L("open"), win.utf8_to_wstring(url), nil, nil, win.SW_SHOWNORMAL)
+}

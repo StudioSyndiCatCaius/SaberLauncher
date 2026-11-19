@@ -20,6 +20,7 @@ Game :: struct {
 	play_bat:         string,
 	exe_name:         string,
 	launch_args:      string,
+	work_dir:         string,         // saber.ini workdir=: where the exe starts (relative = the game folder); "" = the game folder
 	records_path:     string,
 	date_first:       string,
 	date_last:        string,
@@ -77,6 +78,7 @@ game_from_folder :: proc(root: string, drive_label: string, from_drive: bool) ->
 		ini_str(text, "tags", &g.tags)
 		ini_str(text, "exe", &g.exe_name)
 		ini_str(text, "args", &g.launch_args)
+		ini_str(text, "workdir", &g.work_dir)
 		ini_str(text, "mod", &g.mod_name, nonempty = true)
 		// optional: lets plugins identify the game (covers, info), e.g. a dumped PS1 disc
 		if v, found := ini_get(text, "serial"); found && v != "" do g.disc_serial = ascii_upper(v)
@@ -175,7 +177,12 @@ game_launch :: proc(g: ^Game) -> (ok: bool, err: string) {
 	}
 
 	splash_begin(g)
-	pi, created := spawn_process("", cmd, g.root)
+	work := g.root
+	if wd := strings.trim_space(g.work_dir); wd != "" {
+		work = filepath.is_abs(wd) ? wd : tjoin({g.root, wd})
+		if !os.exists(work) do work = g.root
+	}
+	pi, created := spawn_process("", cmd, work)
 	if !created {
 		splash_end()
 		return false, fail_msg

@@ -250,6 +250,7 @@ TAB_LABELS := [Screen]string {
 	.Library  = "GAMES",
 	.Movies   = "MOVIES",
 	.Apps     = "APPS",
+	.Channels = "CHANNELS",
 	.Plugins  = "PLUGINS",
 	.Settings = "SETTINGS",
 }
@@ -262,43 +263,52 @@ draw_header :: proc(w: f32) {
 	rl.DrawRectangleRounded({PAD, 28, 4, 28}, 1, 4, COL_ACCENT)
 	draw_t("SABER", PAD + 16, 24, 32, COL_TEXT)
 
+	labels := make([dynamic]string, context.temp_allocator)
+	screens := make([dynamic]Screen, context.temp_allocator)
+	active := -1
+	for label, s in TAB_LABELS do if tab_visible(s) {
+		if s == app.screen do active = len(labels)
+		append(&labels, label)
+		append(&screens, s)
+	}
+	if hit := draw_tab_row(labels[:], active, w * 0.5, 33, &app.tab_x, &app.tab_w); hit >= 0 do go_screen(screens[hit])
+
+	draw_t_right(clock_label(), w - PAD, 26, 26, COL_TEXT)
+}
+
+// The header's tab row: labels centred on cx, a liquid glass lens sliding under the active one
+// (lens_x / lens_w keep its animation; 0 = not placed yet), LB / RB glyphs at the ends.
+// Returns the label clicked this frame, else -1.
+draw_tab_row :: proc(labels: []string, active: int, cx, ty: f32, lens_x, lens_w: ^f32) -> int {
 	size: f32 = 17
 	gap: f32 = 36
 	total: f32 = 0
-	shown := 0
-	for label, s in TAB_LABELS do if tab_visible(s) {
-		total += measure_t(label, size)
-		shown += 1
-	}
-	total += gap * f32(shown - 1)
-	x := (w - total) * 0.5
-	ty: f32 = 33
-	if app.tab_w > 0 {
-		// liquid lens that slides under the active tab
-		lens := rl.Rectangle{app.tab_x - 18, ty - 10, app.tab_w + 36, size + 20}
+	for label in labels do total += measure_t(label, size)
+	total += gap * f32(max(len(labels) - 1, 0))
+	x := cx - total * 0.5
+	if lens_w^ > 0 {
+		lens := rl.Rectangle{lens_x^ - 18, ty - 10, lens_w^ + 36, size + 20}
 		draw_glass(lens, lens.height * 0.5, mix_color(COL_PANEL_HI, COL_ACCENT, 0.2), 0.25, COL_ACCENT, 0.45, refract = 10)
 	}
 	draw_glyph("LB", x - 64, ty + 9)
-	for label, s in TAB_LABELS {
-		if !tab_visible(s) do continue
+	hit := -1
+	for label, i in labels {
 		tw := measure_t(label, size)
-		r := rl.Rectangle{x - 10, 16, tw + 20, HEADER_H - 24}
-		active := s == app.screen
+		r := rl.Rectangle{x - 10, ty - 17, tw + 20, HEADER_H - 24}
 		hovered := mouse_over(r)
-		if active {
-			app.tab_x = app.tab_w == 0 ? x : smooth_to(app.tab_x, x, 16)
-			app.tab_w = app.tab_w == 0 ? tw : smooth_to(app.tab_w, tw, 16)
+		if i == active {
+			lens_x^ = lens_w^ == 0 ? x : smooth_to(lens_x^, x, 16)
+			lens_w^ = lens_w^ == 0 ? tw : smooth_to(lens_w^, tw, 16)
 		}
-		draw_t(label, x, ty, size, active || hovered ? COL_TEXT : COL_MUTED)
+		draw_t(label, x, ty, size, i == active || hovered ? COL_TEXT : COL_MUTED)
 		if hovered {
 			hover_enter(label)
-			if rl.IsMouseButtonPressed(.LEFT) do go_screen(s)
+			if rl.IsMouseButtonPressed(.LEFT) do hit = i
 		}
 		x += tw + gap
 	}
 	draw_glyph("RB", x - gap + 28, ty + 9)
-
-	draw_t_right(clock_label(), w - PAD, 26, 26, COL_TEXT)
+	return hit
 }
 
 clock_label :: proc() -> string {
@@ -324,6 +334,7 @@ draw_footer :: proc(w, h: f32) {
 	case pview.open: // so does a plugin view
 	case explorer.open: explorer_hints(w, h)
 	case app.power_open, game_menu.open, home_menu.open, bios_menu.open, app_menu.open: draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Back"}})
+	case chan.preview: draw_hints(w, h, []Hint{{"A", chan.preview_btn == 1 ? "Start" : "Back"}, {"B", "Back"}})
 	case bkg_picker.open: draw_hints(w, h, []Hint{{"A", "Set Background"}, {"B", "Back"}})
 	case drives_menu.open, tabs_menu.open: draw_hints(w, h, []Hint{{"A", "Toggle"}, {"B", "Done"}})
 	case app.dropdown_open: draw_hints(w, h, []Hint{{"A", "Choose"}, {"B", "Close"}})
@@ -348,6 +359,8 @@ draw_footer :: proc(w, h: f32) {
 		} else {
 			draw_hints(w, h, []Hint{{"A", "Actions"}, {"B", "Home"}, {"Y", "Get Plugins"}, {"LB / RB", "Menus"}})
 		}
+	case app.screen == .Channels:
+		draw_hints(w, h, []Hint{{"A", "Open"}, {"B", "Home"}, {"Y", "Rescan"}, {"LB / RB", "Menus"}})
 	case app.screen == .Settings: draw_hints(w, h, []Hint{{"A", "Select"}, {"B", "Home"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
 	case app.screen == .Main:
 		draw_hints(w, h, []Hint{{"A", "Play"}, {"X", "Actions"}, {"Y", "Rescan"}, {"START", "Options"}, {"LB / RB", "Menus"}, {"SELECT", "Power"}})
@@ -638,13 +651,17 @@ draw_main_grid :: proc(cols: int, w, area_top, area_h: f32) {
 	}
 	max_aspect: f32 = 1 / 1.4
 	for &g in app.drive_games do max_aspect = max(max_aspect, aspect_of(&g))
-	slot_w := (w - PAD * 2 - gap * f32(cols - 1)) / f32(cols)
-	art_h := min((slot_w - 16) / max_aspect, view_h * HOME_GRID_MAX_H - 16 - TITLE_STRIP)
+	// fewer games than a row holds: size for the games there are, so they scale up; a single
+	// row has no neighbours to peek, so it may use the full height
+	used := min(n, cols)
+	total_rows := (n + cols - 1) / cols
+	slot_w := (w - PAD * 2 - gap * f32(used - 1)) / f32(used)
+	max_h: f32 = total_rows > 1 ? HOME_GRID_MAX_H : 1
+	art_h := min((slot_w - 16) / max_aspect, view_h * max_h - 16 - TITLE_STRIP)
 	card_h := art_h + 16 + TITLE_STRIP
 	row_h := card_h + gap
 
 	// focused row centred, clamped so the first / last row sit at the edges
-	total_rows := (n + cols - 1) / cols
 	content_h := f32(total_rows) * row_h - gap
 	target := f32(sel / cols) * row_h - (view_h - card_h) * 0.5
 	target = content_h <= view_h ? (content_h - view_h) * 0.5 : clamp(target, 0, content_h - view_h)
@@ -834,6 +851,7 @@ SETTINGS_LABELS := [Settings_Row]string {
 	.Music       = "Theme music",
 	.Music_Auto  = "Music autochange",
 	.Volume      = "Music volume",
+	.Wallpaper_Opacity = "Wallpaper opacity",
 	.Font        = "Font",
 	.Online_Mode = "Online Mode",
 	.Ignored_Drives = "Ignored drives",
@@ -862,6 +880,7 @@ SETTINGS_HELP := [Settings_Row]string {
 	.Music       = "Tracks from APP/assets/bgm.",
 	.Music_Auto  = "Picks a random track each period, never repeating until all were played.",
 	.Volume      = "Background music level.",
+	.Wallpaper_Opacity = "How strongly the wallpaper shows through the dark shading. 50% is the default.",
 	.Font        = "Bundled fonts from APP/assets/fonts, then Windows fonts.",
 	.Online_Mode = "Lets plugins use the internet (e.g. cover downloads). Turning it off stops all online activity at once.",
 	.Ignored_Drives = "Hard drives (besides the system drive) that are never scanned for games.",
@@ -940,7 +959,11 @@ draw_settings :: proc(w, h: f32) {
 			d = draw_stepper(val, app.settings.bgm != "" ? filepath.stem(app.settings.bgm) : "None", index_of_name(theme.bgm_files[:], app.settings.bgm), len(theme.bgm_files), focused)
 		case .Font: d = draw_stepper(val, ui_font_name, max(index_of_font(app.settings.font), 0), len(font_choices), focused)
 		case .Online_Mode: d = draw_stepper(val, app.settings.online_mode ? "On" : "Off", app.settings.online_mode ? 1 : 0, 2, focused)
-		case .Volume: draw_volume_slider(val, focused)
+		case .Volume:
+			if draw_slider(val, &app.settings.volume, focused, 1) {
+				if theme.has_music do rl.SetMusicVolume(theme.music, app.settings.volume)
+			}
+		case .Wallpaper_Opacity: draw_slider(val, &app.settings.bkg_opacity, focused, 2)
 		case .Save_States, .Launch_Mode:
 			save := row == .Save_States
 			if save do save_row = r
@@ -988,21 +1011,22 @@ draw_stepper :: proc(r: rl.Rectangle, value: string, idx, count: int, focused: b
 	return 0
 }
 
-draw_volume_slider :: proc(r: rl.Rectangle, focused: bool) {
+// 0..1 settings slider; id tells drags apart. Returns true while dragging; saves on release.
+draw_slider :: proc(r: rl.Rectangle, value: ^f32, focused: bool, id: int) -> (changed: bool) {
 	track := rl.Rectangle{r.x + 12, r.y + r.height * 0.5 - 3, r.width - 90, 6}
 	hit := rl.Rectangle{track.x - 8, r.y, track.width + 16, r.height}
-	if mouse_over(hit) && rl.IsMouseButtonPressed(.LEFT) do app.slider_drag = true
-	if app.slider_drag {
+	if mouse_over(hit) && rl.IsMouseButtonPressed(.LEFT) do app.slider_drag = id
+	if app.slider_drag == id {
 		if rl.IsMouseButtonDown(.LEFT) {
-			v := clamp((rl.GetMousePosition().x - draw_dx - track.x) / track.width, 0, 1)
-			app.settings.volume = v
-			if theme.has_music do rl.SetMusicVolume(theme.music, v)
+			value^ = clamp((rl.GetMousePosition().x - draw_dx - track.x) / track.width, 0, 1)
+			changed = true
 		} else {
-			app.slider_drag = false
-			set_volume(app.settings.volume) // save once on release
+			app.slider_drag = 0
+			value^ = clamp(f32(int(value^ * 100 + 0.5)) / 100, 0, 1)
+			save_settings() // once on release
 		}
 	}
-	v := app.settings.volume
+	v := value^
 	rl.DrawRectangleRounded(track, 1, 6, with_alpha(COL_SHADE, 90))
 	rl.DrawRectangleRounded({track.x, track.y, track.width * v, track.height}, 1, 6, focused ? COL_ACCENT : COL_MUTED)
 	kr: f32 = focused ? 13 : 11
@@ -1010,6 +1034,7 @@ draw_volume_slider :: proc(r: rl.Rectangle, focused: bool) {
 	draw_soft_shadow(knob, kr, 0.6)
 	draw_glass(knob, kr, rl.WHITE, ui_theme_light ? 0.5 : 0.28, COL_ACCENT, focused ? 0.5 : 0, refract = 6)
 	draw_t_right(fmt.tprintf("%d%%", int(v * 100 + 0.5)), r.x + r.width - 8, r.y + 11, 18, focused ? COL_TEXT : COL_MUTED)
+	return
 }
 
 draw_select_box :: proc(r: rl.Rectangle, value: string, focused: bool) {

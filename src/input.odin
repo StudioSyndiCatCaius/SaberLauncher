@@ -153,7 +153,7 @@ nav_grid :: proc(sel: ^int, count, cols: int) -> bool {
 	return false
 }
 
-SCREEN_ORDER :: [SCREEN_COUNT]Screen{.Main, .Library, .Movies, .Apps, .Plugins, .Settings}
+SCREEN_ORDER :: [SCREEN_COUNT]Screen{.Main, .Library, .Channels, .Movies, .Apps, .Plugins, .Settings}
 
 go_screen :: proc(next: Screen) {
 	if next == app.screen || !tab_visible(next) do return
@@ -189,6 +189,7 @@ draw_screen_body :: proc(s: Screen, w, h: f32) {
 	case .Library:  draw_grid_page(.Library, "GAMES", "No games yet. Add a folder with a _Saber subfolder to APP/games.", w, h)
 	case .Movies:   draw_grid_page(.Movies, "MOVIES", "No movies yet. Drop .mp4 / .mkv / .avi files into APP/movies.", w, h)
 	case .Apps:     draw_apps(w, h)
+	case .Channels: draw_channels(w, h)
 	case .Plugins:  draw_plugins(w, h)
 	case .Settings: draw_settings(w, h)
 	}
