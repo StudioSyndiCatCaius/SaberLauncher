@@ -30,6 +30,7 @@ Explorer_Entry :: struct {
 	size: i64,
 	thumb: Thumb_State,
 	tex:   rl.Texture2D, // .Ready
+	channel: bool, // a folder holding channel.lua: Y installs it as a channel
 }
 
 Thumb_State :: enum u8 {
@@ -62,6 +63,8 @@ File_Explorer :: struct {
 	view_idx:  int,
 	view_tex:  rl.Texture2D,
 	has_tex:   bool,
+	// channel install: a second Y confirms a channel without info.toml
+	chan_confirm: int,
 }
 
 explorer: File_Explorer
@@ -129,6 +132,7 @@ explorer_cd :: proc(dir: string, focus: string) {
 	explorer.sel, explorer.scroll = 0, 0
 	explorer.follow = true
 	explorer.err = ""
+	explorer.chan_confirm = -1
 
 	fis, ok := list_dir(explorer.dir)
 	if !ok {
@@ -138,7 +142,8 @@ explorer_cd :: proc(dir: string, focus: string) {
 	outer: for fi in fis {
 		for s in EXPLORER_SKIP do if eq_fold(fi.name, s) do continue outer
 		type := fi.type == .Directory ? EFileType.Directory : explorer_type(fi.name)
-		append(&explorer.entries, Explorer_Entry{name = strings.clone(fi.name), type = type, size = fi.size})
+		is_chan := type == .Directory && os.exists(tjoin({fi.fullpath, "channel.lua"}))
+		append(&explorer.entries, Explorer_Entry{name = strings.clone(fi.name), type = type, size = fi.size, channel = is_chan})
 	}
 	slice.sort_by(explorer.entries[:], proc(a, b: Explorer_Entry) -> bool {
 		da, db := a.type == .Directory, b.type == .Directory
@@ -265,6 +270,73 @@ explorer_add :: proc(i: int) {
 	sfx_click()
 }
 
+// The folder that Y installs as a channel for row i: a channel folder row, or the current
+// folder when row i is its channel.lua. "" = none.
+explorer_channel_src :: proc(i: int) -> string {
+	if i < 0 || i >= len(explorer.entries) do return ""
+	e := explorer.entries[i]
+	if e.channel do return explorer_path(i)
+	if e.type != .Directory && eq_fold(e.name, "channel.lua") && !explorer_at_root() {
+		return strings.trim_right(explorer.dir, "\\/")
+	}
+	return ""
+}
+
+// Copies a folder tree (used for channel installs; channels are small, so it's synchronous).
+explorer_copy_tree :: proc(src, dst: string) -> bool {
+	if os.make_directory_all(dst) != nil do return false
+	fis, ok := list_dir(src)
+	if !ok do return false
+	for fi in fis {
+		out := tjoin({dst, fi.name})
+		if fi.type == .Directory {
+			if !explorer_copy_tree(fi.fullpath, out) do return false
+		} else if fi.type == .Regular {
+			if os.copy_file(out, fi.fullpath) != nil do return false
+		}
+	}
+	return true
+}
+
+// Installs the channel folder for row i into APP/channels/<folder>/.
+explorer_install_channel :: proc(i: int) {
+	src := explorer_channel_src(i)
+	if src == "" do return
+	name := strings.clone(filepath.base(src), context.temp_allocator)
+	if name == "" || name == "." || name == ".." {
+		set_status("This folder can't be installed as a channel")
+		sfx_back()
+		return
+	}
+	if chan.dir == "" do channels_scan()
+	dst := tjoin({chan.dir, name})
+	if os.exists(dst) {
+		set_status("A channel named %s is already installed", name)
+		sfx_back()
+		return
+	}
+	no_info := !os.exists(tjoin({src, "info.toml"}))
+	if no_info && explorer.chan_confirm != i {
+		explorer.chan_confirm = i
+		set_status("%s has no info.toml (no name / description)  ·  press Y again to install anyway", name)
+		sfx_back()
+		return
+	}
+	explorer.chan_confirm = -1
+	part := tjoin({chan.dir, ".explorer_stage", name})
+	os.remove_all(part)
+	if !explorer_copy_tree(src, part) || os.rename(part, dst) != nil {
+		os.remove_all(part)
+		set_status("Couldn't install %s  ·  is APP writable?", name)
+		sfx_back()
+		return
+	}
+	os.remove(tjoin({chan.dir, ".explorer_stage"}))
+	chan.rescan_req = true
+	set_status("Installed channel %s%s", name, no_info ? "  ·  no info.toml" : "")
+	sfx_click()
+}
+
 explorer_can_add :: proc(i: int) -> bool {
 	return i >= 0 && i < len(explorer.entries) && (explorer.entries[i].type == .File_Image || explorer.entries[i].type == .File_Sound)
 }
@@ -353,7 +425,11 @@ explorer_input :: proc() {
 	case input.action, input.power: explorer_close()
 	case input.confirm: explorer_activate(explorer.sel)
 	case input.extra:
-		if explorer_can_add(explorer.sel) do explorer_add(explorer.sel)
+		if explorer_channel_src(explorer.sel) != "" {
+			explorer_install_channel(explorer.sel)
+		} else if explorer_can_add(explorer.sel) {
+			explorer_add(explorer.sel)
+		}
 	}
 }
 
@@ -371,7 +447,9 @@ explorer_hints :: proc(w, h: f32) {
 	}
 	hints := make([dynamic]Hint, context.temp_allocator)
 	append(&hints, Hint{"A", a})
-	if explorer_can_add(explorer.sel) {
+	if explorer_channel_src(explorer.sel) != "" {
+		append(&hints, Hint{"Y", "Install Channel"})
+	} else if explorer_can_add(explorer.sel) {
 		append(&hints, Hint{"Y", explorer.entries[explorer.sel].type == .File_Image ? "Add to Backgrounds" : "Add to Music"})
 	}
 	append(&hints, Hint{"B", explorer_at_root() ? "Close" : "Up"})
@@ -437,7 +515,11 @@ draw_file_explorer :: proc(w, h: f32) {
 		if e.thumb == .Ready {
 			draw_thumb(e.tex, {br.x + 6, br.y + 6, 50, ROW_H - 12})
 		} else if e.name != ".." {
-			draw_file_icon(e.type, {br.x + 31, br.y + ROW_H * 0.5}, playing)
+			if e.channel {
+				draw_channel_icon({br.x + 31, br.y + ROW_H * 0.5}, focused)
+			} else {
+				draw_file_icon(e.type, {br.x + 31, br.y + ROW_H * 0.5}, playing)
+			}
 		}
 		size_w: f32 = 0
 		if e.type != .Directory {
@@ -449,6 +531,11 @@ draw_file_explorer :: proc(w, h: f32) {
 			draw_up_icon({br.x + 31, br.y + ROW_H * 0.5}, focused)
 			draw_t("Up one folder", br.x + 68, br.y + 17, 19, COL_TEXT)
 			continue
+		}
+		if e.channel {
+			tag := "Channel"
+			size_w = measure_t(tag, 15) + 20
+			draw_t_right(tag, br.x + br.width - 18, br.y + 19, 15, COL_ACCENT)
 		}
 		draw_t_fit(e.name, br.x + 68, br.y + 17, br.width - 68 - size_w - 18, 19, playing ? COL_ACCENT : COL_TEXT, focused)
 	}
@@ -480,6 +567,17 @@ draw_explorer_viewer :: proc(w, h: f32) {
 		explorer_view_close()
 		sfx_back()
 	}
+}
+
+// A channel folder: a small TV tile (antenna + play glyph) in the accent colour.
+draw_channel_icon :: proc(c: rl.Vector2, active: bool) {
+	col := active ? COL_ACCENT : with_alpha(COL_ACCENT, 200)
+	rl.DrawLineEx({c.x - 6, c.y - 15}, {c.x, c.y - 8}, 2, col)
+	rl.DrawLineEx({c.x + 6, c.y - 15}, {c.x, c.y - 8}, 2, col)
+	tv := rl.Rectangle{c.x - 15, c.y - 8, 30, 19}
+	rl.DrawRectangleRounded(tv, 0.3, 6, with_alpha(COL_ACCENT, 60))
+	rl.DrawRectangleRoundedLinesEx(tv, 0.3, 6, 2, col)
+	rl.DrawTriangle({c.x - 4, c.y - 3}, {c.x - 4, c.y + 7}, {c.x + 5, c.y + 2}, col)
 }
 
 draw_file_icon :: proc(type: EFileType, c: rl.Vector2, active: bool) {

@@ -72,6 +72,7 @@ Channel :: struct {
 CHANNEL_COLS :: 4
 CHANNEL_SLOTS :: 12 // empty slots fill the grid up to this, like the Wii menu
 CHANNEL_ASPECT :: 0.6 // tile height / width
+CHANNEL_BGM_WAIT :: 0.35
 
 Channel_Menu_Row :: enum {
 	Resume,
@@ -768,7 +769,7 @@ channel_start :: proc(i: int) {
 	if theme.has_music do rl.PauseMusicStream(theme.music)
 	delete(chan.bgm_pending)
 	chan.bgm_pending = strings.clone(ch.bgm)
-	chan.bgm_wait = 0.5
+	chan.bgm_wait = CHANNEL_BGM_WAIT
 	scene_switch(.Channel)
 	sfx_start()
 	channel_logf("%s: started", ch.folder)
